@@ -1,0 +1,240 @@
+2026-09-29 14:20:40,057 [INFO] bian_demo_duanxian_5m - ============================================================
+2026-09-29 14:20:40,058 [INFO] bian_demo_duanxian_5m - 启动短期期策略监控系统 v3.0
+2026-09-29 14:20:40,058 [INFO] bian_demo_duanxian_5m - ============================================================
+2026-09-29 14:20:40,058 [INFO] bian_demo_duanxian_5m - 
+========================================
+2026-09-29 14:20:40,059 [INFO] bian_demo_duanxian_5m - 第 1 轮监控开始 | 2026-09-29 14:20:40
+2026-09-29 14:20:40,059 [INFO] bian_demo_duanxian_5m - ========================================
+2026-09-29 14:20:40,059 [INFO] bian_demo_duanxian_5m - 
+--- 处理 BTCUSDT ---
+2026-09-29 14:20:47,597 [INFO] bian_demo_duanxian_5m - ✓价格 83793.6
+2026-09-29 14:20:47,606 [INFO] bian_demo_duanxian_5m - ✓ BTCUSDT 无信号 | 4h多=False 4h空=True 1h多=True 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:20:47,609 [INFO] bian_demo_duanxian_5m - 
+--- 处理 ETHUSDT ---
+2026-09-29 14:20:52,892 [INFO] bian_demo_duanxian_5m - ✓价格 2691.66
+2026-09-29 14:20:52,942 [INFO] bian_demo_duanxian_5m - ✓ ETHUSDT 无信号 | 4h多=False 4h空=False 1h多=False 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:20:52,953 [INFO] bian_demo_duanxian_5m - 
+--- 处理 SOXLUSDT ---
+2026-09-29 14:20:56,646 [INFO] bian_demo_duanxian_5m - ✓价格 140.72
+2026-09-29 14:20:56,647 [INFO] bian_demo_duanxian_5m - ✓ SOXLUSDT 无信号 | 4h多=False 4h空=True 1h多=False 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:20:56,647 [INFO] bian_demo_duanxian_5m - 
+--- 处理 SNDKUSDT ---
+2026-09-29 14:21:00,652 [INFO] bian_demo_duanxian_5m - ✓价格 1719.19
+2026-09-29 14:21:00,652 [INFO] bian_demo_duanxian_5m - ✓ SNDKUSDT 无信号 | 4h多=False 4h空=True 1h多=False 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:21:00,652 [INFO] bian_demo_duanxian_5m - 
+--- 处理 BNBUSDT ---
+2026-09-29 14:21:04,442 [INFO] bian_demo_duanxian_5m - ✓价格 762.79
+2026-09-29 14:21:04,443 [INFO] bian_demo_duanxian_5m - ✓ BNBUSDT 无信号 | 4h多=False 4h空=True 1h多=False 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:21:04,443 [INFO] bian_demo_duanxian_5m - 本轮耗时: 24.4秒 | 距下次检查: 275.6秒
+2026-09-29 14:25:40,060 [INFO] bian_demo_duanxian_5m - 
+========================================
+2026-09-29 14:25:40,060 [INFO] bian_demo_duanxian_5m - 第 2 轮监控开始 | 2026-09-29 14:25:40
+2026-09-29 14:25:40,060 [INFO] bian_demo_duanxian_5m - ========================================
+2026-09-29 14:25:40,061 [INFO] bian_demo_duanxian_5m - 
+--- 处理 BTCUSDT ---
+2026-09-29 14:25:48,324 [INFO] bian_demo_duanxian_5m - ✓价格 83811.1
+2026-09-29 14:25:48,329 [INFO] bian_demo_duanxian_5m - ✓ BTCUSDT 无信号 | 4h多=False 4h空=True 1h多=True 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:25:48,329 [INFO] bian_demo_duanxian_5m - 
+--- 处理 ETHUSDT ---
+2026-09-29 14:26:00,150 [WARNING] bian_demo_duanxian_5m - 数据获取尝试 1 失败(ETHUSDT): HTTPSConnectionPool(host='fapi.binance.com', port=443): Max retries exceeded with url: /fapi/v1/klines?symbol=ETHUSDT&interval=5m&limit=500 (Caused by SSLError(SSLEOFError(8, 'EOF occurred in violation of protocol (_ssl.c:1129)')))
+2026-09-29 14:27:01,056 [INFO] bian_demo_duanxian_5m - ✓价格 2691.33
+2026-09-29 14:27:01,056 [INFO] bian_demo_duanxian_5m - ✓ ETHUSDT 无信号 | 4h多=False 4h空=False 1h多=False 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:27:01,057 [INFO] bian_demo_duanxian_5m - 
+--- 处理 SOXLUSDT ---
+2026-09-29 14:27:04,607 [INFO] bian_demo_duanxian_5m - ✓价格 141.3
+2026-09-29 14:27:04,608 [INFO] bian_demo_duanxian_5m - ✓ SOXLUSDT 无信号 | 4h多=False 4h空=True 1h多=False 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:27:04,608 [INFO] bian_demo_duanxian_5m - 
+--- 处理 SNDKUSDT ---
+2026-09-29 14:27:08,243 [INFO] bian_demo_duanxian_5m - ✓价格 1722.23
+2026-09-29 14:27:08,243 [INFO] bian_demo_duanxian_5m - ✓ SNDKUSDT 无信号 | 4h多=False 4h空=True 1h多=False 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:27:08,243 [INFO] bian_demo_duanxian_5m - 
+--- 处理 BNBUSDT ---
+2026-09-29 14:27:12,016 [INFO] bian_demo_duanxian_5m - ✓价格 762.43
+2026-09-29 14:27:12,017 [INFO] bian_demo_duanxian_5m - ✓ BNBUSDT 无信号 | 4h多=False 4h空=True 1h多=False 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:27:12,017 [INFO] bian_demo_duanxian_5m - 本轮耗时: 92.0秒 | 距下次检查: 208.0秒
+2026-09-29 14:30:40,063 [INFO] bian_demo_duanxian_5m - 
+========================================
+2026-09-29 14:30:40,063 [INFO] bian_demo_duanxian_5m - 第 3 轮监控开始 | 2026-09-29 14:30:40
+2026-09-29 14:30:40,063 [INFO] bian_demo_duanxian_5m - ========================================
+2026-09-29 14:30:40,063 [INFO] bian_demo_duanxian_5m - 
+--- 处理 BTCUSDT ---
+2026-09-29 14:30:43,767 [INFO] bian_demo_duanxian_5m - ✓价格 83846.7
+2026-09-29 14:30:43,767 [INFO] bian_demo_duanxian_5m - ✓ BTCUSDT 无信号 | 4h多=False 4h空=True 1h多=True 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:30:43,767 [INFO] bian_demo_duanxian_5m - 
+--- 处理 ETHUSDT ---
+2026-09-29 14:30:47,790 [INFO] bian_demo_duanxian_5m - ✓价格 2694.4
+2026-09-29 14:30:47,790 [INFO] bian_demo_duanxian_5m - ✓ ETHUSDT 无信号 | 4h多=False 4h空=False 1h多=False 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:30:47,790 [INFO] bian_demo_duanxian_5m - 
+--- 处理 SOXLUSDT ---
+2026-09-29 14:30:51,692 [INFO] bian_demo_duanxian_5m - ✓价格 142.05
+2026-09-29 14:30:51,692 [INFO] bian_demo_duanxian_5m - ✓ SOXLUSDT 无信号 | 4h多=False 4h空=True 1h多=False 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:30:51,693 [INFO] bian_demo_duanxian_5m - 
+--- 处理 SNDKUSDT ---
+2026-09-29 14:30:55,513 [INFO] bian_demo_duanxian_5m - ✓价格 1726.36
+2026-09-29 14:30:55,519 [INFO] bian_demo_duanxian_5m - ✓ SNDKUSDT 无信号 | 4h多=False 4h空=True 1h多=False 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:30:55,526 [INFO] bian_demo_duanxian_5m - 
+--- 处理 BNBUSDT ---
+2026-09-29 14:30:59,306 [INFO] bian_demo_duanxian_5m - ✓价格 763.29
+2026-09-29 14:30:59,307 [INFO] bian_demo_duanxian_5m - ✓ BNBUSDT 无信号 | 4h多=False 4h空=True 1h多=False 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:30:59,307 [INFO] bian_demo_duanxian_5m - 本轮耗时: 19.2秒 | 距下次检查: 280.8秒
+2026-09-29 14:35:40,068 [INFO] bian_demo_duanxian_5m - 
+========================================
+2026-09-29 14:35:40,068 [INFO] bian_demo_duanxian_5m - 第 4 轮监控开始 | 2026-09-29 14:35:40
+2026-09-29 14:35:40,068 [INFO] bian_demo_duanxian_5m - ========================================
+2026-09-29 14:35:40,068 [INFO] bian_demo_duanxian_5m - 
+--- 处理 BTCUSDT ---
+2026-09-29 14:35:43,771 [INFO] bian_demo_duanxian_5m - ✓价格 83846.9
+2026-09-29 14:35:43,771 [INFO] bian_demo_duanxian_5m - ✓ BTCUSDT 无信号 | 4h多=False 4h空=True 1h多=True 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:35:43,771 [INFO] bian_demo_duanxian_5m - 
+--- 处理 ETHUSDT ---
+2026-09-29 14:35:47,460 [INFO] bian_demo_duanxian_5m - ✓价格 2694.72
+2026-09-29 14:35:47,460 [INFO] bian_demo_duanxian_5m - ✓ ETHUSDT 无信号 | 4h多=False 4h空=False 1h多=False 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:35:47,461 [INFO] bian_demo_duanxian_5m - 
+--- 处理 SOXLUSDT ---
+2026-09-29 14:35:51,099 [INFO] bian_demo_duanxian_5m - ✓价格 142.04
+2026-09-29 14:35:51,099 [INFO] bian_demo_duanxian_5m - ✓ SOXLUSDT 无信号 | 4h多=False 4h空=True 1h多=False 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:35:51,099 [INFO] bian_demo_duanxian_5m - 
+--- 处理 SNDKUSDT ---
+2026-09-29 14:35:54,860 [INFO] bian_demo_duanxian_5m - ✓价格 1723.55
+2026-09-29 14:35:54,861 [INFO] bian_demo_duanxian_5m - ✓ SNDKUSDT 无信号 | 4h多=False 4h空=True 1h多=False 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:35:54,861 [INFO] bian_demo_duanxian_5m - 
+--- 处理 BNBUSDT ---
+2026-09-29 14:35:58,453 [INFO] bian_demo_duanxian_5m - ✓价格 763.04
+2026-09-29 14:35:58,453 [INFO] bian_demo_duanxian_5m - ✓ BNBUSDT 无信号 | 4h多=False 4h空=True 1h多=False 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:35:58,453 [INFO] bian_demo_duanxian_5m - 本轮耗时: 18.4秒 | 距下次检查: 281.6秒
+2026-09-29 14:40:40,073 [INFO] bian_demo_duanxian_5m - 
+========================================
+2026-09-29 14:40:40,073 [INFO] bian_demo_duanxian_5m - 第 5 轮监控开始 | 2026-09-29 14:40:40
+2026-09-29 14:40:40,073 [INFO] bian_demo_duanxian_5m - ========================================
+2026-09-29 14:40:40,073 [INFO] bian_demo_duanxian_5m - 
+--- 处理 BTCUSDT ---
+2026-09-29 14:40:45,506 [INFO] bian_demo_duanxian_5m - ✓价格 83845.6
+2026-09-29 14:40:45,506 [INFO] bian_demo_duanxian_5m - ✓ BTCUSDT 无信号 | 4h多=False 4h空=True 1h多=True 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:40:45,506 [INFO] bian_demo_duanxian_5m - 
+--- 处理 ETHUSDT ---
+2026-09-29 14:40:49,399 [INFO] bian_demo_duanxian_5m - ✓价格 2697.5
+2026-09-29 14:40:49,400 [INFO] bian_demo_duanxian_5m - ✓ ETHUSDT 无信号 | 4h多=False 4h空=False 1h多=False 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:40:49,400 [INFO] bian_demo_duanxian_5m - 
+--- 处理 SOXLUSDT ---
+2026-09-29 14:40:53,025 [INFO] bian_demo_duanxian_5m - ✓价格 142.15
+2026-09-29 14:40:53,026 [INFO] bian_demo_duanxian_5m - ✓ SOXLUSDT 无信号 | 4h多=False 4h空=True 1h多=False 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:40:53,027 [INFO] bian_demo_duanxian_5m - 
+--- 处理 SNDKUSDT ---
+2026-09-29 14:40:56,814 [INFO] bian_demo_duanxian_5m - ✓价格 1723.16
+2026-09-29 14:40:56,814 [INFO] bian_demo_duanxian_5m - ✓ SNDKUSDT 无信号 | 4h多=False 4h空=True 1h多=False 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:40:56,814 [INFO] bian_demo_duanxian_5m - 
+--- 处理 BNBUSDT ---
+2026-09-29 14:41:00,574 [INFO] bian_demo_duanxian_5m - ✓价格 763.69
+2026-09-29 14:41:00,575 [INFO] bian_demo_duanxian_5m - ✓ BNBUSDT 无信号 | 4h多=False 4h空=True 1h多=False 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:41:00,576 [INFO] bian_demo_duanxian_5m - 本轮耗时: 20.5秒 | 距下次检查: 279.5秒
+2026-09-29 14:45:40,075 [INFO] bian_demo_duanxian_5m - 
+========================================
+2026-09-29 14:45:40,075 [INFO] bian_demo_duanxian_5m - 第 6 轮监控开始 | 2026-09-29 14:45:40
+2026-09-29 14:45:40,075 [INFO] bian_demo_duanxian_5m - ========================================
+2026-09-29 14:45:40,075 [INFO] bian_demo_duanxian_5m - 
+--- 处理 BTCUSDT ---
+2026-09-29 14:45:44,264 [INFO] bian_demo_duanxian_5m - ✓价格 83872.9
+2026-09-29 14:45:44,264 [INFO] bian_demo_duanxian_5m - ✓ BTCUSDT 无信号 | 4h多=False 4h空=True 1h多=True 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:45:44,265 [INFO] bian_demo_duanxian_5m - 
+--- 处理 ETHUSDT ---
+2026-09-29 14:45:44,922 [INFO] bian_demo_duanxian_New_New - 已加载 Binance Futures 交易规则
+2026-09-29 14:45:44,922 [INFO] bian_demo_duanxian_New_New - ============================================================
+2026-09-29 14:45:44,922 [INFO] bian_demo_duanxian_New_New - 启动短线多周期策略监控系统 v4.0
+2026-09-29 14:45:44,922 [INFO] bian_demo_duanxian_New_New - ============================================================
+2026-09-29 14:45:44,922 [INFO] bian_demo_duanxian_New_New - 
+========================================
+2026-09-29 14:45:44,927 [INFO] bian_demo_duanxian_New_New - 第 1 轮监控开始 | 2026-09-29 14:45:44
+2026-09-29 14:45:44,927 [INFO] bian_demo_duanxian_New_New - ========================================
+2026-09-29 14:45:44,927 [INFO] bian_demo_duanxian_New_New - 
+--- 处理 BTCUSDT ---
+2026-09-29 14:45:45,943 [INFO] bian_demo_duanxian_New_New - BTCUSDT 上一根已收盘15m参考价: 83868.0000
+2026-09-29 14:45:45,943 [INFO] bian_demo_duanxian_New_New - ✓ BTCUSDT 无信号 | 4h多=False 4h空=True 1h多=True 1h空=False 15m多触发=False 15m空触发=False
+2026-09-29 14:45:45,944 [INFO] bian_demo_duanxian_New_New - 
+--- 处理 ETHUSDT ---
+2026-09-29 14:45:46,966 [INFO] bian_demo_duanxian_New_New - ETHUSDT 上一根已收盘15m参考价: 2697.6100
+2026-09-29 14:45:46,967 [INFO] bian_demo_duanxian_New_New - ✓ ETHUSDT 无信号 | 4h多=False 4h空=False 1h多=False 1h空=False 15m多触发=False 15m空触发=False
+2026-09-29 14:45:46,967 [INFO] bian_demo_duanxian_New_New - 
+--- 处理 SOXLUSDT ---
+2026-09-29 14:45:47,875 [INFO] bian_demo_duanxian_New_New - SOXLUSDT 上一根已收盘15m参考价: 142.0700
+2026-09-29 14:45:47,875 [INFO] bian_demo_duanxian_New_New - ✓ SOXLUSDT 无信号 | 4h多=False 4h空=True 1h多=False 1h空=False 15m多触发=False 15m空触发=False
+2026-09-29 14:45:47,875 [INFO] bian_demo_duanxian_New_New - 
+--- 处理 SNDKUSDT ---
+2026-09-29 14:45:48,466 [INFO] bian_demo_duanxian_5m - ✓价格 2697.61
+2026-09-29 14:45:48,467 [INFO] bian_demo_duanxian_5m - ✓ ETHUSDT 无信号 | 4h多=False 4h空=False 1h多=False 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:45:48,467 [INFO] bian_demo_duanxian_5m - 
+--- 处理 SOXLUSDT ---
+2026-09-29 14:45:48,723 [INFO] bian_demo_duanxian_New_New - SNDKUSDT 上一根已收盘15m参考价: 1723.0500
+2026-09-29 14:45:48,723 [INFO] bian_demo_duanxian_New_New - ✓ SNDKUSDT 无信号 | 4h多=False 4h空=True 1h多=False 1h空=False 15m多触发=False 15m空触发=False
+2026-09-29 14:45:48,725 [INFO] bian_demo_duanxian_New_New - 
+--- 处理 BNBUSDT ---
+2026-09-29 14:45:49,571 [INFO] bian_demo_duanxian_New_New - BNBUSDT 上一根已收盘15m参考价: 763.6900
+2026-09-29 14:45:49,571 [INFO] bian_demo_duanxian_New_New - ✓ BNBUSDT 无信号 | 4h多=False 4h空=True 1h多=False 1h空=False 15m多触发=False 15m空触发=False
+2026-09-29 14:45:49,572 [INFO] bian_demo_duanxian_New_New - 本轮耗时: 4.7秒 | 距下次检查: 295.3秒
+2026-09-29 14:45:52,440 [INFO] bian_demo_duanxian_5m - ✓价格 142.09
+2026-09-29 14:45:52,440 [INFO] bian_demo_duanxian_5m - ✓ SOXLUSDT 无信号 | 4h多=False 4h空=True 1h多=False 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:45:52,441 [INFO] bian_demo_duanxian_5m - 
+--- 处理 SNDKUSDT ---
+2026-09-29 14:45:56,471 [INFO] bian_demo_duanxian_5m - ✓价格 1723.8
+2026-09-29 14:45:56,471 [INFO] bian_demo_duanxian_5m - ✓ SNDKUSDT 无信号 | 4h多=False 4h空=True 1h多=False 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:45:56,473 [INFO] bian_demo_duanxian_5m - 
+--- 处理 BNBUSDT ---
+2026-09-29 14:46:00,529 [INFO] bian_demo_duanxian_5m - ✓价格 763.62
+2026-09-29 14:46:00,529 [INFO] bian_demo_duanxian_5m - ✓ BNBUSDT 无信号 | 4h多=False 4h空=True 1h多=False 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:46:00,530 [INFO] bian_demo_duanxian_5m - 本轮耗时: 20.5秒 | 距下次检查: 279.5秒
+2026-09-29 14:46:53,518 [INFO] bian_demo_duanxian_New_New - 已加载 Binance Futures 交易规则
+2026-09-29 14:46:53,518 [INFO] bian_demo_duanxian_New_New - ============================================================
+2026-09-29 14:46:53,518 [INFO] bian_demo_duanxian_New_New - 启动短线多周期策略监控系统 v4.0
+2026-09-29 14:46:53,518 [INFO] bian_demo_duanxian_New_New - ============================================================
+2026-09-29 14:46:53,518 [INFO] bian_demo_duanxian_New_New - 
+========================================
+2026-09-29 14:46:53,523 [INFO] bian_demo_duanxian_New_New - 第 1 轮监控开始 | 2026-09-29 14:46:53
+2026-09-29 14:46:53,523 [INFO] bian_demo_duanxian_New_New - ========================================
+2026-09-29 14:46:53,523 [INFO] bian_demo_duanxian_New_New - 
+--- 处理 BTCUSDT ---
+2026-09-29 14:46:54,280 [INFO] bian_demo_duanxian_New_New - BTCUSDT 上一根已收盘15m参考价: 83868.0000
+2026-09-29 14:46:54,280 [INFO] bian_demo_duanxian_New_New - ✓ BTCUSDT 无信号 | 4h多=False 4h空=True 1h多=True 1h空=False 15m多触发=False 15m空触发=False
+2026-09-29 14:46:54,280 [INFO] bian_demo_duanxian_New_New - 
+--- 处理 ETHUSDT ---
+2026-09-29 14:46:54,500 [INFO] bian_demo_duanxian_5m - ============================================================
+2026-09-29 14:46:54,500 [INFO] bian_demo_duanxian_5m - 启动短期期策略监控系统 v3.0
+2026-09-29 14:46:54,500 [INFO] bian_demo_duanxian_5m - ============================================================
+2026-09-29 14:46:54,500 [INFO] bian_demo_duanxian_5m - 
+========================================
+2026-09-29 14:46:54,500 [INFO] bian_demo_duanxian_5m - 第 1 轮监控开始 | 2026-09-29 14:46:54
+2026-09-29 14:46:54,500 [INFO] bian_demo_duanxian_5m - ========================================
+2026-09-29 14:46:54,500 [INFO] bian_demo_duanxian_5m - 
+--- 处理 BTCUSDT ---
+2026-09-29 14:46:55,042 [INFO] bian_demo_duanxian_New_New - ETHUSDT 上一根已收盘15m参考价: 2697.6100
+2026-09-29 14:46:55,042 [INFO] bian_demo_duanxian_New_New - ✓ ETHUSDT 无信号 | 4h多=False 4h空=False 1h多=False 1h空=False 15m多触发=False 15m空触发=False
+2026-09-29 14:46:55,042 [INFO] bian_demo_duanxian_New_New - 
+--- 处理 SOXLUSDT ---
+2026-09-29 14:46:55,803 [INFO] bian_demo_duanxian_New_New - SOXLUSDT 上一根已收盘15m参考价: 142.0700
+2026-09-29 14:46:55,804 [INFO] bian_demo_duanxian_New_New - ✓ SOXLUSDT 无信号 | 4h多=False 4h空=True 1h多=False 1h空=False 15m多触发=False 15m空触发=False
+2026-09-29 14:46:55,804 [INFO] bian_demo_duanxian_New_New - 
+--- 处理 SNDKUSDT ---
+2026-09-29 14:46:56,545 [INFO] bian_demo_duanxian_New_New - SNDKUSDT 上一根已收盘15m参考价: 1723.0500
+2026-09-29 14:46:56,546 [INFO] bian_demo_duanxian_New_New - ✓ SNDKUSDT 无信号 | 4h多=False 4h空=True 1h多=False 1h空=False 15m多触发=False 15m空触发=False
+2026-09-29 14:46:56,547 [INFO] bian_demo_duanxian_New_New - 
+--- 处理 BNBUSDT ---
+2026-09-29 14:46:57,274 [INFO] bian_demo_duanxian_New_New - BNBUSDT 上一根已收盘15m参考价: 763.6900
+2026-09-29 14:46:57,274 [INFO] bian_demo_duanxian_New_New - ✓ BNBUSDT 无信号 | 4h多=False 4h空=True 1h多=False 1h空=False 15m多触发=False 15m空触发=False
+2026-09-29 14:46:57,274 [INFO] bian_demo_duanxian_New_New - 本轮耗时: 3.8秒 | 距下次检查: 296.2秒
+2026-09-29 14:46:58,333 [INFO] bian_demo_duanxian_5m - ✓价格 83870.2
+2026-09-29 14:46:58,334 [INFO] bian_demo_duanxian_5m - ✓ BTCUSDT 无信号 | 4h多=False 4h空=True 1h多=True 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:46:58,335 [INFO] bian_demo_duanxian_5m - 
+--- 处理 ETHUSDT ---
+2026-09-29 14:47:01,959 [INFO] bian_demo_duanxian_5m - ✓价格 2697.76
+2026-09-29 14:47:01,960 [INFO] bian_demo_duanxian_5m - ✓ ETHUSDT 无信号 | 4h多=False 4h空=False 1h多=False 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:47:01,960 [INFO] bian_demo_duanxian_5m - 
+--- 处理 SOXLUSDT ---
+2026-09-29 14:47:05,764 [INFO] bian_demo_duanxian_5m - ✓价格 141.93
+2026-09-29 14:47:05,765 [INFO] bian_demo_duanxian_5m - ✓ SOXLUSDT 无信号 | 4h多=False 4h空=True 1h多=False 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:47:05,765 [INFO] bian_demo_duanxian_5m - 
+--- 处理 SNDKUSDT ---
+2026-09-29 14:47:09,582 [INFO] bian_demo_duanxian_5m - ✓价格 1722.83
+2026-09-29 14:47:09,583 [INFO] bian_demo_duanxian_5m - ✓ SNDKUSDT 无信号 | 4h多=False 4h空=True 1h多=False 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:47:09,583 [INFO] bian_demo_duanxian_5m - 
+--- 处理 BNBUSDT ---
+2026-09-29 14:47:13,339 [INFO] bian_demo_duanxian_5m - ✓价格 763.81
+2026-09-29 14:47:13,339 [INFO] bian_demo_duanxian_5m - ✓ BNBUSDT 无信号 | 4h多=False 4h空=True 1h多=False 1h空=False 15m多=True 15m空=False 5m多触发=False 5m空触发=False
+2026-09-29 14:47:13,339 [INFO] bian_demo_duanxian_5m - 本轮耗时: 18.8秒 | 距下次检查: 281.2秒

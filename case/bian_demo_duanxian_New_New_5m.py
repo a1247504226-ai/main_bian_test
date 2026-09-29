@@ -67,18 +67,18 @@ plt.rcParams.update(
 
 CONFIG: Dict[str, Dict[str, Any]] = {
     "email": {
-        "from": os.getenv("MONITOR_EMAIL_FROM", ""),
-        "to": os.getenv("MONITOR_EMAIL_TO", ""),
-        "password": os.getenv("MONITOR_EMAIL_PASSWORD", ""),
-        "server": os.getenv("MONITOR_EMAIL_SERVER", "smtp.163.com"),
-        "port": int(os.getenv("MONITOR_EMAIL_PORT", "465")),
-        "max_retries": 3,
+        'from': 'a1247504226@163.com',
+        'to': '1247504226@qq.com',
+        'password': 'XKCINXNMOMMDCAFI',
+        'server': 'smtp.163.com',
+        'port': 465,
+        'max_retries': 3,
         "cooldown": timedelta(minutes=1),
         "alert_cooldown": timedelta(minutes=30),
     },
     "network": {
-        "http_proxy": os.getenv("HTTP_PROXY", ""),
-        "https_proxy": os.getenv("HTTPS_PROXY", ""),
+        "http_proxy": os.getenv("HTTP_PROXY", "http://127.0.0.1:7897"),
+        "https_proxy": os.getenv("HTTPS_PROXY", "https://127.0.0.1:7897"),
         "request_timeout": 20,
     },
     "trading": {
