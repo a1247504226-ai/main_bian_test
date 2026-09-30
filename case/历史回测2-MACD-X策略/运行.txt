@@ -5,4 +5,5 @@ python macdx_strategy.py --symbol BTCUSDT --interval 4h
 python macdx_strategy.py --trend-ema 150 --confirm 2  # 调参
 
 
-schtasks /Create /TN "MACD-X每日信号" /TR "C:\Users\hongji\WorkBuddy AI\2026-09-29-16-53-45\run_signal.bat" /SC DAILY /ST 08:01 /F
+
+schtasks /Create /TN "MACD-X-Daily" /TR "C:\Users\hongji\Downloads\Documents\新建文件夹 (2)\历史回测2-MACD-X策略\run_signal.bat" /SC DAILY /ST 08:01 /F

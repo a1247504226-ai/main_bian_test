@@ -1,75 +1,81 @@
 @echo off
 REM ============================================================================
-REM  MACD-X 每日信号检查 + 邮件推送
+REM  MACD-X daily signal check + email push        (run_signal.bat)
 REM
-REM  为什么定 08:01：币安日线在 UTC 00:00 收盘 = 北京时间 08:00，
-REM  08:01 跑正好拿到刚收盘的那根日线，1 分钟足够 API 更新数据。
+REM  Schedule: 08:01 Beijing time daily.
+REM  Binance daily candles close at UTC 00:00 = 08:00 Beijing, so 08:01 picks up
+REM  the just-closed daily bar, and 1 minute is enough for the API to update.
 REM
-REM  【重要】本文件必须保存为 ANSI/GBK 编码，不能用 UTF-8！
-REM  cmd.exe 按 GBK 解析批处理文件，存成 UTF-8 会导致中文注释字节错位，
-REM  把后续命令行全部冲乱（报"不是内部或外部命令"）。用记事本另存为
-REM  "ANSI" 即可。
+REM  Logging: ONE FILE PER MONTH -> logs\macdx_YYYYMM.log
+REM  Every run appends to the same monthly file, so nothing is ever replaced.
+REM  On the 1st of a new month the name changes automatically
+REM  (e.g. macdx_202609.log -> macdx_202610.log) and a fresh file is created.
+REM  Old months are KEPT - there is no rotation and no deletion.
 REM
-REM  【日志编码】日志文件是 UTF-8（由 Python 写出），用记事本 / VS Code 打开。
-REM  本 bat 自己写入日志的行刻意只用 ASCII，避免和 Python 的 UTF-8 输出混编码。
+REM  WHY THIS FILE IS PURE ASCII:
+REM    cmd.exe parses .bat files using the console codepage (GBK on Chinese
+REM    Windows). Non-ASCII bytes in a .bat get mis-aligned and swallow the
+REM    following characters, producing bogus "not a valid command" errors.
+REM    Keeping the whole file ASCII removes that entire class of bug.
+REM    The log is written by Python in UTF-8 (with BOM) instead - one encoding
+REM    only, so it never gets garbled. Do NOT redirect this script's output
+REM    with ">>": cmd's %date% expands to Chinese on some locales and would mix
+REM    GBK bytes into the UTF-8 log.
 REM
-REM  ==== 注册定时任务（管理员身份运行 CMD，执行一次即可）====
-REM  schtasks /Create /TN "MACD-X每日信号" /TR "C:\Users\hongji\WorkBuddy AI\2026-09-29-16-53-45\run_signal.bat" /SC DAILY /ST 08:01 /F
+REM  REGISTER THE SCHEDULED TASK (run once in an ADMIN cmd):
+REM    schtasks /Create /TN "MACD-X-Daily" /TR "C:\Users\hongji\WorkBuddy AI\2026-09-29-16-53-45\run_signal.bat" /SC DAILY /ST 08:01 /F
 REM
-REM  查看：  schtasks /Query /TN "MACD-X每日信号" /V /FO LIST
-REM  立即跑：schtasks /Run /TN "MACD-X每日信号"
-REM  删除：  schtasks /Delete /TN "MACD-X每日信号" /F
+REM  View:   schtasks /Query /TN "MACD-X-Daily" /V /FO LIST
+REM  Run:    schtasks /Run /TN "MACD-X-Daily"
+REM  Delete: schtasks /Delete /TN "MACD-X-Daily" /F
 REM
-REM  注意：任务计划程序默认"仅在用户登录时运行"，且电脑关机/休眠时会跳过。
-REM  要更可靠，注册后打开"任务计划程序"图形界面，在任务属性里勾选：
-REM     [V] 不管用户是否登录都要运行
-REM     [V] 如果错过计划则尽快启动
+REM  NOTE: Task Scheduler by default runs tasks only when the user is logged on,
+REM  and skips them while the PC is off/asleep. For reliability, open the
+REM  Task Scheduler GUI afterwards and tick:
+REM     [V] Run whether user is logged on or not
+REM     [V] Run as soon as possible after a scheduled start is missed
 REM ============================================================================
 
-chcp 936 >nul
+REM UTF-8 console so Python's output shows correctly; safe because this file is ASCII
+chcp 65001 >nul
 set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
 cd /d "%~dp0"
 
-REM ==== 监控标的与下单参数（要改就改这三行）====
-set SYMBOLS=BTCUSDT ETHUSDT SOLUSDT
+REM ==== Symbols and order sizing (edit these three lines) ====
+set SYMBOLS=BTCUSDT ETHUSDT BNBUSDT SOLUSDT DOGEUSDT
 set CAPITAL=1000
 set FRAC=0.7
 
-REM ==== 找 Python：优先独立环境，其次系统安装路径，最后 PATH ====
+REM ==== Locate Python: isolated runtime first, then system install, then PATH ====
 set PY=
 if exist "C:\Users\hongji\.workbuddy-ai\binaries\python\versions\3.13.12\python.exe" set PY=C:\Users\hongji\.workbuddy-ai\binaries\python\versions\3.13.12\python.exe
 if not defined PY if exist "C:\Users\hongji\AppData\Local\Programs\Python\Python39\python.exe" set PY=C:\Users\hongji\AppData\Local\Programs\Python\Python39\python.exe
 if not defined PY for /f "delims=" %%i in ('where python 2^>nul') do if not defined PY set PY=%%i
 if not defined PY (
     if not exist logs mkdir logs
-    echo %date% %time% [ERROR] python.exe not found, edit PY in run_signal.bat >> logs\macdx_run.log
-    echo [ERROR] python.exe not found. Please edit the PY variable in this file.
+    echo %date% %time% [ERROR] python.exe not found >> logs\_bat_error.log
+    echo [ERROR] python.exe not found. Edit the PY variable in run_signal.bat
     pause
     exit /b 1
 )
 
-REM ==== 日志按天分文件（用 PowerShell 取日期，%date% 在不同区域格式下会错位）====
+REM ==== Log file: ONE PER MONTH, logs\macdx_YYYYMM.log ====
 if not exist logs mkdir logs
 set TODAY=
 for /f "delims=" %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd" 2^>nul') do set TODAY=%%i
+REM Fallback if PowerShell is unavailable. %date% is locale-dependent but works
+REM on Chinese Windows, where it expands to something like 2026/09/30.
 if not defined TODAY set TODAY=%date:~0,4%%date:~5,2%%date:~8,2%
-set LOG=logs\macdx_%TODAY%.log
+REM First 6 chars of yyyyMMdd = yyyyMM
+set LOGMONTH=%TODAY:~0,6%
+REM Guard: if both date sources failed, avoid a file named macdx_unknow.log
+echo %LOGMONTH%|findstr /r "^[0-9][0-9][0-9][0-9][0-9][0-9]$" >nul
+if errorlevel 1 set LOGMONTH=unknown
+set LOG=logs\macdx_%LOGMONTH%.log
 
-REM ==== 以下写入日志的行只用 ASCII，避免和 Python 的 UTF-8 输出混编码 ====
-echo. >> "%LOG%"
-echo ============================================================ >> "%LOG%"
-echo [%date% %time%] RUN START  python=%PY% >> "%LOG%"
-echo [%date% %time%] SYMBOLS=%SYMBOLS%  CAPITAL=%CAPITAL%U  FRAC=%FRAC% >> "%LOG%"
-
-REM ==== 正式执行 ====
-"%PY%" macdx_strategy.py --symbols %SYMBOLS% --signal --capital %CAPITAL% --frac %FRAC% >> "%LOG%" 2>&1
+REM ==== Run. Python writes the log itself (UTF-8 with BOM); no redirection here. ====
+"%PY%" macdx_strategy.py --symbols %SYMBOLS% --signal --capital %CAPITAL% --frac %FRAC% --log-file "%LOG%"
 set RC=%ERRORLEVEL%
-
-echo [%date% %time%] RUN END  exit_code=%RC% >> "%LOG%"
-if not %RC%==0 echo [%date% %time%] WARN: non-zero exit, check this log >> "%LOG%"
-
-REM ==== 清理 30 天前的日志 ====
-forfiles /p logs /m macdx_*.log /d -30 /c "cmd /c del @path" >nul 2>&1
 
 exit /b %RC%

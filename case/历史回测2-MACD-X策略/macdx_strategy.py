@@ -29,10 +29,11 @@
   手续费 0.1%/单边 + 滑点 0.05%/单边（币安现货 taker 保守估计）
 
 【用法】
-  python macdx_strategy.py                          # 回测默认 4 个标的
-  python macdx_strategy.py --symbols BTCUSDT ETHUSDT
+  python macdx_strategy.py                          # 回测默认 5 个标的
+  python macdx_strategy.py --symbols BTCUSDT ETHUSDT BNBUSDT SOLUSDT DOGEUSDT
+  python macdx_strategy.py --symbols BTCUSDT ETHUSDT BNBUSDT SOLUSDT DOGEUSDT --signal  # 每日监控这 5 个
   python macdx_strategy.py --symbol BTCUSDT --interval 4h
-  python macdx_strategy.py --symbol  BTCUSDT  ETHUSDT  BNBUSDT  SOLUSDT  DOGEUSDT  --signal     # 只看当前该不该持仓 + 邮件推送
+  python macdx_strategy.py --symbol BTCUSDT --signal     # 只看当前该不该持仓 + 邮件推送
   python macdx_strategy.py --symbols BTCUSDT --no-fetch  # 用本地 data/ 缓存
   python macdx_strategy.py --test-mail                  # 发一封测试邮件验证配置
   python macdx_strategy.py --symbol BTCUSDT --signal --no-mail   # 只看信号不发信
@@ -51,7 +52,16 @@
 【定时运行（Windows）】
   直接调用同目录的 run_signal.bat，它已配好日志、Python 路径探测和 30 天日志轮转。
   注册每天 08:01 执行（管理员 CMD 跑一次）：
-      schtasks /Create /TN "MACD-X每日信号" /TR "<本目录>\run_signal.bat" /SC DAILY /ST 08:01 /F
+      schtasks /Create /TN "MACD-X-Daily" /TR "<本目录>\run_signal.bat" /SC DAILY /ST 08:01 /F
+
+【日志（--log-file）】
+  --log-file PATH  把本次全部输出同时写进该文件。
+  ★ 日志一律由 Python 以 UTF-8 + BOM 写出，不要在 bat 里用 ">>" 重定向。
+    原因：中文 Windows 的 %date% 会展开成「2026/09/30 周三」，那是 GBK 字节；
+    而 Python 输出是 UTF-8。两种编码混进同一个文件，用记事本打开会一半乱码。
+    交给 Python 写，编码就只有一种；带 BOM 是为了让记事本正确识别成 UTF-8。
+  日志开头会记录脚本目录/工作目录/Python 路径/完整命令行，
+  换目录或换解释器时一眼就能看出来（排查"我到底跑的是哪一份"）。
 
 【邮件推送】
   只在【信号状态发生变化】时发信：空仓→持有 = 买入提醒，持有→空仓 = 离场提醒。
@@ -75,6 +85,7 @@ import smtplib
 import ssl
 import sys
 import time
+import traceback
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from email.header import Header
@@ -86,6 +97,104 @@ try:
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 except Exception:
     pass
+
+_STDOUT0, _STDERR0 = sys.stdout, sys.stderr   # 原始流，供日志分流用
+_LOG_FP = None
+
+
+class _Tee:
+    """把输出同时写到控制台和日志文件。"""
+
+    def __init__(self, stream, fp):
+        self._stream, self._fp = stream, fp
+
+    def write(self, data):
+        try:
+            self._stream.write(data)
+        except Exception:
+            pass
+        try:
+            self._fp.write(data)
+        except Exception:
+            pass
+        return len(data)
+
+    def flush(self):
+        for s in (self._stream, self._fp):
+            try:
+                s.flush()
+            except Exception:
+                pass
+
+    def isatty(self):
+        try:
+            return self._stream.isatty()
+        except Exception:
+            return False
+
+    @property
+    def encoding(self):
+        return "utf-8"
+
+    def reconfigure(self, **kw):   # 兼容再次调用
+        pass
+
+
+def start_logging(path: str) -> None:
+    """
+    开启日志分流。日志一律由 Python 以 **UTF-8（带 BOM）** 写出。
+
+    为什么要这样：如果让 .bat 用 `>>` 重定向，bat 那边的 `%date%` 在中文 Windows
+    上会展开成「2026/09/30 周三」——含中文，是 GBK 字节；而 Python 输出是 UTF-8。
+    两种编码混进同一个文件，用记事本（GBK）打开时 Python 那部分全是乱码。
+    把日志完全交给 Python 写，编码就只有一个，彻底解决。
+    带 BOM 是为了让 Windows 记事本能正确识别成 UTF-8。
+    """
+    global _LOG_FP
+    d = os.path.dirname(os.path.abspath(path))
+    if d:
+        os.makedirs(d, exist_ok=True)
+    is_new = (not os.path.exists(path)) or os.path.getsize(path) == 0
+    fp = open(path, "a", encoding="utf-8", newline="")
+    if is_new:
+        fp.write("\ufeff")
+    _LOG_FP = fp
+    sys.stdout = _Tee(_STDOUT0, fp)
+    sys.stderr = _Tee(_STDERR0, fp)
+
+
+def _log_header(argv: list) -> None:
+    print("=" * 78)
+    print(f"MACD-X 运行日志    {now_cn()}（北京时间）")
+    print(f"脚本目录 : {os.path.dirname(os.path.abspath(__file__))}")
+    print(f"工作目录 : {os.getcwd()}")
+    print(f"Python   : {sys.executable}")
+    print(f"版本     : {sys.version.split()[0]}  平台 {sys.platform}")
+    print(f"命令行   : {' '.join(argv)}")
+    print("=" * 78)
+
+
+def _log_footer(rc: int) -> None:
+    if _LOG_FP is None:
+        return
+    try:
+        print("-" * 78)
+        print(f"运行结束    {now_cn()}    退出码 {rc}")
+        print("")
+        _LOG_FP.flush()
+        _LOG_FP.close()
+    except Exception:
+        pass
+
+
+def _prescan_log_file(argv: list) -> str | None:
+    """在 argparse 之前先找出 --log-file，这样连参数错误也能记进日志。"""
+    for i, a in enumerate(argv):
+        if a == "--log-file" and i + 1 < len(argv):
+            return argv[i + 1]
+        if a.startswith("--log-file="):
+            return a.split("=", 1)[1]
+    return None
 
 # ─────────────────────────── 时区配置 ───────────────────────────
 # 你原稿用的是 pytz.timezone('Asia/Shanghai')。本脚本坚持【零依赖】，
@@ -845,7 +954,8 @@ def print_result(name: str, bars: list[dict], p: dict) -> dict:
 
 def main():
     ap = argparse.ArgumentParser(description="MACD-X 加密货币趋势跟随策略")
-    ap.add_argument("--symbols", nargs="*", default=["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT"])
+    ap.add_argument("--symbols", nargs="*",
+                    default=["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "DOGEUSDT"])
     ap.add_argument("--symbol", default=None, help="只跑单个标的")
     ap.add_argument("--interval", default="1d")
     ap.add_argument("--signal", action="store_true", help="只输出当前信号，不回测")
@@ -865,7 +975,13 @@ def main():
                     help="参考本金（仅用于邮件里计算建议下单数量），默认 1000")
     ap.add_argument("--frac", type=float, default=0.7,
                     help="建议仓位比例（邮件用），默认 0.7")
+    ap.add_argument("--log-file", default=None,
+                    help="把本次输出同时写入该文件（UTF-8 带 BOM），定时任务用")
     args = ap.parse_args()
+
+    if args.log_file and _LOG_FP is None:   # __main__ 里可能已经开过了
+        start_logging(args.log_file)
+        _log_header(sys.argv)
 
     # ── 代理与重试设置（必须在任何网络请求之前）──
     if args.proxy:
@@ -947,4 +1063,24 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    _rc = 0
+    # 先把 --log-file 捞出来，这样连 argparse 报错都能记进日志
+    _lf = _prescan_log_file(sys.argv)
+    if _lf and _LOG_FP is None:
+        try:
+            start_logging(_lf)
+            _log_header(sys.argv)
+        except Exception as e:
+            print(f"[警告] 日志文件打开失败：{e}")
+    try:
+        main()
+    except SystemExit as e:
+        _rc = e.code if isinstance(e.code, int) else 0
+        _log_footer(_rc)
+        raise
+    except BaseException:
+        traceback.print_exc()
+        _rc = 1
+        _log_footer(_rc)
+        raise
+    _log_footer(_rc)
