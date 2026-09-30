@@ -1,0 +1,8 @@
+python macdx_strategy.py                              # 回测 4 个标的
+python macdx_strategy.py --symbols BTCUSDT ETHUSDT
+python macdx_strategy.py --symbol BTCUSDT --signal    # 看当前该持仓还是空仓
+python macdx_strategy.py --symbol BTCUSDT --interval 4h
+python macdx_strategy.py --trend-ema 150 --confirm 2  # 调参
+
+
+schtasks /Create /TN "MACD-X每日信号" /TR "C:\Users\hongji\WorkBuddy AI\2026-09-29-16-53-45\run_signal.bat" /SC DAILY /ST 08:01 /F

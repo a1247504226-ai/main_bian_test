@@ -1,0 +1,33 @@
+三步：
+
+1. 填 .env —— 我已经从模板生成好 .env，只填 3 处：BINANCE_API_KEY、BINANCE_API_SECRET、收通知的邮箱。执行器现在会自动读这个文件，不用再手动 export 环境变量。
+
+2. 把 signal_parser.py 接进你的 Telegram 监听程序 —— 替换你原来的解析函数，把结果追加进 signals.jsonl：
+
+python
+
+from signal_parser import SignalParser
+import json
+
+sig = SignalParser.parse_signal(message_text)
+if sig:
+    with open("signals.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps(sig, ensure_ascii=False) + "\n")
+3. 启动执行器：
+
+bash
+
+python signal_executor.py --check    # 先自检连通性，不下单
+python signal_executor.py            # 正式跑
+第一次务必先验证：把 .env 里 BINANCE_ENV 改成 TEST（测试网）或 BINANCE_MOCK=1（完全离线模拟），跑通整条链路确认无误，再切回 MAIN。
+
+signal_parser.py 自带 10 项断言，python signal_parser.py 能先确认解析器本身没问题。
+
+填好 .env 后就能跑了。三个文件的分工：
+
+
+添加到对话
+文件	用途	要不要跑
+signal_executor.py	主执行器，读 signals.jsonl 下单	要跑
+signal_parser.py	解析器，接进你的监听程序	被 import，不单独跑
+.env	配置（密钥、仓位、风控）	填一次

@@ -1,0 +1,5 @@
+python binance_combined_signal_trader.py --calc --balance 10000   # 只算金额
+python binance_combined_signal_trader.py --scan                    # 只看信号
+python binance_combined_signal_trader.py --dry-run                 # 干跑
+set BINANCE_ENV=TEST & set BINANCE_API_KEY=xxx & set BINANCE_API_SECRET=xxx
+python binance_combined_signal_trader.py                           # 实跑

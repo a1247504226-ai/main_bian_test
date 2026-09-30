@@ -1,0 +1,70 @@
+怎么用
+bash
+
+cd "C:\Users\hongji\WorkBuddy AI\2026-09-29-21-48-51\btc_lev\live"
+python run_all.py --dry-run    # 先看结果，不发信
+python run_all.py --test       # 验证邮箱通道
+python run_all.py              # 正式跑（有变化才发）
+定时任务（管理员 PowerShell，日线北京时间 08:00 收盘，建议 08:30 跑）：
+
+powershell
+
+$bat = "C:\Users\hongji\WorkBuddy AI\2026-09-29-21-48-51\btc_lev\live\run_daily.bat"
+schtasks /Create /TN "BTC_Signal_Push" /TR "`"$bat`"" /SC DAILY /ST 08:30 /F
+schtasks /Run /TN "BTC_Signal_Push"
+
+
+
+
+
+加了三样东西
+① 邮件从「方向」改成「可执行的操作指令」
+
+以前写「方向：空」，你还得自己算平多少、开多少。现在直接给你动作：
+
+plaintext
+
+★ 需要你手动执行的操作
+  B档（B 推荐）：平掉多头 0.134415 BTC → 开空头 0.134415 BTC
+② 每封邮件内嵌风控位（当前实测值）：
+
+plaintext
+
+止损提醒位：73,405（吊灯 5×ATR，距现价 -12.0%）
+爆仓价：56,194（距现价 -32.7%，3× 逐仓的硬底）
+止盈提醒位：不设（靠方向反转离场，让利润奔跑）
+③ 新增 alert.py —— 价格触发的风控提醒，只提醒、不自动下单，你自己操作：
+
+bash
+
+python alert.py            # 到价就发信（同类提醒当天只发一次）
+python alert.py --dry-run  # 只看触发没触发
+python alert.py --force    # 强制发一封测试
+在 config.json 的 risk 段配置：
+
+json
+
+"risk": {
+  "stop_mode": "trail_atr",   // none | trail_atr | fixed_pct
+  "trail_atr": 5.0,           // 移动止损 = 持仓最高价 − 5×ATR
+  "take_profit_pct": 0.0,     // 止盈，0 = 不设
+  "liq_warn_pct": 0.10,       // 距爆仓 <10% 预警
+  "max_alerts_per_day": 3
+}
+建议用 trail_atr 而不是 fixed_pct —— 它是移动的，仓位涨上去止损位跟着抬，能锁利润；固定百分比那个正是被证伪的过拟合方案。如果你只想要最少的干扰，设 "stop_mode": "none"，那就只保留爆仓预警。
+
+实测结果
+一致性校验仍 6/6 通过（重构没破坏实盘=回测的口径）
+风控提醒邮件已实际发送成功，日志显示 风控提醒已发送
+无变化时正确跳过；提醒去重与每日限次都生效
+状态文件现在记录 entry_px（开仓基准）、peak_px（持仓极值，吊灯用）、qty，所以止损位会随行情自动上移
+定时任务建议
+信号每天跑一次，提醒可以跑得勤一些：
+
+powershell
+
+# 信号：每天 08:30
+schtasks /Create /TN "BTC_Signal_Push" /TR "`"$bat`"" /SC DAILY /ST 08:30 /F
+# 风控提醒：每小时
+schtasks /Create /TN "BTC_Risk_Alert" /TR "`"$py`" `"$dir\alert.py`"" /SC HOURLY /F
+一个提醒：alert.py 的定位是「极端行情保险」，不是日常操作工具。如果你开始频繁按提醒位手动进出，那你实际上是在执行一个已经被回测否定的策略——收益大概率不如老老实实等信号反转。
