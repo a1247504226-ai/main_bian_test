@@ -413,7 +413,7 @@ def notify_if_changed(symbol: str, interval: str, sg: dict,
     qty = invest * (1 - p["fee"]) / fill if fill > 0 else 0.0
 
     if now:
-        subject = f"[MACD-X] {symbol} 买入信号 · {sg['date'][:10]}"
+        subject = f"[MACD-X] {symbol} 现货买入信号 · {sg['date'][:10]}"
         detail = (f"★ 建议动作：买入（市价单）\n"
                   f"  参考本金：{capital:,.0f} U\n"
                   f"  建议投入：{invest:,.0f} U（{frac*100:.0f}% 仓位，留 {(1-frac)*100:.0f}% 现金）\n"
@@ -421,7 +421,7 @@ def notify_if_changed(symbol: str, interval: str, sg: dict,
                   f"  买入数量：约 {qty:.6f} {symbol.replace('USDT','')}\n"
                   f"  手续费：约 {invest*p['fee']:.2f} U")
     else:
-        subject = f"[MACD-X] {symbol} 离场信号 · {sg['date'][:10]}"
+        subject = f"[MACD-X] {symbol} 现货离场信号 · {sg['date'][:10]}"
         detail = (f"★ 建议动作：卖出（市价单）\n"
                   f"  卖出：全部持仓\n"
                   f"  成交价参考：{sg['close']*(1-p['slip']):,.2f}（含滑点）\n"

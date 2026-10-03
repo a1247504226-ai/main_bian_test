@@ -60,7 +60,45 @@ def load_config():
     env_pwd = os.environ.get("SIGNAL_EMAIL_PASSWORD")
     if env_pwd:
         cfg["email"]["password"] = env_pwd
+    # 币安 API 密钥同样支持环境变量覆盖（更安全，推荐）
+    tr = cfg.get("trade") or {}
+    if os.environ.get("BINANCE_API_KEY"):
+        tr["apiKey"] = os.environ["BINANCE_API_KEY"]
+    if os.environ.get("BINANCE_API_SECRET"):
+        tr["apiSecret"] = os.environ["BINANCE_API_SECRET"]
+    if tr:
+        cfg["trade"] = tr
     return cfg
+
+
+def master_switch(cfg=None):
+    """读取「总开关」。返回 dict(mode, live, real_ok, reason)。
+
+    mode:  "observe" 只推送不下单（默认，观察期）
+           "live"    真金白银自动下单
+    兼容旧的 trade.enabled 写法：若没有 _master_switch，则退回看 trade.enabled。
+    """
+    cfg = cfg or load_config()
+    ms = cfg.get("_master_switch") or {}
+    tr = cfg.get("trade") or {}
+
+    if ms:
+        mode = str(ms.get("mode", "observe")).strip().lower()
+        confirm = bool(ms.get("i_understand_real_money", False))
+    else:
+        # 老配置回退：以 trade.enabled 为准
+        mode = "live" if tr.get("enabled") else "observe"
+        confirm = True
+
+    live = (mode == "live")
+    real_ok = live and confirm
+    if not live:
+        reason = "总开关 mode=observe（只推送，不下单）"
+    elif not confirm:
+        reason = "mode=live 但 i_understand_real_money=false（双保险未放行）"
+    else:
+        reason = "mode=live 且已确认（真实下单已放行）"
+    return {"mode": mode, "live": live, "real_ok": real_ok, "reason": reason}
 
 
 # ============================================================ 数据
