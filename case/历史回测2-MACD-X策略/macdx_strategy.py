@@ -63,6 +63,33 @@
   日志开头会记录脚本目录/工作目录/Python 路径/完整命令行，
   换目录或换解释器时一眼就能看出来（排查"我到底跑的是哪一份"）。
 
+【实盘下单（--trade，默认关闭）】
+  这是真金白银的开关，故意设计成【双重开关】：
+      --trade              启用交易模块，但仍是【演练】：只打印"将要下什么单"，不发真实订单
+      --trade --live       真正下单（会花真钱）
+  少给任何一个都是空跑，防止"手滑加了 --trade 就跑成真实交易"。
+
+  配套参数：
+      --testnet            用币安测试网（假钱），上线前先用它跑通全流程
+      --trade-proxy URL    下单专用代理，如 http://127.0.0.1:7897（币安在国内常需代理）
+      --max-order N        单笔投入上限（USDT），防手滑
+
+  急停：在脚本目录新建一个空文件 STOP_TRADING，所有下单立即被拒绝（不用改代码）。
+        也可以跑 `python binance_trader.py --halt` / `--resume`。
+
+  执行逻辑（重要）：
+    · 以【交易所真实余额】判断当前有没有持仓，不以本地状态文件为准
+    · 每天都会检查一次（幂等）：昨天漏单今天会自动补上
+    · 数据来自本地缓存且滞后 >2 天时，为安全起见不下单，只发信号
+    · 下单前做三重校验：最小名义金额、数量步长、可用余额
+
+  API Key 存放（不要写进代码）：
+    优先读环境变量 BINANCE_API_KEY / BINANCE_API_SECRET，
+    其次读同目录 binance_keys.json，最后读 binance_keys.txt。
+    币安后台只勾【允许现货交易】，绝不勾【允许提现】，并绑定 IP 白名单。
+
+  自检命令：python binance_trader.py --check        （查连通性/权限/余额）
+
 【邮件推送】
   只在【信号状态发生变化】时发信：空仓→持有 = 买入提醒，持有→空仓 = 离场提醒。
   状态不变不发信（不会每天打扰）。状态存在 signal_state.json，首次运行只记录不发。
@@ -249,6 +276,19 @@ EMAIL_CONFIG = {
 # 状态记录文件（用来判断信号是否发生变化）
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "signal_state.json")
 
+# ─────────────────────────── 实盘下单配置 ───────────────────────────
+# 【默认全关】。这是真金白银的开关，故意设计成必须显式打开：
+#   --trade            启用交易模块（此时仍是【演练】，只打印不下单）
+#   --trade --live     真正下单（会花真钱）
+# 双重开关是为了防止"手滑加了 --trade 就跑成真实交易"。
+TRADE_CONFIG = {
+    "enabled": False,        # 由 --trade 打开
+    "live": False,           # 由 --live 打开（必须与 enabled 同时为 True 才真下单）
+    "testnet": False,        # 由 --testnet 打开（币安测试网，用假钱）
+    "proxy": None,           # 下单走哪个代理；None = 直连
+    "max_order_usdt": None,  # 单笔投入上限，None = 用 binance_trader 内部默认（5000U）
+}
+
 # ─────────────────────────── 代理配置 ───────────────────────────
 # 注意：HTTPS_PROXY 这里写 http:// 而不是 https://。
 #   Clash / Mihomo 的入站端口是【明文 HTTP】，对 https 目标走 CONNECT 隧道。
@@ -413,7 +453,7 @@ def notify_if_changed(symbol: str, interval: str, sg: dict,
     qty = invest * (1 - p["fee"]) / fill if fill > 0 else 0.0
 
     if now:
-        subject = f"[MACD-X] {symbol} 现货买入信号 · {sg['date'][:10]}"
+        subject = f"[MACD-X] {symbol} 买入信号 · {sg['date'][:10]}"
         detail = (f"★ 建议动作：买入（市价单）\n"
                   f"  参考本金：{capital:,.0f} U\n"
                   f"  建议投入：{invest:,.0f} U（{frac*100:.0f}% 仓位，留 {(1-frac)*100:.0f}% 现金）\n"
@@ -421,7 +461,7 @@ def notify_if_changed(symbol: str, interval: str, sg: dict,
                   f"  买入数量：约 {qty:.6f} {symbol.replace('USDT','')}\n"
                   f"  手续费：约 {invest*p['fee']:.2f} U")
     else:
-        subject = f"[MACD-X] {symbol} 现货离场信号 · {sg['date'][:10]}"
+        subject = f"[MACD-X] {symbol} 离场信号 · {sg['date'][:10]}"
         detail = (f"★ 建议动作：卖出（市价单）\n"
                   f"  卖出：全部持仓\n"
                   f"  成交价参考：{sg['close']*(1-p['slip']):,.2f}（含滑点）\n"
@@ -445,8 +485,18 @@ def notify_if_changed(symbol: str, interval: str, sg: dict,
 ── 行情数据 ──
 收盘价    : {sg['close']:,.4f}
 EMA(200)  : {sg['ema_trend']:,.4f}   {mark(sg['price_above_ema'])}
-MACD 快线 : {sg['macd']:+.4f}   {'在零轴上方 ✓' if sg['macd_above_zero'] else '在零轴下方 ✗'}
 ATR(14)   : {sg['atr']:,.4f}
+
+── MACD 三条线（对照币安图表看）──
+DIF 快线  : {sg['macd']:+.4f}   {'在零轴上方 ✓' if sg['macd_above_zero'] else '在零轴下方 ✗'}
+              ↑ 策略判定用的就是这一条（要求 > 0）
+DEA 慢线  : {sg['dea']:+.4f}
+MACD 柱   : {sg['hist']*2:+.4f}   ← 币安图表上最显眼的那根柱子就是这个（显示值 ×2）
+              = 2 × (DIF - DEA) = 2 × ({sg['macd']:+.4f} - {sg['dea']:+.4f})
+
+  ⚠ 常见误会：DIF 和「柱」的符号经常相反，两个都是对的。
+     柱为正 = 动能在加速；DIF 为正 = 中期动能方向向上。
+     柱翻脸比 DIF 频繁约 2.5 倍，所以策略用 DIF 而不用柱做过滤。
 
 {detail}
 
@@ -467,6 +517,64 @@ ATR(14)   : {sg['atr']:,.4f}
         _save_state(key, now, sg["date"])
     else:
         print(f"  [邮件] 发送失败，状态未更新（下次运行会重试推送）")
+
+
+# ══════════════════════════ 0.5 实盘下单 ══════════════════════════
+def trade_if_needed(symbol: str, sg: dict, capital: float, frac: float) -> dict | None:
+    """
+    按当前信号执行实盘下单（现货）。
+
+    【为什么每天都调用，而不是只在信号变化时调用】
+      execute_signal 是幂等的：它先读【交易所真实余额】判断当前状态，
+      只有"目标状态 ≠ 实际状态"时才动手。
+      所以每天调用是安全的，而且更稳健——如果昨天那笔单因为网络问题失败了，
+      今天会自动补上。反过来，只在状态变化时调用，一旦漏单就永远补不回来。
+    """
+    if not TRADE_CONFIG["enabled"]:
+        return None
+
+    # 懒加载：即使把 binance_trader.py 删掉，本脚本依然能正常发信号
+    try:
+        import binance_trader as BT
+    except ImportError:
+        print("  [交易] 找不到 binance_trader.py，跳过下单（信号推送不受影响）。")
+        return None
+
+    live = bool(TRADE_CONFIG["live"])
+    print(f"\n  [交易] {'★ 真实下单模式' if live else '演练模式（不会发真实订单）'}"
+          f"  环境：{'测试网' if TRADE_CONFIG['testnet'] else '主网'}")
+
+    try:
+        key, secret = BT.load_keys()
+    except Exception as e:
+        print(f"  [交易] 跳过：{e}")
+        return None
+
+    try:
+        client = BT.BinanceSpot(key, secret,
+                                testnet=TRADE_CONFIG["testnet"],
+                                proxy=TRADE_CONFIG["proxy"])
+        client.sync_time()
+        rep = BT.execute_signal(client, symbol, bool(sg["should_hold"]),
+                                capital=capital, frac=frac,
+                                live=live,
+                                max_order=TRADE_CONFIG["max_order_usdt"])
+    except Exception as e:
+        print(f"  [交易] 执行异常：{type(e).__name__}: {e}")
+        return None
+
+    act = rep.get("action", "?")
+    if rep.get("detail"):
+        print(f"  [交易] {act} · {rep['detail']}")
+    if rep.get("reason"):
+        print(f"  [交易] 说明：{rep['reason']}")
+    if rep.get("order"):
+        o = rep["order"]
+        print(f"  [交易] 订单回报：id={o.get('orderId')} 状态={o.get('status')} "
+              f"成交量={o.get('executedQty')} 成交额={o.get('cummulativeQuoteQty')}")
+    if not rep.get("ok", True):
+        print("  [交易] ⚠ 本次未成功执行，请人工核对账户。")
+    return rep
 
 
 # ══════════════════════════ 1. 数据获取 ══════════════════════════
@@ -729,11 +837,15 @@ def current_signal(bars: list[dict], p: dict | None = None) -> dict:
     i = len(bars) - 1
     on = regime_on(ind, i)
     c, e, m = ind["close"][i], ind["ema_trend"][i], ind["macd"][i]
+    dea = ind["signal"][i]
+    hist = m - dea if not (math.isnan(m) or math.isnan(dea)) else float("nan")
     return {
         "date": bars[i]["dt"],
         "close": c,
         "ema_trend": e,
-        "macd": m,
+        "macd": m,           # DIF 快线 —— 策略用的是这一条
+        "dea": dea,          # DEA 慢线（信号线）
+        "hist": hist,        # 柱 = DIF - DEA（币安图表上最显眼的那根柱子，显示值 ×2）
         "atr": ind["atr"][i],
         "price_above_ema": (not math.isnan(e)) and c > e,
         "macd_above_zero": (not math.isnan(m)) and m > 0,
@@ -977,7 +1089,27 @@ def main():
                     help="建议仓位比例（邮件用），默认 0.7")
     ap.add_argument("--log-file", default=None,
                     help="把本次输出同时写入该文件（UTF-8 带 BOM），定时任务用")
+    # ── 实盘下单（默认全关，双重开关）──
+    ap.add_argument("--trade", action="store_true",
+                    help="启用币安下单模块（此时仍是演练，只打印不下单）")
+    ap.add_argument("--live", action="store_true",
+                    help="【危险】配合 --trade 才真实下单，会花真钱")
+    ap.add_argument("--testnet", action="store_true",
+                    help="用币安测试网（假钱），上线前先用它跑通全流程")
+    ap.add_argument("--trade-proxy", default=None,
+                    help="下单专用代理，如 http://127.0.0.1:7897；不填则直连")
+    ap.add_argument("--max-order", type=float, default=None,
+                    help="单笔投入上限（USDT），防止手滑下大单")
     args = ap.parse_args()
+
+    # ── 交易开关装配 ──
+    TRADE_CONFIG["enabled"] = bool(args.trade)
+    TRADE_CONFIG["live"] = bool(args.live)
+    TRADE_CONFIG["testnet"] = bool(args.testnet)
+    TRADE_CONFIG["proxy"] = args.trade_proxy
+    TRADE_CONFIG["max_order_usdt"] = args.max_order
+    if args.live and not args.trade:
+        print("⚠ 只给了 --live 没给 --trade：仍按【演练】处理（双重开关设计）。")
 
     if args.log_file and _LOG_FP is None:   # __main__ 里可能已经开过了
         start_logging(args.log_file)
@@ -1044,14 +1176,22 @@ def main():
             print(f"  收盘价         : ${sg['close']:,.4f}")
             print(f"  EMA({p['trend_ema']})     : ${sg['ema_trend']:,.4f}   "
                   f"价格{'在均线上方 ✓' if sg['price_above_ema'] else '在均线下方 ✗'}")
-            print(f"  MACD 快线      : {sg['macd']:+.4f}   "
-                  f"{'在零轴上方 ✓' if sg['macd_above_zero'] else '在零轴下方 ✗'}")
+            print(f"  DIF 快线       : {sg['macd']:+.4f}   "
+                  f"{'在零轴上方 ✓' if sg['macd_above_zero'] else '在零轴下方 ✗'}   ← 策略用这条")
+            print(f"  DEA 慢线       : {sg['dea']:+.4f}")
+            print(f"  MACD 柱        : {sg['hist']*2:+.4f}   ← 币安图表那根柱子（显示值 ×2）")
             print(f"  ATR(14)        : ${sg['atr']:,.4f}")
             print(f"  →  策略动作     : 【{sg['action']}】")
             if not args.no_mail:
                 notify_if_changed(sym, args.interval, sg,
                                   capital=args.capital, frac=args.frac,
                                   src=src, stale=stale)
+            # 实盘下单：每天都跑（幂等），默认演练
+            if TRADE_CONFIG["enabled"]:
+                if stale > 2:
+                    print("  [交易] 数据来自本地缓存且已滞后，为安全起见本次不下单。")
+                else:
+                    trade_if_needed(sym, sg, args.capital, args.frac)
         else:
             print_result(sym, bars, p)
 
