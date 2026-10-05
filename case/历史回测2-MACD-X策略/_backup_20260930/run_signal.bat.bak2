@@ -6,12 +6,6 @@ REM  Schedule: 08:01 Beijing time daily.
 REM  Binance daily candles close at UTC 00:00 = 08:00 Beijing, so 08:01 picks up
 REM  the just-closed daily bar, and 1 minute is enough for the API to update.
 REM
-REM  Logging: ONE FILE PER MONTH -> logs\macdx_YYYYMM.log
-REM  Every run appends to the same monthly file, so nothing is ever replaced.
-REM  On the 1st of a new month the name changes automatically
-REM  (e.g. macdx_202609.log -> macdx_202610.log) and a fresh file is created.
-REM  Old months are KEPT - there is no rotation and no deletion.
-REM
 REM  WHY THIS FILE IS PURE ASCII:
 REM    cmd.exe parses .bat files using the console codepage (GBK on Chinese
 REM    Windows). Non-ASCII bytes in a .bat get mis-aligned and swallow the
@@ -33,7 +27,7 @@ REM  NOTE: Task Scheduler by default runs tasks only when the user is logged on,
 REM  and skips them while the PC is off/asleep. For reliability, open the
 REM  Task Scheduler GUI afterwards and tick:
 REM     [V] Run whether user is logged on or not
-REM     [V] Run as soon as possible after a scheduled start is missed
+REM     [V] Run task as soon as possible after a scheduled start is missed
 REM ============================================================================
 
 REM UTF-8 console so Python's output shows correctly; safe because this file is ASCII
@@ -44,32 +38,8 @@ cd /d "%~dp0"
 
 REM ==== Symbols and order sizing (edit these three lines) ====
 set SYMBOLS=BTCUSDT ETHUSDT BNBUSDT SOLUSDT DOGEUSDT
-REM TOTALCAPITAL = your WHOLE account, in USDT. It is split evenly across
-REM SYMBOLS. 1000 with 5 symbols means 200 per symbol - NOT 1000 each.
-REM (This used to be "CAPITAL=1000" which was per-symbol and silently
-REM  implied you needed 5000 USDT to follow all five signals.)
-set TOTALCAPITAL=1000
-REM FRAC = fraction of each symbol's slice to invest. 1.0 = full position,
-REM which is what the backtest assumes. Anything less dilutes returns and
-REM does NOT improve risk-adjusted return (verified: Calmar 0.93 -> 0.89).
-set FRAC=1.0
-
-REM ==== TRADING SWITCH ====
-REM   TRADE=0  -> signals + email only, NEVER touches your account  (DEFAULT)
-REM   TRADE=1  -> dry run: logs what it WOULD order, places nothing
-REM   TRADE=2  -> LIVE: places real market orders and spends real money
-REM
-REM Recommended rollout: keep 0 for a while, then 1 for a week and compare
-REM the logged plans against the emails, and only then switch to 2.
-REM To stop instantly at any time, create an empty file named STOP_TRADING
-REM in this folder - every order attempt is then refused.
-set TRADE=0
-set MAXORDER=1000
-set TRADEPROXY=--trade-proxy http://127.0.0.1:7897
-
-set TRADEARGS=
-if "%TRADE%"=="1" set TRADEARGS=--trade
-if "%TRADE%"=="2" set TRADEARGS=--trade --live
+set CAPITAL=1000
+set FRAC=0.7
 
 REM ==== Locate Python: isolated runtime first, then system install, then PATH ====
 set PY=
@@ -84,22 +54,18 @@ if not defined PY (
     exit /b 1
 )
 
-REM ==== Log file: ONE PER MONTH, logs\macdx_YYYYMM.log ====
+REM ==== Log file, one per day. Date via PowerShell (%date% is locale-dependent) ====
 if not exist logs mkdir logs
 set TODAY=
 for /f "delims=" %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd" 2^>nul') do set TODAY=%%i
-REM Fallback if PowerShell is unavailable. %date% is locale-dependent but works
-REM on Chinese Windows, where it expands to something like 2026/09/30.
-if not defined TODAY set TODAY=%date:~0,4%%date:~5,2%%date:~8,2%
-REM First 6 chars of yyyyMMdd = yyyyMM
-set LOGMONTH=%TODAY:~0,6%
-REM Guard: if both date sources failed, avoid a file named macdx_unknow.log
-echo %LOGMONTH%|findstr /r "^[0-9][0-9][0-9][0-9][0-9][0-9]$" >nul
-if errorlevel 1 set LOGMONTH=unknown
-set LOG=logs\macdx_%LOGMONTH%.log
+if not defined TODAY set TODAY=unknown
+set LOG=logs\macdx_%TODAY%.log
 
 REM ==== Run. Python writes the log itself (UTF-8 with BOM); no redirection here. ====
-"%PY%" macdx_strategy.py --symbols %SYMBOLS% --signal --total-capital %TOTALCAPITAL% --frac %FRAC% --max-order %MAXORDER% %TRADEPROXY% %TRADEARGS% --log-file "%LOG%"
+"%PY%" macdx_strategy.py --symbols %SYMBOLS% --signal --capital %CAPITAL% --frac %FRAC% --log-file "%LOG%"
 set RC=%ERRORLEVEL%
+
+REM ==== Keep 30 days of logs ====
+forfiles /p logs /m macdx_*.log /d -30 /c "cmd /c del @path" >nul 2>&1
 
 exit /b %RC%

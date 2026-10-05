@@ -251,6 +251,18 @@ class BinanceFutures:
                 }
         return None
 
+    def dual_side_position(self):
+        """账户是否为「双向持仓」模式。True = 双向（本策略不支持）。
+
+        双向持仓下 /fapi/v2/positionRisk 会对同一 symbol 返回多空两条记录，
+        且下单必须带 positionSide，否则报错。本策略是单向净头寸，必须用单向模式。
+        """
+        try:
+            r = self._request("GET", "/fapi/v1/positionSide/dual", {}, signed=True)
+            return bool(r.get("dualSidePosition", False))
+        except Exception:                                   # noqa: BLE001
+            return None                                     # 查不到就不拦，交给下单时暴露
+
     def usdt_balance(self):
         acc = self.account()
         for a in acc.get("assets", []):

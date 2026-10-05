@@ -146,6 +146,19 @@ def run(argv, log=None):
                          int(tr.get("recvWindow", 5000)), log)
     api.sync_time()
 
+    dual = api.dual_side_position()
+    if dual:
+        log.error("-" * 62)
+        log.error("账户当前是【双向持仓】模式，本策略只支持【单向持仓】。")
+        log.error("双向持仓下同一交易对会返回多空两条持仓记录，下单也会因为缺少")
+        log.error("positionSide 而失败。请先改成单向持仓再跑。")
+        log.error("币安 App：合约 -> 右上角设置 -> 持仓模式 -> 单向持仓")
+        log.error("-" * 62)
+        return 2
+    if dual is None:
+        log.warning("未能确认持仓模式（接口异常），继续执行；"
+                    "若下单报错请检查账户是否为单向持仓。")
+
     pos = api.position(symbol)
     bal = api.usdt_balance()
     if pos is None:
@@ -157,7 +170,19 @@ def run(argv, log=None):
     log.info("账户：钱包余额 %.2f U，可用 %.2f U", bal["wallet"], bal["available"])
 
     # ---------- ③ 算目标与差异
-    eq_ref = bal["wallet"] if bal["wallet"] > 0 else inf["equity"]
+    # 权益口径必须与回测一致：回测里 eq = 已实现余额 + 该仓位浮动盈亏。
+    # 只用 walletBalance 会在浮亏时把仓位算得偏大（比回测更激进）。
+    wallet = bal["wallet"]
+    upnl = float(pos.get("unRealizedProfit") or 0)
+    eq_mtm = wallet + upnl
+    if eq_mtm > 0:
+        eq_ref = eq_mtm
+    elif wallet > 0:
+        eq_ref = wallet
+    else:
+        eq_ref = inf["equity"]
+    log.info("权益口径：钱包 %.2f U %+.2f（浮动）= %.2f U（回测同口径）",
+             wallet, upnl, eq_ref)
     tgt_qty, tgt_notional = target_position(inf, equity_override=eq_ref,
                                             notional_cap=tr.get("max_order_notional"))
     cur_qty = float(pos["positionAmt"])
@@ -181,7 +206,7 @@ def run(argv, log=None):
         log.info("差异过小（对齐后 %s < %s，或相对偏差 %.1f%% < %.1f%%），无需调仓",
                  aligned, f["min_qty"], rel * 100, thr * 100)
         if not check_only:
-            C.send_email(cfg["email"], f"【BTC 交易】无需调仓 · {bar_dt}",
+            C.send_email(cfg["email"], f"【BTC交易{C.SUBJECT_SUFFIX}】无需调仓 · {bar_dt}",
                          _noop_body(inf, pos, tgt_qty, eq_ref, L), log)
         return 0
 
@@ -217,7 +242,7 @@ def run(argv, log=None):
         fills = _execute(api, symbol, cur_qty, tgt_qty, action, tr, dry, log)
     except Exception as e:                                  # noqa: BLE001
         log.error("下单失败：%s", e, exc_info=True)
-        C.send_email(cfg["email"], f"【BTC 交易】❌ 下单失败 · {bar_dt}",
+        C.send_email(cfg["email"], f"【BTC交易{C.SUBJECT_SUFFIX}】❌ 下单失败 · {bar_dt}",
                      _err_body(inf, e, action, tgt_qty, cur_qty, eq_ref, L), log)
         return 1
 
@@ -227,7 +252,7 @@ def run(argv, log=None):
                      "fills": [x.get("desc", "") for x in fills]})
 
     # ---------- ⑥ 通知
-    subject = f"【BTC 交易】{'[预演] ' if dry else ''}{action['label']} · {bar_dt}"
+    subject = f"【BTC交易{C.SUBJECT_SUFFIX}】{'[预演] ' if dry else ''}{action['label']} · {bar_dt}"
     body = _done_body(inf, pos, tgt_qty, eq_ref, L, action, fills, f, dry, api)
     if dry:
         log.info("[DRY-RUN] 不发送邮件，正文：\n%s", body)

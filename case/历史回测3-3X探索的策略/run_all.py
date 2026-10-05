@@ -5,6 +5,7 @@
 
 用法：
     python run_all.py              # 正常：有任一档方向变化就发一封合并邮件
+    python run_all.py --daily      # 每日日报：不管方向变没变，每天都发一封回执
     python run_all.py --dry-run    # 只算不发，打印结果
     python run_all.py --force      # 强制发邮件（即使无变化）
     python run_all.py --test       # 发一封测试邮件，验证配置

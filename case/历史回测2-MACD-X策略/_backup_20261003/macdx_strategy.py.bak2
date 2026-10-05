@@ -90,26 +90,11 @@
 
   自检命令：python binance_trader.py --check        （查连通性/权限/余额）
 
-【资金分配（重要，最容易搞错）】
-  --capital N         【单个标的】的分配额。跑 5 个标的就代表 5×N。
-  --total-capital N   账户【总资金】，脚本自动 ÷ 标的数量。
-                      例：--total-capital 1000 跑 5 个标的 → 每个 200 U。
-
-  ★ 为什么要有 --total-capital：
-    如果只用 --capital 1000 跑 5 个标的，邮件会告诉你每个都投 1000 U，
-    加起来要 5000 U —— 而用户账户里只有 1000 U。这是个静默的误导。
-    用 --total-capital 就不会有这个问题，邮件里会写明"总资金 1000 ÷ 5 = 每个 200"。
-
-  --frac              每个标的投入其分配额的比例，默认 1.0（满仓）。
-    实测满仓优于部分仓位（收益 58.2% vs 51.3%，Calmar 0.93 vs 0.89）——
-    因为本策略的风险控制是"趋势破坏就转空仓"，不靠留现金。
-    留现金不会让回撤等比例下降，只会等比例砍掉收益。
-
 【邮件推送】
   只在【信号状态发生变化】时发信：空仓→持有 = 买入提醒，持有→空仓 = 离场提醒。
   状态不变不发信（不会每天打扰）。状态存在 signal_state.json，首次运行只记录不发。
   日线在 UTC 00:00 收盘（= 北京时间 08:00），所以【北京时间每天 08:01】跑一次：
-      python macdx_strategy.py --symbols BTCUSDT ETHUSDT BNBUSDT SOLUSDT DOGEUSDT --total-capital 1000
+      python macdx_strategy.py --symbol BTCUSDT --signal --capital 1000 --frac 0.7
   Windows 直接双击同目录的 run_signal.bat（已配好定时任务命令），Linux 用 cron。
 
   依赖：无（只用 Python 标准库）。Python 3.9+
@@ -271,10 +256,7 @@ PARAMS = {
     "slip": 0.0005,        # 滑点/单边
     # 资金
     "init_capital": 10000.0,
-    "capital_frac": 1.0,   # 单次投入比例。回测与实盘都用 1.0（满仓）
-                           # 实测：降到 0.7 收益 58.2%→51.3%，而 Calmar 0.93→0.89
-                           # （风险调整后反而更差）。本策略的风险控制靠"离场信号
-                           # 转空仓"实现，不靠留现金，所以留现金纯属稀释收益。
+    "capital_frac": 1.0,   # 单次投入比例（实盘建议 0.5~0.7）
 }
 
 DATA_API = "https://data-api.binance.vision/api/v3/klines"
@@ -444,10 +426,8 @@ def _save_state(key: str, hold: bool, date: str) -> None:
 
 
 def notify_if_changed(symbol: str, interval: str, sg: dict,
-                      capital: float = 1000.0, frac: float = 1.0,
-                      src: str = "api", stale: float = 0.0,
-                      total_capital: float | None = None,
-                      n_symbols: int = 1) -> None:
+                      capital: float = 1000.0, frac: float = 0.7,
+                      src: str = "api", stale: float = 0.0) -> None:
     """信号状态发生变化才发邮件。首次运行只记录不发，避免误报。"""
     key = f"{symbol}_{interval}"
     st = _load_state()
@@ -472,21 +452,11 @@ def notify_if_changed(symbol: str, interval: str, sg: dict,
     invest = capital * frac
     qty = invest * (1 - p["fee"]) / fill if fill > 0 else 0.0
 
-    # 资金分配说明：区分「总资金」和「本标的分配额」，避免用户误以为
-    # 每个标的都要投一整套本金（5 个标的各 1000U = 5000U，远超账户余额）
-    if total_capital and n_symbols > 1:
-        alloc = (f"  资金分配：总资金 {total_capital:,.0f} U ÷ {n_symbols} 个标的 "
-                 f"= 本标的 {capital:,.0f} U\n")
-    else:
-        alloc = ""
-
     if now:
-        cash_note = "满仓" if frac >= 1.0 else f"留 {(1-frac)*100:.0f}% 现金"
-        subject = f"[MACD-X] {symbol} 现货买入信号 · {sg['date'][:10]}"
+        subject = f"[MACD-X] {symbol} 买入信号 · {sg['date'][:10]}"
         detail = (f"★ 建议动作：买入（市价单）\n"
-                  f"{alloc}"
-                  f"  本标的分配：{capital:,.0f} U\n"
-                  f"  建议投入：{invest:,.0f} U（{frac*100:.0f}% 仓位，{cash_note}）\n"
+                  f"  参考本金：{capital:,.0f} U\n"
+                  f"  建议投入：{invest:,.0f} U（{frac*100:.0f}% 仓位，留 {(1-frac)*100:.0f}% 现金）\n"
                   f"  成交价参考：{fill:,.2f}（含 {p['slip']*100:.3f}% 滑点）\n"
                   f"  买入数量：约 {qty:.6f} {symbol.replace('USDT','')}\n"
                   f"  手续费：约 {invest*p['fee']:.2f} U")
@@ -515,18 +485,8 @@ def notify_if_changed(symbol: str, interval: str, sg: dict,
 ── 行情数据 ──
 收盘价    : {sg['close']:,.4f}
 EMA(200)  : {sg['ema_trend']:,.4f}   {mark(sg['price_above_ema'])}
+MACD 快线 : {sg['macd']:+.4f}   {'在零轴上方 ✓' if sg['macd_above_zero'] else '在零轴下方 ✗'}
 ATR(14)   : {sg['atr']:,.4f}
-
-── MACD 三条线（对照币安图表看）──
-DIF 快线  : {sg['macd']:+.4f}   {'在零轴上方 ✓' if sg['macd_above_zero'] else '在零轴下方 ✗'}
-              ↑ 策略判定用的就是这一条（要求 > 0）
-DEA 慢线  : {sg['dea']:+.4f}
-MACD 柱   : {sg['hist']*2:+.4f}   ← 币安图表上最显眼的那根柱子就是这个（显示值 ×2）
-              = 2 × (DIF - DEA) = 2 × ({sg['macd']:+.4f} - {sg['dea']:+.4f})
-
-  ⚠ 常见误会：DIF 和「柱」的符号经常相反，两个都是对的。
-     柱为正 = 动能在加速；DIF 为正 = 中期动能方向向上。
-     柱翻脸比 DIF 频繁约 2.5 倍，所以策略用 DIF 而不用柱做过滤。
 
 {detail}
 
@@ -867,15 +827,11 @@ def current_signal(bars: list[dict], p: dict | None = None) -> dict:
     i = len(bars) - 1
     on = regime_on(ind, i)
     c, e, m = ind["close"][i], ind["ema_trend"][i], ind["macd"][i]
-    dea = ind["signal"][i]
-    hist = m - dea if not (math.isnan(m) or math.isnan(dea)) else float("nan")
     return {
         "date": bars[i]["dt"],
         "close": c,
         "ema_trend": e,
-        "macd": m,           # DIF 快线 —— 策略用的是这一条
-        "dea": dea,          # DEA 慢线（信号线）
-        "hist": hist,        # 柱 = DIF - DEA（币安图表上最显眼的那根柱子，显示值 ×2）
+        "macd": m,
         "atr": ind["atr"][i],
         "price_above_ema": (not math.isnan(e)) and c > e,
         "macd_above_zero": (not math.isnan(m)) and m > 0,
@@ -1114,14 +1070,9 @@ def main():
                     help="覆盖每页最大重试次数（默认 6）")
     ap.add_argument("--test-mail", action="store_true", help="发送一封测试邮件后退出")
     ap.add_argument("--capital", type=float, default=1000.0,
-                    help="【单个标的】的分配资金，用于计算建议下单量，默认 1000。"
-                         "如果它是从总资金均分来的，用 --total-capital 自动算")
-    ap.add_argument("--total-capital", type=float, default=None,
-                    help="账户总资金。给了它就会自动 ÷ 标的数量，得到每个标的的分配额。"
-                         "例：1000u 跑 5 个标的 -> 每个 200u")
-    ap.add_argument("--frac", type=float, default=1.0,
-                    help="仓位比例，默认 1.0 = 满仓（与回测假设一致）。"
-                         "小于 1 会稀释收益，且实测风险调整后并不更优")
+                    help="参考本金（仅用于邮件里计算建议下单数量），默认 1000")
+    ap.add_argument("--frac", type=float, default=0.7,
+                    help="建议仓位比例（邮件用），默认 0.7")
     ap.add_argument("--log-file", default=None,
                     help="把本次输出同时写入该文件（UTF-8 带 BOM），定时任务用")
     # ── 实盘下单（默认全关，双重开关）──
@@ -1184,19 +1135,6 @@ def main():
     symbols = [args.symbol] if args.symbol else args.symbols
     bpy = 365.0 if args.interval.endswith("d") else 365.0 * 6  # 日线/4h 的年化因子
 
-    # ── 资金分配 ──
-    # 关键：--capital 是【单个标的】的分配额，不是账户总资金。
-    # 5 个标的各 1000U 意味着需要 5000U，用户很容易误以为只需 1000U。
-    # 用 --total-capital 明确表达"我账户一共多少钱"，脚本自动均分。
-    per_cap = args.capital
-    if args.total_capital is not None and len(symbols) > 0:
-        per_cap = args.total_capital / len(symbols)
-        print(f"  [资金] 总资金 {args.total_capital:,.0f} U ÷ {len(symbols)} 个标的 "
-              f"= 每个标的 {per_cap:,.0f} U")
-        if per_cap * args.frac < 10:
-            print(f"  [提示] 每个标的只有 {per_cap*args.frac:,.0f} U，"
-                  f"接近币安最小下单额（约 5~10 U），建议减少标的数量。")
-
     for sym in symbols:
         try:
             bars, src, stale = load_bars(sym, args.interval, args.no_fetch)
@@ -1224,24 +1162,20 @@ def main():
             print(f"  收盘价         : ${sg['close']:,.4f}")
             print(f"  EMA({p['trend_ema']})     : ${sg['ema_trend']:,.4f}   "
                   f"价格{'在均线上方 ✓' if sg['price_above_ema'] else '在均线下方 ✗'}")
-            print(f"  DIF 快线       : {sg['macd']:+.4f}   "
-                  f"{'在零轴上方 ✓' if sg['macd_above_zero'] else '在零轴下方 ✗'}   ← 策略用这条")
-            print(f"  DEA 慢线       : {sg['dea']:+.4f}")
-            print(f"  MACD 柱        : {sg['hist']*2:+.4f}   ← 币安图表那根柱子（显示值 ×2）")
+            print(f"  MACD 快线      : {sg['macd']:+.4f}   "
+                  f"{'在零轴上方 ✓' if sg['macd_above_zero'] else '在零轴下方 ✗'}")
             print(f"  ATR(14)        : ${sg['atr']:,.4f}")
             print(f"  →  策略动作     : 【{sg['action']}】")
             if not args.no_mail:
                 notify_if_changed(sym, args.interval, sg,
-                                  capital=per_cap, frac=args.frac,
-                                  src=src, stale=stale,
-                                  total_capital=args.total_capital,
-                                  n_symbols=len(symbols))
+                                  capital=args.capital, frac=args.frac,
+                                  src=src, stale=stale)
             # 实盘下单：每天都跑（幂等），默认演练
             if TRADE_CONFIG["enabled"]:
                 if stale > 2:
                     print("  [交易] 数据来自本地缓存且已滞后，为安全起见本次不下单。")
                 else:
-                    trade_if_needed(sym, sg, per_cap, args.frac)
+                    trade_if_needed(sym, sg, args.capital, args.frac)
         else:
             print_result(sym, bars, p)
 

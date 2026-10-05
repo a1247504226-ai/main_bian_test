@@ -1,7 +1,15 @@
 @echo off
 chcp 65001 >nul
 setlocal
-REM ===== Same as run_all.bat (kept for Task Scheduler compatibility) =====
+REM ===== Daily scheduled job: A/B/C signal push =====
+REM This is what the Task Scheduler runs every day at 08:05.
+REM
+REM By default it runs in DAILY REPORT mode (--daily): it sends one email
+REM every day even when nothing changed, so you always get a receipt.
+REM
+REM Want it to stay silent unless the direction actually changes?
+REM   Open this file in Notepad and delete the " --daily" part below.
+REM
 REM Portable: uses the folder this .bat lives in, no hardcoded paths.
 REM NOTE: no parenthesised if-blocks anywhere, because CJK folder
 REM       names break cmd's parser inside ( ) blocks.
@@ -57,5 +65,5 @@ pause
 exit /b 2
 
 :have_script
-"%PY%" run_all.py %*
+"%PY%" run_all.py --daily %*
 exit /b %errorlevel%

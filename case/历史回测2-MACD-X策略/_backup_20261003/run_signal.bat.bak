@@ -44,32 +44,8 @@ cd /d "%~dp0"
 
 REM ==== Symbols and order sizing (edit these three lines) ====
 set SYMBOLS=BTCUSDT ETHUSDT BNBUSDT SOLUSDT DOGEUSDT
-REM TOTALCAPITAL = your WHOLE account, in USDT. It is split evenly across
-REM SYMBOLS. 1000 with 5 symbols means 200 per symbol - NOT 1000 each.
-REM (This used to be "CAPITAL=1000" which was per-symbol and silently
-REM  implied you needed 5000 USDT to follow all five signals.)
-set TOTALCAPITAL=1000
-REM FRAC = fraction of each symbol's slice to invest. 1.0 = full position,
-REM which is what the backtest assumes. Anything less dilutes returns and
-REM does NOT improve risk-adjusted return (verified: Calmar 0.93 -> 0.89).
-set FRAC=1.0
-
-REM ==== TRADING SWITCH ====
-REM   TRADE=0  -> signals + email only, NEVER touches your account  (DEFAULT)
-REM   TRADE=1  -> dry run: logs what it WOULD order, places nothing
-REM   TRADE=2  -> LIVE: places real market orders and spends real money
-REM
-REM Recommended rollout: keep 0 for a while, then 1 for a week and compare
-REM the logged plans against the emails, and only then switch to 2.
-REM To stop instantly at any time, create an empty file named STOP_TRADING
-REM in this folder - every order attempt is then refused.
-set TRADE=0
-set MAXORDER=1000
-set TRADEPROXY=--trade-proxy http://127.0.0.1:7897
-
-set TRADEARGS=
-if "%TRADE%"=="1" set TRADEARGS=--trade
-if "%TRADE%"=="2" set TRADEARGS=--trade --live
+set CAPITAL=1000
+set FRAC=0.7
 
 REM ==== Locate Python: isolated runtime first, then system install, then PATH ====
 set PY=
@@ -99,7 +75,7 @@ if errorlevel 1 set LOGMONTH=unknown
 set LOG=logs\macdx_%LOGMONTH%.log
 
 REM ==== Run. Python writes the log itself (UTF-8 with BOM); no redirection here. ====
-"%PY%" macdx_strategy.py --symbols %SYMBOLS% --signal --total-capital %TOTALCAPITAL% --frac %FRAC% --max-order %MAXORDER% %TRADEPROXY% %TRADEARGS% --log-file "%LOG%"
+"%PY%" macdx_strategy.py --symbols %SYMBOLS% --signal --capital %CAPITAL% --frac %FRAC% --log-file "%LOG%"
 set RC=%ERRORLEVEL%
 
 exit /b %RC%

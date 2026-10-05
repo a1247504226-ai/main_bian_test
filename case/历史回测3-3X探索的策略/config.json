@@ -14,7 +14,9 @@
     "password": "XKCINXNMOMMDCAFI",
     "server": "smtp.163.com",
     "port": 465,
-    "max_retries": 3
+    "max_retries": 3,
+    "_comment_primary": "邮件里重点展示哪一档（A/B/C）——填你实际在跑的那一档",
+    "primary_profile": "B"
   },
   "symbol": "BTCUSDT",
   "interval": "1d",
@@ -23,10 +25,11 @@
   "exposure_cap": 3.0,
   "atr_period": 14,
   "params": [[8, 24], [10, 30], [12, 36], [15, 45], [20, 60]],
+  "_comment_equity": "equity = 你投在这一档的本金（USDT）。改这里，邮件里的保证金/数量会自动跟着变。",
   "profiles": {
-    "A": { "name": "A 保守", "vol_target": 0.02, "equity": 10000.0 },
-    "B": { "name": "B 推荐", "vol_target": 0.03, "equity": 10000.0 },
-    "C": { "name": "C 激进", "vol_target": 0.05, "equity": 10000.0 }
+    "A": { "name": "A 保守", "vol_target": 0.02, "equity": 1000.0 },
+    "B": { "name": "B 推荐", "vol_target": 0.03, "equity": 1000.0 },
+    "C": { "name": "C 激进", "vol_target": 0.05, "equity": 1000.0 }
   },
   "send_on_first_run": true,
   "max_bar_staleness_days": 3,
@@ -58,6 +61,7 @@
     "leverage": 3,
     "margin_type": "ISOLATED",
     "set_leverage_on_start": true,
+    "_comment_posmode": "账户必须是【单向持仓】模式。双向持仓下本策略会拒绝运行（币安 App：合约→设置→持仓模式→单向持仓）",
 
     "_comment_precision": "下单精度，留空则自动从交易所 symbol 信息获取",
     "qty_step": 0.001,
@@ -67,8 +71,8 @@
 
     "_comment_idempotent": "幂等保护：同一天同一目标方向只下单一次，防止重复下单",
     "idempotent": true,
-    "_comment_maxtrade": "单次调仓的名义价值上限（USDT），超过则拒绝下单并告警",
-    "max_order_notional": 20000,
+    "_comment_maxtrade": "单次下单名义上限（USDT），超过就拒绝下单并告警。★账户余额涨了必须同步上调，否则会悄悄限制你的仓位（B档约 1800 U 起就会被卡）。经验值 = 当前本金 × 3",
+    "max_order_notional": 3000,
     "_comment_deviation": "实际持仓与目标持仓偏差小于此比例时不下单（避免频繁微调）",
     "rebalance_threshold": 0.05,
 
