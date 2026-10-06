@@ -35,7 +35,6 @@ hr{border:none;border-top:1px solid var(--line);margin:34px 0;}
 </head><body>
 <header><div class="in"><h1>上手教程 · B 档实盘（对接币安）</h1><p>目标：<b>先只收邮件、不下单</b>，观察一段时间后再决定是否让程序自动下单。</p><p>全程只需要动一个开关。所有脚本都在同一个文件夹里，<b>搬到哪台电脑都能跑</b>。</p></div></header>
 <div class="wrap">
-<hr>
 <h2>第 0 步：目录在哪</h2>
 <p>你现在放的位置：</p>
 <pre>C:\Users\hongji\Downloads\Documents\新建文件夹 (2)\历史回测3-3X探索的策略\</pre>
@@ -64,20 +63,46 @@ hr{border:none;border-top:1px solid var(--line);margin:34px 0;}
 数据K线：2026-10-04 日线（已收盘）
 当前价格：86,530 USDT　日波动率：2.54%
 --------------------------------------------------
-▌B 推荐（目标日波动 3%）  ← 你跑的这一档
-  方向：多 ▲
-  保证金：394 U        ← 划这么多进合约账户
-  下单数量：0.013664 BTC  ← 币安下单框填这个
-  名义价值：1,182 USDT（= 保证金 × 3）
-  参数明细：8/24→多　10/30→多　12/36→多　15/45→多　20/60→多
-  止损提醒位：76,242　爆仓价：58,119（距现价 -32.8%）
---------------------------------------------------
-▌其他档位参考
-  档位   方向   保证金      数量BTC
-  A 保守  多     263 U     0.009109
-  C 激进  多     657 U     0.022773</pre>
-<p><b>你只需要看这 4 个字段：</b></p>
-<table><thead><tr><th>看什么</th><th>意思</th></tr></thead><tbody><tr><td>标题有没有「<b>方向变化</b>」</td><td>有 → 要动手换仓；「方向未变」→ 不用管</td></tr><tr><td><b>方向</b></td><td>做多还是做空</td></tr><tr><td><b>保证金</b></td><td>要划多少钱进合约账户</td></tr><tr><td><b>下单数量</b></td><td>币安下单框填这个数字</td></tr></tbody></table>
+★★ 你要做的事（B 推荐 · 本金 1,000 U）★★
+----------------------------------------------------------
+  方向        做多 ▲
+  建仓价      83,664 USDT    ← 2026-09-29 建立，已持有 6 天
+  当前浮动    价格 +2.51%　保证金口径 +7.54%（3×）
+  杠杆        3× 逐仓（固定不变）
+  保证金      393 USDT        ← 划这么多进合约账户
+  下单数量    0.013739 BTC    ← 币安下单框填这个
+  （名义 1,178 USDT = 保证金 × 3，不用你手算）
+
+  止损提醒    76,302（距现价 -11.0%）
+  爆仓价      57,607（距现价 -32.8%，3× 逐仓的硬底）</pre>
+<p><b>你只需要看这几个字段：</b></p>
+<table><thead><tr><th>看什么</th><th>意思</th></tr></thead><tbody><tr><td>标题有没有「<b>方向变化</b>」</td><td>有 → 要动手换仓；「方向未变」→ 不用管</td></tr><tr><td><b>方向</b></td><td>做多还是做空</td></tr><tr><td><b>建仓价</b></td><td>这一波是什么价位进的（下面详解）</td></tr><tr><td><b>保证金</b></td><td>要划多少钱进合约账户</td></tr><tr><td><b>下单数量</b></td><td>币安下单框填这个数字</td></tr></tbody></table>
+<h3>「建仓价」是什么？怎么算的？</h3>
+<p><b>建仓价 = 方向确认那根K线的收盘价</b>，也就是你当时该下单的价位。</p>
+<p>方向变了它就自动重置成新的价格，方向没变就一直沿用最初那个。</p>
+<pre>建仓价      83,664 USDT    ← 2026-09-29 建立，已持有 6 天
+当前浮动    价格 +2.51%　保证金口径 +7.54%（3×）</pre>
+<ul><li><b>价格 +2.51%</b> = 现价 ÷ 建仓价 − 1（标的本身涨了多少）</li><li><b>保证金口径 +7.54%</b> = 价格变动 × 3（因为名义 = 保证金 × 3，</li></ul>
+<p>所以这笔保证金赚了 7.54%）</p>
+<blockquote><p>用途：一眼看出<b>这一波拿了多久、现在赚还是亏</b>。</p><p>方向没变的日子里，这行数字会随行情每天变，不用做任何操作。</p></blockquote>
+<h3>邮件里的「止损提醒」要配置吗？——<b>不用，它不会自动执行</b></h3>
+<p><b>结论：什么都不用配。</b> 默认已经配好了（吊灯 5×ATR），你也不该照着它去手动砍仓。</p>
+<p><b>三件事要分清：</b></p>
+<table><thead><tr><th></th><th>是什么</th><th>会自动执行吗</th></tr></thead><tbody><tr><td><b>止损提醒</b>（吊灯 5×ATR）</td><td>一个<b>参考价位</b>：价格跌到这里，说明这波回撤已经很深了</td><td>❌ 不会。脚本不挂单、不平仓，只是印在邮件上给你看</td></tr><tr><td><b>爆仓价</b></td><td>交易所的硬底（3× 逐仓 = 建仓价 × 0.6717）</td><td>✅ 会。价格到了币安强制平仓，<b>只亏这个币的保证金</b></td></tr><tr><td><b>方向反转</b></td><td>5 组 EMA 参数翻向 → 邮件告诉你「平仓 / 反手」</td><td>✅ 会（如果你开了自动下单）。<b>这才是策略真正的止损</b></td></tr></tbody></table>
+<p><b>为什么不该照着止损提醒去手动砍仓</b>（回测实测）：</p>
+<ul><li>BTC 上挂吊灯 <b>3×ATR</b> 止损，会把 9 年 <b>114.89× 打到 2.29×</b> —— 砍掉的都是后来回本的大单</li><li>最优止损距离<b>跨资产不一致</b>（SOL 上 0.64× → 0.16×），没法用一套参数通吃</li><li>趋势策略的收益高度集中在少数几笔大单上，止损会精准地砍掉它们</li></ul>
+<p>所以这个提醒的定位是<b>「极端行情保险」</b>：真跌到那里，你至少知道发生了什么，</p>
+<p>而不是被一个你根本不知道的价位打了个措手不及。</p>
+<p><b>如果你还是想调</b>（<code>config.json</code> → <code>risk</code> 段）：</p>
+<pre>"risk": {
+  "stop_mode": "trail_atr",   ← none = 不显示止损位 | trail_atr = 吊灯移动止损 | fixed_pct = 固定百分比
+  "trail_atr": 5.0,           ← 吊灯倍数。调小 = 止损更近、更容易被打到
+  "fixed_stop_pct": 0.10,     ← stop_mode=fixed_pct 时生效，0.10 = 10%
+  "take_profit_pct": 0.0,     ← 止盈位，0 = 不设（推荐，让利润奔跑）
+  "liq_warn_pct": 0.10,       ← 距爆仓价 10% 以内时发「风控提醒」邮件
+  "max_alerts_per_day": 3     ← 风控提醒每天最多几封，防刷屏
+}</pre>
+<blockquote><p>⚠️ **改这些只影响「邮件里印什么数字」和「什么时候发提醒邮件」，</p><p>不会改变策略的买卖行为。** 想让策略真的按价格止损，得改 <code>trade.py</code> 的逻辑 ——</p><p>但回测证据强烈不支持这么做。</p></blockquote>
 <h3>为什么保证金不是固定值？</h3>
 <pre>名义价值 = 权益 × 敞口        敞口 = min(3.0, 目标波动 ÷ 当日波动)
 保证金   = 名义价值 ÷ 杠杆      ← 是「名义」÷ 杠杆，不是「本金」÷ 杠杆</pre>
@@ -85,6 +110,37 @@ hr{border:none;border-top:1px solid var(--line);margin:34px 0;}
 <table><thead><tr><th>最小</th><th>10 分位</th><th>中位</th><th>90 分位</th><th>最大</th></tr></thead><tbody><tr><td>10 U</td><td>71 U</td><td>201 U</td><td>350 U</td><td>565 U</td></tr></tbody></table>
 <p>变化来自两件事：① 波动率（波动大 → 自动缩仓）；② 5 组参数方向是否一致（不一致时互相抵消）。</p>
 <blockquote><p><b>所以每次邮件给的保证金就是这次该划的钱。</b> 不用去记什么固定数字。</p></blockquote>
+<h3>四币模式下邮件长什么样？</h3>
+<p>如果 <code>config.json</code> 里 <code>run_mode</code> 是 <code>"multi"</code>，邮件会变成<b>逐币列出</b>，而且</p>
+<p><b>同时给你「四币等权」和「BTC 单跑参照」两个视角</b>：</p>
+<pre>【BTC/ETH/BNB/SOL信号·3倍合约】每日日报 · 方向未变
+==================================================
+数据K线：2026-10-04 日线（已收盘）
+模式：多标的等权（4 个交易对）  每个币配额 = 账户总权益 ÷ 4
+--------------------------------------------------
+===== ① 四币等权 · 你实际要下的单（B 档 · 每币 250 U）=====
+  BTC   多   保证金   98 U   数量   0.003435   名义   295 U   爆仓价 57,607
+  ETH   多   保证金   81 U   数量   0.089392   名义   242 U   爆仓价  1,820
+  BNB   多   保证金   86 U   数量   0.326865   名义   257 U   爆仓价    528
+  SOL   多   保证金   64 U   数量   1.593861   名义   193 U   爆仓价     81
+  合计        保证金  329 U               名义   986 U
+  → 合计保证金占本金 32.9%，其余为安全垫
+
+===== ② 你的持仓 · 建仓价 / 止损提醒 =====
+  币种   方向         建仓价        现价    止损提醒       浮动   建仓日
+  BTC    多           83,664      85,767      76,302      +7.5%   2026-09-29（6天）
+  ETH    多            2,710       2,710       2,318      +0.0%   本次新建仓
+  BNB    多              786         786         695      +0.0%   本次新建仓
+  SOL    多              121         121          99      +0.0%   本次新建仓
+  ※ 止损提醒 = 吊灯 5×ATR 移动止损 —— 只是提醒位，脚本不会自动挂单或平仓
+  ※ 爆仓价见上表 ①；策略真正的离场信号是「方向反转」
+
+===== ③ BTC 单跑参照（把 1,000 U 全押 BTC）=====
+  多  保证金 262 U  数量 0.009159 BTC  名义 786 U
+  ※ 这是对照，不是你要下的单。四币方案下 BTC 只占 250 U 配额。</pre>
+<p><b>三个视角都看</b>：① 是你真正要照着下的单；② 是**你这一波是什么价位进的、</p>
+<p>现在赚了多少、止损提醒在哪<b>；③ 是「如果不分散会怎样」的对照（</b>③不要照着下单**）。</p>
+<p>详见「必须知道的几件事 → 7. 只跑 BTC，还是四币合一」。</p>
 <hr>
 <h2>第 4 步：观察期（现在开始做）</h2>
 <p><b>这一步什么都不用改，默认就是对的。</b></p>
@@ -117,12 +173,17 @@ hr{border:none;border-top:1px solid var(--line);margin:34px 0;}
 <pre>"apiKey": "在这里填你的币安API Key",
 "apiSecret": "在这里填你的币安API Secret",</pre>
 <p>替换成真实密钥（<b>保留引号</b>）。</p>
-<blockquote><p><b>更安全的做法</b>：不写文件，改用环境变量（程序优先读环境变量）</p><p>```powershell</p><p>setx BINANCE_API_KEY "你的Key"</p><p>setx BINANCE_API_SECRET "你的Secret"</p><p>```</p><p>设完要<b>重开命令行窗口</b>才生效。</p></blockquote>
+<blockquote><p><b>更安全的做法</b>：不写文件，改用环境变量（程序优先读环境变量）</p><pre>setx BINANCE_API_KEY "你的Key"
+setx BINANCE_API_SECRET "你的Secret"</pre><p>设完要<b>重开命令行窗口</b>才生效。</p></blockquote>
 <h3>5.5 检查一个数字</h3>
-<pre>"max_order_notional": 3000</pre>
+<pre>"max_order_notional": 0</pre>
 <p>这是<b>单次下单名义上限</b>（防手滑/防配置写错）。</p>
-<p>建议设成 <b>本金的 3~4 倍</b>。你本金 1000 U → 保持 3000 即可；</p>
-<p>以后加钱到 5000 U，就改成 15000。</p>
+<ul><li><b>填 <code>0</code>（推荐）</b>：自动跟随账户规模 = 该币配额 × 3.15。</li></ul>
+<p>账户从 1000 U 涨到 5000 U 也<b>不用手动改</b>，永远不会悄悄卡住仓位。</p>
+<ul><li>填正数：固定绝对上限。<b>账户长大后它会变成「隐形的紧箍咒」</b> ——</li></ul>
+<p>比如填 3000，等账户涨到 1500 U 以上，理论仓位就会超过 3000，</p>
+<p>此时每次调仓都会被这个上限削掉一截，而<b>邮件里不会明显报错</b>，属于静默缩仓。</p>
+<blockquote><p>四币模式下每个币的配额只有总权益的 1/4，更要留足空间。</p><p><b>一律填 <code>0</code> 就对了。</b></p></blockquote>
 <hr>
 <h2>第 6 步：检查账户连接（只读，不下单）</h2>
 <p>双击 <b><code>run_sync_check.bat</code></b>。</p>
@@ -211,6 +272,29 @@ hr{border:none;border-top:1px solid var(--line);margin:34px 0;}
 <h3>6. 日志在哪</h3>
 <p><code>logs\</code> 目录。出任何问题，先看当天的日志。</p>
 <table><thead><tr><th>文件</th><th>内容</th></tr></thead><tbody><tr><td><code>logs\live_ABC_日期.log</code></td><td>信号推送日志</td></tr><tr><td><code>logs\trade_日期.log</code></td><td>下单日志</td></tr><tr><td><code>logs\sync_check_日期.log</code></td><td>对账日志</td></tr><tr><td><code>logs\alert_日期.log</code></td><td>风控提醒日志</td></tr></tbody></table>
+<h3>7. 只跑 BTC，还是四币合一（<code>run_mode</code>）</h3>
+<p><b>一个开关同时管住信号邮件和自动下单</b>，就在 <code>config.json</code> 里：</p>
+<pre>"run_mode": "multi",     ← multi = 四币等权（BTC/ETH/BNB/SOL） | single = 只跑 BTC
+
+"symbol":  "BTCUSDT",                                    ← single 用这个
+"symbols": ["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT"],    ← multi 用这些</pre>
+<table><thead><tr><th></th><th>仅 BTC（<code>single</code>）</th><th>四币合一（<code>multi</code>）</th></tr></thead><tbody><tr><td>每个币拿多少</td><td>账户总权益<b>全部</b></td><td>账户总权益 <b>÷ 4</b></td></tr><tr><td>1000 U 本金，BTC 名义</td><td>≈ 788 U</td><td>≈ 296 U</td></tr><tr><td>单个币爆仓</td><td>账户基本归零</td><td><b>只亏那一个币的保证金</b>，其余照跑</td></tr><tr><td>9 年实测</td><td>17.7×</td><td>分散后回撤更低，且<b>动态再平衡 8/8 窗口全胜</b>固定分配</td></tr></tbody></table>
+<blockquote><p>想跑 3 个币：<code>symbols</code> 里删掉一个。想跑 5 个：加一个 <code>"XRPUSDT"</code>。</p><p><b>不用改别的任何地方。</b></p></blockquote>
+<p><b>临时切换</b>（不改配置文件）：</p>
+<pre>run_trade.bat --single                      # 这次只跑 BTC
+run_trade.bat --multi                       # 这次跑四币
+run_trade.bat --symbols BTCUSDT,SOLUSDT     # 这次只跑这两个</pre>
+<p><b>邮件会同时给你两个视角</b>（四币模式下）：</p>
+<pre>===== ① 四币等权 · 你实际要下的单 =====
+  BTC  多  保证金  99 U  数量 0.003416  名义 296 U
+  ETH  多  保证金  79 U  数量 0.087347  名义 238 U
+  ...
+  合计      保证金 328 U            名义 985 U
+===== ② BTC 单跑参照（把 1,000 U 全押 BTC）=====
+  BTC  多  保证金 263 U  数量 0.009109  名义 788 U
+  ※ 这是对照，不要照着下单。</pre>
+<p>这样你能直接看出「分散」把 BTC 那份削掉了多少。</p>
+<blockquote><p>⚠️ <b>小额本金要注意「最小名义」</b>：币安对每个交易对有 <code>min_notional</code>。</p><p>四币模式下 BTC 只分到 250 U，若门槛偏高，调仓会被拒。</p><p>跑一次 <code>run_sync_check.bat</code>，看第 6 段「交易精度参数（逐币）」就知道了。</p></blockquote>
 <hr>
 <h2>出问题了怎么办</h2>
 <table><thead><tr><th>现象</th><th>处理</th></tr></thead><tbody><tr><td>没收到邮件</td><td>先查垃圾箱；再跑 <code>run_all.bat --test</code>；再看 <code>logs\live_ABC_*.log</code></td></tr><tr><td>说「尚未配置密钥」</td><td>回第 5.4 步填 <code>config.json</code></td></tr><tr><td>说「账户当前是双向持仓模式」</td><td>回第 5.3 步改成单向持仓</td></tr><tr><td>报 <code>-2015</code></td><td>IP 变了，回第 5.2 步更新白名单</td></tr><tr><td>报「拒绝真实下单」</td><td>开关没开全，双击 <code>run_switch.bat</code> 重新 ON</td></tr><tr><td>报「发现未完成的意图」</td><td>上次下单可能中断。先跑 <code>run_sync_check.bat</code> 人工核对持仓，确认无误后加 <code>--force</code></td></tr><tr><td>下单失败但邮件说失败</td><td><b>立刻登录币安人工核对持仓</b>，别重复跑</td></tr><tr><td>想确认到底下没下</td><td>跑 <code>run_status.bat</code>，看持仓对照段</td></tr></tbody></table>

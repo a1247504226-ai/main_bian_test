@@ -294,7 +294,7 @@ python verify_live.py
   "set_leverage_on_start": true,  // 下单前自动把杠杆设为 3×
 
   "idempotent": true,             // 同一天同一方向只下单一次
-  "max_order_notional": 20000,    // 单次下单名义上限（U），超过直接拒绝
+  "max_order_notional": 0,        // 0 = 自动跟随（配额 × 3.15），推荐
   "rebalance_threshold": 0.05,    // 偏差 <5% 不下单，避免频繁微调
 
   "allow_flip": true,             // 允许一键反手（平旧+开新）
@@ -306,6 +306,37 @@ python verify_live.py
 
 > **密钥更安全的做法**：不写文件，改用环境变量
 > `BINANCE_API_KEY` / `BINANCE_API_SECRET`（程序会优先读环境变量）。
+
+### 10.3b 只跑 BTC，还是四币合一（`run_mode`）
+
+**一个开关同时管住信号邮件和自动下单**：
+
+```json
+"run_mode": "multi",     // multi = 四币等权 | single = 只跑下面 symbol 那一个币
+
+"symbol":  "BTCUSDT",                                     // single 模式用
+"symbols": ["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT"],     // multi 模式用
+```
+
+| | `single`（仅 BTC） | `multi`（四币合一） |
+|---|---|---|
+| 每币配额 | 账户总权益**全部** | 账户总权益 **÷ 币数**（动态再平衡） |
+| 1000 U 本金下 BTC 名义 | ≈ 788 U | ≈ 296 U |
+| 单币爆仓 | 账户基本归零 | 只亏该币保证金（逐仓隔离） |
+| 邮件 | 单币视角 | **同时**给「① 四币等权」+「② BTC 单跑参照」 |
+
+命令行可临时覆盖（不改配置）：
+
+```bash
+python trade.py --single                        # 只跑 config.symbol
+python trade.py --multi                         # 跑 config.symbols 全部
+python trade.py --symbols BTCUSDT,SOLUSDT       # 指定一组
+```
+
+`run_all.py` / `status.py` / `sync_check.py` / `alert.py` 同样支持这三个参数。
+
+> ⚠️ 每个交易对有自己的 `min_notional`。四币模式下 BTC 只分到 1/4 本金，
+> 若门槛偏高会拒单。跑 `python sync_check.py` 看第 6 段「交易精度参数（逐币）」。
 
 ### 10.4 上线四步（务必按顺序）
 
@@ -429,8 +460,26 @@ schtasks /Create /TN "BTC_Risk_Alert"  /TR "`"$dir\run_alert.bat`""  /SC HOURLY 
 若频繁收到信号，说明策略在震荡区反复反手——这是趋势策略的固有弱点，不要手动干预。
 
 **Q：能换币种吗？**
-改 `config.json` 的 `"symbol"`，如 `ETHUSDT`。但**参数是按 BTC 拟合的**，
-换标的请先用回测复核（跨资产：ETH 2.86×、SOL 0.61× 买入持有，SOL 明显跑不赢）。
+改 `config.json` 的 `"symbol"`，如 `ETHUSDT`（记得把 `run_mode` 设为 `"single"`）。
+但**参数是按 BTC 拟合的**，换标的请先用回测复核
+（跨资产：ETH 2.86×、SOL 0.61× 买入持有，SOL 明显跑不赢）。
+
+**Q：能同时跑几个币吗？**
+能。把 `run_mode` 设成 `"multi"`，`symbols` 里列出要跑的币即可，**等权、动态再平衡**。
+9 年实测：四币等权在 8 个起始日窗口上**全部**优于「各币固定分配」；
+相比只跑 BTC，回撤更低（33% vs 39%），代价是收益被摊薄。
+详细对比见 `多币种对比报告.html`。
+
+**Q：邮件里的「止损提醒」要配置吗？**
+不用，默认已配好（吊灯 5×ATR）。**它不会自动执行** —— 脚本不挂止损单、不自动平仓，
+只是把价位印在邮件里。策略真正的离场信号是「方向反转」。
+想改显示方式/倍数看 `config.json` 的 `risk` 段，但**改它不改变策略的买卖行为**。
+回测实测：BTC 上挂吊灯 3×ATR 止损会把 9 年 114.89× 打到 2.29×，不建议照着它手动砍仓。
+
+**Q：邮件里的「建仓价」是什么？**
+方向确认那根K线的收盘价，也就是你当时该下单的价位。方向变了自动重置，
+方向没变就一直沿用。旁边会给出 `价格 ±x%` 和 `保证金口径 ±x%`（= 价格变动 × 杠杆），
+一眼看出这一波拿了多久、赚了多少。日报（`--daily`）每天都会带上这一行。
 
 **Q：邮件里的数量和我账户对不上？**
 邮件按 `config.json` 里的 `"equity"`（默认 10000）算。改成你的实际权益即可。

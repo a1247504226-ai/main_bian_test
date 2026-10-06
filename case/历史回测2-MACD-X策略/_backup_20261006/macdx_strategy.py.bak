@@ -131,7 +131,6 @@ import traceback
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from email.header import Header
-from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 # Windows 控制台默认 GBK，遇到 ✓ ✗ 等字符会崩。强制 UTF-8 输出。
@@ -385,23 +384,12 @@ def _route_order() -> list[bool]:
     return [True, False] if _ROUTE["prefer"] == "proxy" else [False, True]
 
 
-def send_email(subject: str, body: str, cfg: dict | None = None,
-               html: str | None = None) -> bool:
-    """
-    发送邮件。失败时按 max_retries 重试，全部失败返回 False（不影响主流程）。
-
-    给了 html 就发 multipart/alternative：邮件客户端优先渲染 HTML 版
-    （手机上是自适应的表格），纯文本版作为兜底（老客户端 / 纯文本阅读器）。
-    """
+def send_email(subject: str, body: str, cfg: dict | None = None) -> bool:
+    """发送邮件。失败时按 max_retries 重试，全部失败返回 False（不影响主流程）。"""
     cfg = dict(EMAIL_CONFIG, **(cfg or {}))
     # 允许用环境变量覆盖密码，避免明文硬编码
     pwd = os.environ.get("MACDX_MAIL_PASSWORD") or cfg["password"]
-    if html:
-        msg = MIMEMultipart("alternative")
-        msg.attach(MIMEText(body, "plain", "utf-8"))
-        msg.attach(MIMEText(html, "html", "utf-8"))
-    else:
-        msg = MIMEText(body, "plain", "utf-8")
+    msg = MIMEText(body, "plain", "utf-8")
     msg["Subject"] = Header(subject, "utf-8")
     msg["From"] = cfg["from"]
     msg["To"] = cfg["to"]
@@ -473,154 +461,6 @@ def _save_state(key: str, hold: bool, date: str, entry: dict | None = None) -> N
         print(f"  [警告] 状态文件写入失败：{e}")
 
 
-# ══════════════════════════ 邮件渲染 ══════════════════════════
-# 每封信同时给两个版本：
-#   · HTML   —— 主版本。数据全部用自适应表格（width:100%，不写死像素），
-#               手机上不会错位；字号 ≥13px，不需要左右滑动。
-#   · 纯文本 —— 兜底。老客户端、纯文本阅读器、被剥离 HTML 的转发场景。
-# 颜色遵循国内习惯：涨 / 盈利 = 红，跌 / 亏损 = 绿。
-_C_RED = "#c62828"
-_C_GREEN = "#2e7d32"
-_C_SLATE = "#37474f"
-
-
-def _esc(s) -> str:
-    return (str(s).replace("&", "&amp;").replace("<", "&lt;")
-            .replace(">", "&gt;"))
-
-
-def _dwidth(s: str) -> int:
-    """字符串显示宽度（CJK 算 2 格），用于纯文本版对齐。"""
-    return sum(2 if ord(ch) > 0x2E80 else 1 for ch in str(s))
-
-
-def _ljust(s: str, width: int) -> str:
-    return str(s) + " " * max(0, width - _dwidth(s))
-
-
-def build_mail_text(title: str, subtitle: str, head: str, rows: list,
-                    note: str, ind_rows: list, warn: str, footer: str) -> str:
-    """纯文本兜底版。rows=(标签, 数值, 备注[, 颜色])，颜色在这里忽略。"""
-    body = [head, ""]
-    for r in rows:
-        label, value = r[0], r[1]
-        sub = r[2] if len(r) > 2 else ""
-        line = f"{_ljust(label, 12)}: {value}"
-        if sub:
-            line += f"   （{sub}）"
-        body.append(line)
-    if note:
-        body += ["", note]
-    body += ["", "信号依据"]
-    for r in ind_rows:
-        label, value = r[0], r[1]
-        judge = r[2] if len(r) > 2 else ""
-        line = f"{_ljust(label, 12)}: {_ljust(value, 14)}"
-        if judge:
-            line += f" {judge}"
-        body.append(line)
-    body.append("判定条件：收盘价 > EMA200 且 DIF 快线 > 0")
-    if warn:
-        body += ["", warn.strip()]
-    body += ["", "─" * 34, footer,
-             "本邮件自动生成，仅供研究，不构成投资建议。"]
-    return "\n".join(body)
-
-
-def build_mail_html(title: str, subtitle: str, head: str, rows: list,
-                    note: str, ind_rows: list, warn: str, footer: str,
-                    accent: str = _C_SLATE) -> str:
-    """HTML 版。所有表格 width:100%，手机端自适应。"""
-    FONT = ("-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,"
-            "'PingFang SC','Microsoft YaHei',Arial,sans-serif")
-
-    # ── 行动数据表（两列）──
-    tr = []
-    for i, r in enumerate(rows):
-        label, value = r[0], r[1]
-        sub = r[2] if len(r) > 2 else ""
-        color = r[3] if len(r) > 3 else None
-        bg = "#ffffff" if i % 2 == 0 else "#fafafa"
-        vstyle = f"color:{color};" if color else "color:#1a1a1a;"
-        sub_html = (f'<div style="font-size:12px;color:#8a8a8a;font-weight:400;'
-                    f'margin-top:3px;line-height:1.4">{_esc(sub)}</div>') if sub else ""
-        tr.append(
-            f'<tr style="background:{bg}">'
-            f'<td style="padding:10px;border-bottom:1px solid #ededed;'
-            f'font-size:13px;color:#666;vertical-align:top;white-space:nowrap">'
-            f'{_esc(label)}</td>'
-            f'<td style="padding:10px;border-bottom:1px solid #ededed;'
-            f'font-size:16px;font-weight:700;text-align:right;vertical-align:top;'
-            f'{vstyle}">{value}{sub_html}</td></tr>')
-    act_table = ('<table width="100%" cellpadding="0" cellspacing="0" '
-                 'style="border-collapse:collapse;width:100%">'
-                 + "".join(tr) + '</table>')
-
-    # ── 信号依据表（三列：指标 / 数值 / 判定）──
-    itr = ['<tr style="background:#f5f6f8">'
-           '<td style="padding:7px 10px;font-size:12px;color:#888">指标</td>'
-           '<td style="padding:7px 10px;font-size:12px;color:#888;'
-           'text-align:right">数值</td>'
-           '<td style="padding:7px 10px;font-size:12px;color:#888;'
-           'text-align:right">判定</td></tr>']
-    for i, r in enumerate(ind_rows):
-        label, value = r[0], r[1]
-        judge = r[2] if len(r) > 2 else ""
-        jcolor = r[3] if len(r) > 3 else ""
-        bg = "#ffffff" if i % 2 == 0 else "#fafafa"
-        jstyle = f"color:{jcolor};font-weight:700;" if jcolor else "color:#bbb;"
-        itr.append(
-            f'<tr style="background:{bg}">'
-            f'<td style="padding:8px 10px;border-top:1px solid #ededed;'
-            f'font-size:13px;color:#555;white-space:nowrap">{_esc(label)}</td>'
-            f'<td style="padding:8px 10px;border-top:1px solid #ededed;'
-            f'font-size:14px;color:#1a1a1a;text-align:right;'
-            f'font-variant-numeric:tabular-nums">{_esc(value)}</td>'
-            f'<td style="padding:8px 10px;border-top:1px solid #ededed;'
-            f'font-size:12px;text-align:right;{jstyle}">{_esc(judge)}</td></tr>')
-    ind_table = ('<table width="100%" cellpadding="0" cellspacing="0" '
-                 'style="border-collapse:collapse;width:100%;'
-                 'border:1px solid #ededed;border-radius:6px">'
-                 + "".join(itr) + '</table>')
-
-    note_html = (f'<div style="font-size:13px;color:#555;line-height:1.6;'
-                 f'margin-top:10px">{_esc(note)}</div>') if note else ""
-    warn_html = (f'<div style="margin:14px 16px 0;padding:10px 12px;'
-                 f'background:#fff8e1;border-left:3px solid #f9a825;'
-                 f'font-size:13px;color:#6d4c00;line-height:1.55">'
-                 f'{_esc(warn.strip())}</div>') if warn else ""
-
-    return f"""<div style="margin:0;padding:14px 10px;background:#f4f5f7">
-<div style="max-width:600px;margin:0 auto;background:#ffffff;border-radius:10px;overflow:hidden;font-family:{FONT};color:#1a1a1a">
-
-  <div style="background:{accent};padding:14px 16px">
-    <div style="font-size:17px;font-weight:700;color:#ffffff;line-height:1.3">{_esc(title)}</div>
-    <div style="font-size:12px;color:#ffffff;opacity:.85;margin-top:4px">{_esc(subtitle)}</div>
-  </div>
-
-  <div style="padding:16px 16px 0">
-    <div style="font-size:15px;font-weight:700;color:{accent};margin-bottom:10px">{_esc(head)}</div>
-    {act_table}
-    {note_html}
-  </div>
-
-  <div style="padding:18px 16px 0">
-    <div style="font-size:14px;font-weight:700;color:#333;margin-bottom:9px">信号依据</div>
-    {ind_table}
-    <div style="font-size:12px;color:#8a8a8a;margin-top:8px;line-height:1.5">
-      判定条件：收盘价 &gt; EMA200 且 DIF 快线 &gt; 0
-    </div>
-  </div>
-{warn_html}
-  <div style="padding:14px 16px 16px;margin-top:18px;border-top:1px solid #eee;font-size:11px;color:#9a9a9a;line-height:1.6">
-    {_esc(footer)}<br>
-    本邮件自动生成，仅供研究，不构成投资建议。
-  </div>
-
-</div>
-</div>"""
-
-
 def notify_signal(symbol: str, interval: str, sg: dict,
                   capital: float = 1000.0, frac: float = 1.0,
                   src: str = "api", stale: float = 0.0,
@@ -671,119 +511,162 @@ def notify_signal(symbol: str, interval: str, sg: dict,
         print(f"  [邮件] {symbol} 状态未变化（{'持有' if now else '空仓'}），不推送。")
         return
 
-    cash_note = "满仓" if frac >= 1.0 else f"留 {(1-frac)*100:.0f}% 现金"
-    cur = sg["close"]
+    # 资金分配说明：区分「总资金」和「本标的分配额」，避免用户误以为
+    # 每个标的都要投一整套本金（5 个标的各 1000U = 5000U，远超账户余额）
+    if total_capital and n_symbols > 1:
+        alloc = (f"  资金分配：总资金 {total_capital:,.0f} U ÷ {n_symbols} 个标的 "
+                 f"= 本标的 {capital:,.0f} U\n")
+    else:
+        alloc = ""
 
-    # ══════════ 开仓价判定 ══════════
-    # 优先级：① 实盘成交均价（最准）② 状态文件里记录的 ③ 本次刚入场 → 推荐价
-    #         ④ 都没有（日报上线前就已持仓）→ 不编造，标「未记录」
+    cash_note = "满仓" if frac >= 1.0 else f"留 {(1-frac)*100:.0f}% 现金"
+
+    # ══════════ 持仓 / 下单信息段 ══════════
     have_entry = False
-    ep, ep_src = None, ""
     if now:
+        cur = sg["close"]
+        # 开仓价优先级：① 实盘成交均价（最准） ② 状态文件里记录的开仓价
+        #              ③ 本次刚发出买入信号 → 用「收盘价 ×(1+滑点)」当参考价
+        #              ④ 以上都没有（日报上线前就已持仓）→ 不编造，显示「未记录」
         if fill_price:
             ep, ep_src, have_entry = float(fill_price), "实盘成交均价", True
         elif rec.get("entry_price"):
             ep, ep_src, have_entry = float(rec["entry_price"]), "开仓当日记录", True
         elif changed:
-            ep, ep_src, have_entry = fill, "推荐开仓价", True
-
-    # ══════════ 主题 + 结构化数据 ══════════
-    # rows     = 行动数据 (标签, 数值, 备注, 颜色)
-    # ind_rows = 信号依据 (指标, 数值, 判定文字, 判定颜色)
-    note = ""
-    if changed and now:
-        subject = f"[MACD-X 现货] {symbol} 买入信号 · {sg['date'][:10]}"
-        title, accent, action = f"{symbol} · 买入信号", _C_RED, "买入"
-        if fill_price:
-            head = "★ 已买入成交（市价单）"
-            rows = [("实际开仓价", f"{ep:,.4f}", "实盘成交均价")]
+            ep, ep_src, have_entry = fill, f"参考价（收盘 ×(1+{p['slip']*100:.3f}% 滑点)）", True
         else:
-            head = "★ 立即买入（市价单）"
-            rows = [("推荐开仓价", f"{fill:,.4f}",
-                     f"收盘 {cur:,.2f} ×(1+{p['slip']*100:.3f}% 滑点)")]
-        rows.append(("买入数量", f"{qty:.6f} {base}", ""))
-        rows.append(("投入金额", f"{invest:,.0f} U",
-                     f"{cash_note} · 无杠杆 · 手续费约 {invest*p['fee']:.2f} U"))
-        if total_capital and n_symbols > 1:
-            rows.append(("资金分配",
-                         f"总资金 {total_capital:,.0f} U ÷ {n_symbols} 标的",
-                         f"本标的 {capital:,.0f} U"))
-        note = "下单后不设止盈止损、不挂条件单、不加杠杆，等离场信号。"
+            ep, ep_src = None, ""
 
-    elif changed and not now:
-        subject = f"[MACD-X 现货] {symbol} 离场信号 · {sg['date'][:10]}"
-        title, accent, action = f"{symbol} · 离场信号", _C_GREEN, "卖出"
-        head = "★ 立即卖出（市价单，全部持仓）"
-        rows = [("推荐成交价", f"{cur*(1-p['slip']):,.4f}",
-                 f"收盘 {cur:,.2f} ×(1-{p['slip']*100:.3f}% 滑点)"),
-                ("卖出数量", "全部持仓", "换回 USDT")]
-        note = "不要反手做空（本策略只做多现货），等下一次买入信号。"
+        ed = rec.get("entry_date") or sg["date"]
+        inv = rec.get("invest") or invest
+        q = rec.get("qty") or qty
 
-    elif now:
-        subject = f"[MACD-X 现货] {symbol} 持仓中 · {sg['date'][:10]}"
-        title, accent, action = f"{symbol} · 持仓中", _C_SLATE, "持仓"
-        head = "★ 继续持有，无需操作"
         if have_entry:
-            inv = rec.get("invest") or invest
-            q = rec.get("qty") or qty
-            ed = rec.get("entry_date") or sg["date"]
             pnl_pct = (cur / ep - 1) * 100
             pnl_u = inv * (cur / ep - 1)
-            pnl_color = _C_RED if pnl_pct >= 0 else _C_GREEN
             try:
                 held = max(0, (datetime.strptime(sg["date"][:10], "%Y-%m-%d")
                                - datetime.strptime(ed[:10], "%Y-%m-%d")).days)
             except Exception:
                 held = 0
-            rows = [("开仓价", f"{ep:,.4f}", ep_src),
-                    ("当前价", f"{cur:,.4f}", ""),
-                    ("浮动盈亏", f"{pnl_pct:+.2f}%",
-                     f"{pnl_u:+,.2f} U / 投入 {inv:,.0f} U", pnl_color),
-                    ("持有", f"{held} 天", f"约 {q:.6f} {base}")]
-            note = "等离场信号，中途不干预。"
+            pos_block = (f"── 持仓信息 ──\n"
+                         f"开仓价（下单价）: {ep:,.4f}   [{ep_src}]\n"
+                         f"开仓日期        : {ed[:10]}\n"
+                         f"当前价          : {cur:,.4f}\n"
+                         f"浮动盈亏        : {pnl_pct:+.2f}%   "
+                         f"（{pnl_u:+,.2f} U / 投入 {inv:,.0f} U）\n"
+                         f"持有天数        : {held} 天\n"
+                         f"持仓数量        : 约 {q:.6f} {base}\n")
         else:
             gap_ep = (cur / sg["ema_trend"] - 1) * 100 if sg["ema_trend"] else 0.0
-            rows = [("开仓价", "未记录", "日报上线前已持仓，不编造"),
-                    ("当前价", f"{cur:,.4f}", ""),
-                    ("距 EMA200", f"{gap_ep:+.2f}%", "")]
-            note = (f'想显示盈亏 → 在 signal_state.json 的 {key} 里补一行 '
-                    f'"entry_price": 你的实际买入均价')
-
+            pos_block = (f"── 持仓信息 ──\n"
+                         f"当前持有 {base}，但【开仓价未记录】。\n"
+                         f"当前价          : {cur:,.4f}\n"
+                         f"距 EMA(200)     : {gap_ep:+.2f}%\n"
+                         f"· 日报功能上线前你已在持仓，历史开仓价无从得知，故不编造。\n"
+                         f"· 想看到浮动盈亏，可在 signal_state.json 的 {key} 里手工补一行\n"
+                         f"  \"entry_price\": 你的实际买入均价，下次推送即生效。\n")
     else:
-        subject = f"[MACD-X 现货] {symbol} 空仓中 · {sg['date'][:10]}"
-        title, accent, action = f"{symbol} · 空仓中", _C_SLATE, "空仓"
-        head = "★ 继续空仓，无需操作"
-        gap = (cur / sg["ema_trend"] - 1) * 100 if sg["ema_trend"] else 0.0
-        rows = [("当前价", f"{cur:,.4f}", ""),
-                ("距 EMA200", f"{gap:+.2f}%", "")]
-        note = "重新入场条件：收盘价站上 EMA200 且 DIF 快线 > 0。"
+        gap = (sg["close"] / sg["ema_trend"] - 1) * 100 if sg["ema_trend"] else 0.0
+        pos_block = (f"── 持仓信息 ──\n"
+                     f"当前无持仓（空仓等待中）\n"
+                     f"重新入场条件：收盘价 > EMA(200) 且 DIF 快线 > 0\n"
+                     f"当前收盘价距 EMA(200)：{gap:+.2f}%\n")
 
-    # ── 信号依据（三种线全列，用户曾因只看柱子而误判）──
-    ema_ok = bool(sg["price_above_ema"])
-    dif_ok = bool(sg["macd_above_zero"])
-    ind_rows = [
-        ("收盘价", f"{cur:,.4f}", "", ""),
-        ("EMA200", f"{sg['ema_trend']:,.4f}",
-         "✓ 站上" if ema_ok else "✗ 跌破", _C_RED if ema_ok else _C_GREEN),
-        ("DIF 快线", f"{sg['macd']:+,.4f}",
-         "✓ > 0" if dif_ok else "✗ < 0", _C_RED if dif_ok else _C_GREEN),
-        ("DEA 慢线", f"{sg['dea']:+,.4f}", "", ""),
-        ("MACD 柱", f"{sg['hist']*2:+,.4f}", "", ""),
-    ]
+    # ══════════ 主题 / 动作段 ══════════
+    if changed:
+        if now:
+            subject = f"[MACD-X 现货] {symbol} 买入信号 · {sg['date'][:10]}"
+            state_line = "状态变化：空仓 → 持有　【方向已改变】"
+            detail = (f"★ 建议动作：买入（市价单）\n"
+                      f"{alloc}"
+                      f"  本标的分配：{capital:,.0f} U\n"
+                      f"  建议投入：{invest:,.0f} U（{frac*100:.0f}% 仓位，{cash_note}）\n"
+                      f"  成交价参考：{fill:,.2f}（含 {p['slip']*100:.3f}% 滑点）\n"
+                      f"  买入数量：约 {qty:.6f} {base}\n"
+                      f"  手续费：约 {invest*p['fee']:.2f} U")
+            tips = ("1. 请在收盘后尽快下单（策略按「次日开盘价成交」回测）\n"
+                    "2. 不要设止盈、不要设止损、不要挂条件单\n"
+                    "3. 本策略无杠杆（现货），不要上杠杆\n"
+                    "4. 胜率约 37%，连续亏损 3~4 笔属正常，请按规则执行")
+            tail = "本邮件在方向变化时立即发送；此后每天推送持仓日报。"
+            action = "买入"
+        else:
+            subject = f"[MACD-X 现货] {symbol} 离场信号 · {sg['date'][:10]}"
+            state_line = "状态变化：持有 → 空仓　【方向已改变】"
+            detail = (f"★ 建议动作：卖出（市价单）\n"
+                      f"  卖出：全部持仓\n"
+                      f"  成交价参考：{sg['close']*(1-p['slip']):,.2f}（含滑点）\n"
+                      f"  卖出后持有 USDT 等待下一次信号")
+            tips = ("1. 请在收盘后尽快下单（策略按「次日开盘价成交」回测）\n"
+                    "2. 卖出后不要反手做空（本策略只做多现货）\n"
+                    "3. 不要设止盈、不要设止损、不要挂条件单")
+            tail = "本邮件在方向变化时立即发送；此后每天推送持仓日报。"
+            action = "卖出"
+    else:
+        if now:
+            subject = f"[MACD-X 现货] {symbol} 持仓中 · {sg['date'][:10]}"
+            state_line = "状态变化：无（继续持有）"
+            detail = "★ 无需操作：方向未变，继续持有。"
+            tips = ("1. 不要设止盈、不要设止损、不要挂条件单\n"
+                    "2. 中途不要手动干预，等信号反转再离场")
+            if not have_entry:
+                tips += ("\n3. 本标的开仓价未记录（日报上线前已在持仓），"
+                         "如需看盈亏请按上文提示手工补录")
+            tail = "本邮件每天推送一次；方向变化时会立即单独通知。"
+            action = "持仓"
+        else:
+            subject = f"[MACD-X 现货] {symbol} 空仓中 · {sg['date'][:10]}"
+            state_line = "状态变化：无（继续空仓）"
+            detail = "★ 无需操作：方向未变，继续空仓等待。"
+            tips = ("1. 保持空仓，不要抄底、不要抢反弹\n"
+                    "2. 等下一个买入信号（收盘价站上 EMA200 且 DIF > 0）")
+            tail = "本邮件每天推送一次；方向变化时会立即单独通知。"
+            action = "空仓"
 
+    mark = lambda b: "在均线上方 ✓" if b else "在均线下方 ✗"
     warn = ""
     if stale > 2:
-        warn = (f"⚠ 数据来自本地缓存（联网失败），最后一根 K 线距今 "
-                f"{stale:.1f} 天，信号可能不是最新，请人工核对后再下单。")
+        warn = (f"\n⚠ 注意：本次数据来自本地缓存（联网失败），最后一根 K 线"
+                f"距今 {stale:.1f} 天，信号可能不是最新的，请人工核对后再下单。\n")
 
-    footer = f"{symbol} · {interval} · 信号日 {sg['date'][:10]} · 推送 {now_cn()}"
-    subtitle = f"信号日 {sg['date'][:10]} · 推送 {now_cn()}"
+    body = f"""MACD-X 现货 · 策略信号
+{'='*44}
 
-    body = build_mail_text(title, subtitle, head, rows, note, ind_rows,
-                           warn, footer)
-    html = build_mail_html(title, subtitle, head, rows, note, ind_rows,
-                           warn, footer, accent)
-    ok = send_email(subject, body, html=html)
+标的：{symbol}   周期：{interval}
+信号日期：{sg['date']}（日线收盘 UTC 00:00 / 北京时间 08:00）
+{state_line}
+推送时间：{now_cn()}（北京时间）
+数据来源：{src}
+{warn}
+{pos_block}
+── 行情数据 ──
+收盘价    : {sg['close']:,.4f}
+EMA(200)  : {sg['ema_trend']:,.4f}   {mark(sg['price_above_ema'])}
+ATR(14)   : {sg['atr']:,.4f}
+
+── MACD 三条线（对照币安图表看）──
+DIF 快线  : {sg['macd']:+.4f}   {'在零轴上方 ✓' if sg['macd_above_zero'] else '在零轴下方 ✗'}
+              ↑ 策略判定用的就是这一条（要求 > 0）
+DEA 慢线  : {sg['dea']:+.4f}
+MACD 柱   : {sg['hist']*2:+.4f}   ← 币安图表上最显眼的那根柱子就是这个（显示值 ×2）
+              = 2 × (DIF - DEA) = 2 × ({sg['macd']:+.4f} - {sg['dea']:+.4f})
+
+  ⚠ 常见误会：DIF 和「柱」的符号经常相反，两个都是对的。
+     柱为正 = 动能在加速；DIF 为正 = 中期动能方向向上。
+     柱翻脸比 DIF 频繁约 2.5 倍，所以策略用 DIF 而不用柱做过滤。
+
+{detail}
+
+── 操作提示 ──
+{tips}
+
+── 下次提醒 ──
+{tail}
+{'='*44}
+本邮件由 macdx_strategy.py 自动生成，仅供研究，不构成投资建议。
+"""
+    ok = send_email(subject, body)
     if ok:
         print(f"  [邮件] 已发送【{action}】提醒到 {EMAIL_CONFIG['to']}")
         # 持仓时把开仓价等写回状态文件，之后每天读出来算浮动盈亏；

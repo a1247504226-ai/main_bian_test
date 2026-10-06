@@ -178,8 +178,13 @@ def atr(bars, n=14):
 
 
 # ============================================================ 信号与仓位
-def compute_profile(profile, bars, cfg):
-    """算出某档位（A/B/C）在最后一根已收盘K线上的目标仓位。"""
+def compute_profile(profile, bars, cfg, symbol=None, equity_override=None):
+    """算出某档位（A/B/C）在最后一根已收盘K线上的目标仓位。
+
+    symbol          : 交易对（多标的模式下必须传，用于显示与状态键）
+    equity_override : 覆盖本金。多标的模式下传「账户总权益 ÷ 币数」，
+                      这样每个币的 sleeve 规模自动跟随账户（动态再平衡）。
+    """
     closes = [b["close"] for b in bars]
     atr_v = atr(bars, cfg["atr_period"])
     last = bars[-1]
@@ -195,7 +200,7 @@ def compute_profile(profile, bars, cfg):
 
     L = float(cfg["leverage"])
     params = cfg["params"]
-    equity = float(profile["equity"])
+    equity = float(equity_override) if equity_override else float(profile["equity"])
     sleeve_eq = equity / len(params)
 
     sleeves = []
@@ -226,7 +231,8 @@ def compute_profile(profile, bars, cfg):
 
     return {
         "key": None, "name": profile["name"], "vt": vt, "equity": equity,
-        "px": px, "atr": a, "dvol": dvol, "expo": expo, "L": L,
+        "symbol": symbol or cfg.get("symbol"), "px": px, "atr": a, "dvol": dvol,
+        "expo": expo, "L": L,
         "sleeves": sleeves, "net": net, "gross": gross, "net_expo": net_expo,
         "qty": qty, "margin": margin, "liq": liq, "side": side,
         "bar_dt": datetime.fromtimestamp(last["open_time"] / 1000, CST),
@@ -282,6 +288,60 @@ def save_state(state):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
     os.replace(tmp, STATE_PATH)
+
+
+# ============================================================ 多标的辅助
+def symbols_of(cfg, override=None):
+    """返回要运行的交易对列表。**这是「仅 BTC / 四币合一」的唯一开关**。
+
+    优先级（从高到低）：
+      1. override 参数（来自命令行 --symbols A,B,C）—— 临时覆盖，不动配置
+      2. config 顶层 run_mode：
+           "single" → 只用 config.symbol（老行为，仅 BTC）
+           "multi"  → 用 config.symbols 里的全部（四币合一）
+           未填/其它 → 按 symbols 长度自动判断（向后兼容老配置）
+      3. config.symbols 长度 ≥ 2 → 多标的；否则单标的
+
+    返回的列表长度 ≥ 2 即视为多标的等权模式。
+    """
+    if override:
+        clean = [str(s).strip().upper() for s in override if str(s).strip()]
+        if clean:
+            return clean
+
+    syms = cfg.get("symbols")
+    clean = ([str(s).strip().upper() for s in syms if str(s).strip()]
+             if isinstance(syms, list) else [])
+    single = [str(cfg.get("symbol") or "BTCUSDT").strip().upper()]
+
+    mode = str(cfg.get("run_mode") or "").strip().lower()
+    if mode == "single":
+        return single
+    if mode == "multi":
+        return clean if len(clean) >= 2 else single
+    # 未指定 run_mode：按数组长度自动判断（老配置完全不受影响）
+    return clean if len(clean) >= 2 else single
+
+
+def is_multi(cfg):
+    return len(symbols_of(cfg)) >= 2
+
+
+def coin_name(symbol):
+    """BTCUSDT -> BTC，用于邮件里显示。"""
+    s = str(symbol).upper()
+    for quote in ("USDT", "USDC", "BUSD", "USD"):
+        if s.endswith(quote) and len(s) > len(quote):
+            return s[:-len(quote)]
+    return s
+
+
+def state_key(symbol, profile_key, multi):
+    """状态键。多标的模式下带交易对前缀，避免不同币互相覆盖。
+
+    单标的模式仍用原来的 "A"/"B"/"C"，老状态文件可以直接沿用。
+    """
+    return f"{symbol}|{profile_key}" if multi else profile_key
 
 
 # ============================================================ 邮件
@@ -374,6 +434,14 @@ def format_body(infos, title, note="", levels=None, actions=None, prev_map=None,
     L.append(f"★★ 你要做的事（{main['name']} · 本金 {main['equity']:,.0f} U）★★")
     L.append("-" * 58)
     L.append(f"  方向        {side}")
+    e_px, e_day, e_hold = entry_info(lv, main)
+    if e_px:
+        chg, lev_pct = entry_pnl(e_px, main)
+        tag = ("本次新建仓" if lv.get("entry_new")
+               else f"{e_day} 建立，已持有 {e_hold} 天")
+        L.append(f"  建仓价      {e_px:,.0f} USDT    ← {tag}")
+        L.append(f"  当前浮动    价格 {chg:+.2f}%　保证金口径 {lev_pct:+.2f}%"
+                 f"（{main['L']:.0f}×）")
     L.append(f"  杠杆        {main['L']:.0f}× 逐仓（固定不变）")
     if abs(main["net"]) > 1e-9:
         L.append(f"  保证金      {main['margin']:,.0f} USDT"
@@ -384,7 +452,8 @@ def format_body(infos, title, note="", levels=None, actions=None, prev_map=None,
         L.append("")
         if lv.get("stop"):
             L.append(f"  止损提醒    {lv['stop']:,.0f}"
-                     f"（距现价 {(lv['stop']/main['px']-1)*100:+.1f}%）")
+                     f"（距现价 {(lv['stop']/main['px']-1)*100:+.1f}%）"
+                     f"   ← 只是提醒位，不会自动挂单")
         else:
             L.append(f"  止损提醒    不设（靠方向反转离场）")
         L.append(f"  爆仓价      {lv.get('liq', main['liq']):,.0f}"
@@ -562,8 +631,18 @@ def format_body_html(infos, title, note="", levels=None, actions=None, primary="
 
     # ① 你要做的事
     if abs(main["net"]) > 1e-9:
-        rows = [
-            ("方向", _side_html(main["net"]), ""),
+        rows = [("方向", _side_html(main["net"]), "")]
+        e_px, e_day, e_hold = entry_info(lv, main)
+        if e_px:
+            chg, lev_pct = entry_pnl(e_px, main)
+            tag = ("本次新建仓" if lv.get("entry_new")
+                   else f"{e_day} 建立，已持有 {e_hold} 天")
+            rows.append(("建仓价", f"{e_px:,.0f}", tag))
+            color = RED if chg > 0 else (GREEN if chg < 0 else GREY)
+            rows.append(("当前浮动",
+                         f'<span style="color:{color};">价格 {chg:+.2f}%</span>',
+                         f"保证金口径 {lev_pct:+.2f}%（{main['L']:.0f}×）"))
+        rows += [
             ("杠杆", f"{main['L']:.0f}× 逐仓", "固定不变"),
             ("保证金", f"{main['margin']:,.0f} USDT", "划这么多进合约账户"),
             ("下单数量", f"{main['qty']:.6f} BTC", "币安下单框填这个"),
@@ -573,7 +652,7 @@ def format_body_html(infos, title, note="", levels=None, actions=None, primary="
         rk = []
         if lv.get("stop"):
             rk.append(("止损提醒", f"{lv['stop']:,.0f}",
-                       f"{(lv['stop']/main['px']-1)*100:+.1f}%"))
+                       f"{(lv['stop']/main['px']-1)*100:+.1f}%　只是提醒，不会自动挂单"))
         else:
             rk.append(("止损提醒", "不设", "靠方向反转离场"))
         rk.append(("爆仓价", f"{lv.get('liq', main['liq']):,.0f}",
@@ -638,8 +717,16 @@ def format_alert_body_html(infos, levels, fired, px, primary="B"):
     P.append(_box("⚠ 这是「价格触及」提醒，不是策略信号",
                   _p("策略本身不挂价格止损，是否操作由你决定。", 12, "#8a5a00"),
                   "#f5a623", "#fff8e6"))
-    rows = [
-        ("方向", _side_html(main["net"]), ""),
+    rows = [("方向", _side_html(main["net"]), "")]
+    e_px, e_day, e_hold = entry_info(mlv, main)
+    if e_px:
+        chg, lev_pct = entry_pnl(e_px, main)
+        color = RED if chg > 0 else (GREEN if chg < 0 else GREY)
+        rows.append(("建仓价", f"{e_px:,.0f}", f"{e_day}　已持有 {e_hold} 天"))
+        rows.append(("当前浮动",
+                     f'<span style="color:{color};">价格 {chg:+.2f}%</span>',
+                     f"保证金口径 {lev_pct:+.2f}%（{main['L']:.0f}×）"))
+    rows += [
         ("杠杆", f"{main['L']:.0f}× 逐仓", ""),
         ("当前持仓", f"{main['qty']:.6f} BTC", f"保证金 {main['margin']:,.0f} U"),
     ]
@@ -729,6 +816,12 @@ def format_alert_body(infos, levels, fired, px, log, primary="B"):
     L.append(f"★★ 你的仓位（{main['name']} · 本金 {main['equity']:,.0f} U）★★")
     L.append("-" * 58)
     L.append(f"  方向        {'做多 ▲' if main['net'] > 0 else ('做空 ▼' if main['net'] < 0 else '空仓')}")
+    e_px, e_day, e_hold = entry_info(mlv, main)
+    if e_px:
+        chg, lev_pct = entry_pnl(e_px, main)
+        L.append(f"  建仓价      {e_px:,.0f} USDT    ← {e_day} 建立，已持有 {e_hold} 天")
+        L.append(f"  当前浮动    价格 {chg:+.2f}%　保证金口径 {lev_pct:+.2f}%"
+                 f"（{main['L']:.0f}×）")
     L.append(f"  杠杆        {main['L']:.0f}× 逐仓")
     L.append(f"  当前持仓    {main['qty']:.6f} BTC"
              f"（保证金 {main['margin']:,.0f} U）")
@@ -797,6 +890,54 @@ def _peak_since(bars, entry_open_ms, is_long):
     return max(b["high"] for b in sub) if is_long else min(b["low"] for b in sub)
 
 
+def _migrate_state(state, syms):
+    """把老版单标的状态（"A"/"B"/"C"）迁到多标的键（"BTCUSDT|A"）上。
+
+    只在多标的模式下调用，且只在目标键不存在时复制，不会覆盖已有记录。
+    返回迁移条数。旧键保留不删（切回 single 模式还能用）。
+    """
+    btc = "BTCUSDT" if "BTCUSDT" in syms else syms[0]
+    n = 0
+    for k in ("A", "B", "C"):
+        old = state.get(k)
+        if not isinstance(old, dict):
+            continue
+        nk = f"{btc}|{k}"
+        if nk not in state:
+            state[nk] = dict(old)
+            n += 1
+    return n
+
+
+def entry_info(lv, inf):
+    """从风控位里取出「建仓价 / 建仓日 / 持有天数」。
+
+    空仓时返回 (None, None, 0)。
+    建仓价 = 方向确认那根K线的收盘价（也就是你实际该下单的价位）。
+    """
+    if abs(inf["net"]) < 1e-9:
+        return None, None, 0
+    px = lv.get("base")
+    if not px:
+        return None, None, 0
+    eb = lv.get("entry_bar")
+    dt = datetime.fromtimestamp(eb / 1000, CST) if eb else inf["bar_dt"]
+    days = (inf["bar_dt"].date() - dt.date()).days
+    return float(px), dt.strftime("%Y-%m-%d"), max(0, days)
+
+
+def entry_pnl(entry_px, inf):
+    """返回 (价格变动%, 保证金口径收益率%)。
+
+    保证金收益率 = 价格变动 × 杠杆 —— 因为 名义 = 保证金 × 杠杆，
+    所以仓位盈亏 ÷ 保证金 = 价格变动 × 杠杆。
+    """
+    if not entry_px:
+        return None, None
+    chg = inf["px"] / float(entry_px) - 1.0
+    return chg * 100.0, chg * float(inf["L"]) * 100.0
+
+
 def _build_actions(infos, changed, first_run):
     """把「方向变化」翻译成明确的手动操作清单。"""
     out = []
@@ -841,31 +982,300 @@ def _state_entry(inf, lv, prev):
     }
 
 
+# ============================================================ 多标的：操作清单与邮件
+def _build_actions_multi(infos, changed, first_run):
+    """多标的版的「手动操作清单」——按币种列出。"""
+    out = []
+    changed_keys = {i["key"] for _, i in changed}
+    first_keys = {i["key"] for i in first_run}
+    for inf in infos:
+        k, coin = inf["key"], inf["coin"]
+        if k in changed_keys:
+            prev = next(p for p, i in changed if i["key"] == k)
+            old_side = _side_txt(prev.get("net_expo", 0) or 0)
+            old_qty = float(prev.get("qty") or 0)
+            parts = []
+            if old_qty > 0:
+                parts.append(f"平掉{old_side}头 {old_qty:.6f} {coin}")
+            else:
+                parts.append("原为空仓")
+            if abs(inf["net"]) > 1e-9:
+                parts.append(f"开{_side_txt(inf['net'])}头 {inf['qty']:.6f} {coin}")
+            else:
+                parts.append("本次不建仓")
+            out.append(f"{coin}（{inf['name']}）：" + " → ".join(parts))
+        elif k in first_keys:
+            if abs(inf["net"]) > 1e-9:
+                out.append(f"{coin}（{inf['name']}）：开{_side_txt(inf['net'])}头 "
+                           f"{inf['qty']:.6f} {coin}（首次建仓）")
+            else:
+                out.append(f"{coin}（{inf['name']}）：本次空仓")
+    return out
+
+
+def _multi_rows(infos, primary, levels):
+    """按 primary 档抽出「每个币一行」的数据，顺序与 syms 一致。"""
+    return [i for i in infos if i["pk"] == primary]
+
+
+def format_multi_body(infos, title, note, levels, actions, primary, cfg, syms, btc_ref):
+    """多标的合并邮件的纯文本兜底版。"""
+    now = datetime.now(CST)
+    ref = infos[0]
+    prim = _multi_rows(infos, primary, levels)
+    by_sym = {i["symbol"]: i for i in prim}
+    t_margin = sum(i["margin"] for i in prim)
+    t_notional = sum(abs(i["net"]) for i in prim)
+    t_eq = sum(i["equity"] for i in prim) or 1.0
+
+    L = []
+    L.append(f"{now:%Y-%m-%d %H:%M}（北京时间）  数据 {ref['bar_dt']:%Y-%m-%d} 日线")
+    L.append(f"模式：多标的等权（{len(syms)} 个交易对）  每个币配额 = 账户总权益 ÷ {len(syms)}")
+    if note:
+        L.append("")
+        L.append(note)
+    L.append("")
+    L.append(f"===== ① 四币等权 · 你实际要下的单（{primary} 档 · 每币 "
+             f"{prim[0]['equity']:,.0f} U）=====")
+    for s in syms:
+        inf = by_sym.get(s)
+        if not inf:
+            continue
+        lv = levels.get(inf["key"], {})
+        L.append(f"  {inf['coin']:<6}{inf['side']:<4}保证金 {inf['margin']:>7,.0f} U   "
+                 f"数量 {inf['qty']:>12.6f}   名义 {abs(inf['net']):>7,.0f} U   "
+                 f"爆仓价 {lv.get('liq', inf['liq']):>11,.0f}")
+    L.append(f"  {'合计':<6}{'':4}保证金 {t_margin:>7,.0f} U   "
+             f"{'':26}名义 {t_notional:>7,.0f} U")
+    L.append(f"  → 合计保证金占本金 {t_margin / t_eq * 100:.1f}%，其余为安全垫")
+
+    # ② 建仓价（你是什么价位进的）
+    L.append("")
+    L.append("===== ② 你的持仓 · 建仓价 / 止损提醒 =====")
+    L.append("  " + _pad("币种", 7) + _pad("方向", 7) + _pad("建仓价", 12, "right")
+             + _pad("现价", 12, "right") + _pad("止损提醒", 12, "right")
+             + _pad("浮动", 11, "right") + "   建仓日")
+    for s in syms:
+        inf = by_sym.get(s)
+        if not inf:
+            continue
+        lv = levels.get(inf["key"], {})
+        e_px, e_day, e_hold = entry_info(lv, inf)
+        stop_txt = f"{lv['stop']:,.0f}" if lv.get("stop") else "不设"
+        if not e_px:
+            L.append("  " + _pad(inf["coin"], 7) + _pad("空仓", 7)
+                     + _pad("—", 12, "right") + _pad(f"{inf['px']:,.0f}", 12, "right")
+                     + _pad(stop_txt, 12, "right") + _pad("—", 11, "right") + "   —")
+            continue
+        chg, lev_pct = entry_pnl(e_px, inf)
+        tag = "本次新建仓" if lv.get("entry_new") else f"{e_day}（{e_hold}天）"
+        L.append("  " + _pad(inf["coin"], 7) + _pad(inf["side"], 7)
+                 + _pad(f"{e_px:,.0f}", 12, "right")
+                 + _pad(f"{inf['px']:,.0f}", 12, "right")
+                 + _pad(stop_txt, 12, "right")
+                 + _pad(f"{lev_pct:+.1f}%", 11, "right") + f"   {tag}")
+    L.append("  ※ 建仓价 = 方向确认那根K线的收盘价；浮动按保证金口径（价格变动 × 3）")
+    L.append(f"  ※ 止损提醒 = 吊灯 {float((cfg.get('risk') or {}).get('trail_atr', 5.0)):g}×ATR "
+             f"移动止损（跟着最高价往上走）—— 只是提醒位，脚本不会自动挂单或平仓")
+    L.append("  ※ 爆仓价见上表 ①；策略真正的离场信号是「方向反转」")
+
+    if btc_ref:
+        lvr = levels.get(btc_ref["key"], {})
+        L.append("")
+        L.append(f"===== ③ BTC 单跑参照（把 {btc_ref['equity']:,.0f} U 全押 BTC）=====")
+        L.append(f"  {btc_ref['side']}  保证金 {btc_ref['margin']:,.0f} U   "
+                 f"数量 {btc_ref['qty']:.6f} BTC   名义 {abs(btc_ref['net']):,.0f} U   "
+                 f"爆仓价 {lvr.get('liq', btc_ref['liq']):,.0f}")
+        L.append("  ※ 这是对照，不是你要下的单。四币方案下 BTC 只占 "
+                 f"{by_sym.get(btc_ref['symbol'], btc_ref)['equity']:,.0f} U 配额。")
+
+    if actions:
+        L.append("")
+        L.append("===== 需要你手动执行的操作 =====")
+        for a in actions:
+            L.append(f"  · {a}")
+
+    L.append("")
+    L.append("===== 三档对照（每币保证金）=====")
+    hdr = "  档位    " + "".join(f"{coin_name(s):>10}" for s in syms)
+    L.append(hdr)
+    for k in sorted({i["pk"] for i in infos}):
+        row = [i for i in infos if i["pk"] == k]
+        m = {i["symbol"]: i["margin"] for i in row}
+        L.append(f"  {k:<8}" + "".join(f"{m.get(s, 0):>9,.0f}U" for s in syms))
+    L.append("")
+    L.append("===== 止盈止损怎么工作 =====")
+    for t in ["止损 = 方向反转（邮件会告诉你平仓/反手），不用另外挂止损单",
+              "止盈 = 同样等方向反转，让利润奔跑",
+              "爆仓价是硬底，3× 逐仓下与仓位大小无关，只取决于杠杆",
+              "每个币独立判断方向，一个币爆仓不影响其他币（逐仓隔离）"]:
+        L.append(f"  · {t}")
+    L.append("")
+    L.append(f"生成时间 {now:%Y-%m-%d %H:%M:%S}（北京时间）")
+    return "\n".join(L)
+
+
+def format_multi_body_html(infos, title, note, levels, actions, primary, cfg, syms, btc_ref):
+    """多标的合并邮件的 HTML 版（手机友好）。"""
+    now = datetime.now(CST)
+    ref = infos[0]
+    prim = _multi_rows(infos, primary, levels)
+    by_sym = {i["symbol"]: i for i in prim}
+    t_margin = sum(i["margin"] for i in prim)
+    t_notional = sum(abs(i["net"]) for i in prim)
+    t_eq = sum(i["equity"] for i in prim) or 1.0
+    per_eq = prim[0]["equity"] if prim else 0.0
+
+    P = []
+    P.append(_p(f"{now:%Y-%m-%d %H:%M}（北京时间）　数据 {ref['bar_dt']:%Y-%m-%d} 日线", 12, "#9aa0a6"))
+    P.append(_p(f"模式：<b>多标的等权</b>（{len(syms)} 个交易对）　"
+                f"每个币配额 = 账户总权益 ÷ {len(syms)}"))
+    if note:
+        P.append('<div style="margin-top:10px;padding:10px 12px;background:#f7f7f9;'
+                 'border-radius:6px;font-size:12px;color:#6b7280;line-height:1.7;'
+                 f'white-space:pre-line;">{note}</div>')
+
+    # ① 四币等权
+    P.append(_h(f"① 四币等权 · 你实际要下的单（{primary} 档 · 每币 {per_eq:,.0f} U）"))
+    rows = []
+    for s in syms:
+        inf = by_sym.get(s)
+        if not inf:
+            continue
+        lv = levels.get(inf["key"], {})
+        rows.append([inf["coin"], _side_html(inf["net"]), f"{inf['margin']:,.0f} U",
+                     f"{inf['qty']:.6f}", f"{lv.get('liq', inf['liq']):,.0f}"])
+    rows.append(['<b>合计</b>', '', f"<b>{t_margin:,.0f} U</b>", '', ''])
+    P.append(_table(["币种", "方向", "保证金", "下单数量", "爆仓价"], rows,
+                    ["left", "center", "right", "right", "right"]))
+    P.append(f'<div style="font-size:11px;color:#9aa0a6;margin-top:6px;">'
+             f'合计名义 {t_notional:,.0f} U　保证金占本金 <b>{t_margin / t_eq * 100:.1f}%</b>'
+             f'（其余为安全垫）　杠杆 3× 逐仓　每个币独立隔离，互不影响</div>')
+
+    # ② 你的持仓：建仓价 / 止损提醒
+    P.append(_h("② 你的持仓 · 建仓价 / 止损提醒"))
+    rows = []
+    for s in syms:
+        inf = by_sym.get(s)
+        if not inf:
+            continue
+        lv = levels.get(inf["key"], {})
+        e_px, e_day, e_hold = entry_info(lv, inf)
+        stop_txt = f"{lv['stop']:,.0f}" if lv.get("stop") else "不设"
+        if not e_px:
+            rows.append([inf["coin"], "—", f"{inf['px']:,.0f}", stop_txt, "—", "空仓"])
+            continue
+        chg, lev_pct = entry_pnl(e_px, inf)
+        color = RED if chg > 0 else (GREEN if chg < 0 else GREY)
+        tag = ("<b>本次新建仓</b>" if lv.get("entry_new")
+               else f"{e_day}<br><span style=\"font-size:11px;color:#9aa0a6;\">"
+                    f"持有 {e_hold} 天</span>")
+        rows.append([inf["coin"], f"{e_px:,.0f}", f"{inf['px']:,.0f}", stop_txt,
+                     f'<span style="color:{color};">{lev_pct:+.1f}%</span>', tag])
+    P.append(_table(["币种", "建仓价", "现价", "止损提醒", "浮动", "建仓日"], rows,
+                    ["left", "right", "right", "right", "right", "right"]))
+    P.append(f'<div style="font-size:11px;color:#9aa0a6;margin-top:6px;line-height:1.7;">'
+             f'建仓价 = 方向确认那根K线的收盘价　'
+             f'浮动 = 价格变动 × {infos[0]["L"]:.0f}×（保证金口径）<br>'
+             f'止损提醒 = 吊灯 '
+             f'{float((cfg.get("risk") or {}).get("trail_atr", 5.0)):g}×ATR 移动止损'
+             f'（跟着最高价往上走）—— <b>只是提醒位，脚本不会自动挂单或平仓</b><br>'
+             f'爆仓价见上表 ①　策略真正的离场信号是「方向反转」</div>')
+
+    # ③ BTC 单跑参照
+    if btc_ref:
+        lvr = levels.get(btc_ref["key"], {})
+        own = by_sym.get(btc_ref["symbol"])
+        P.append(_h("③ BTC 单跑参照 · 如果把本金全押 BTC"))
+        P.append(_table(
+            ["方向", "保证金", "下单数量", "名义", "爆仓价"],
+            [[_side_html(btc_ref["net"]), f"{btc_ref['margin']:,.0f} U",
+              f"{btc_ref['qty']:.6f}", f"{abs(btc_ref['net']):,.0f} U",
+              f"{lvr.get('liq', btc_ref['liq']):,.0f}"]],
+            ["center", "right", "right", "right", "right"]))
+        P.append(f'<div style="font-size:11px;color:#9aa0a6;margin-top:6px;">'
+                 f'※ 这是<b>对照</b>，不要照着下单。四币方案下 BTC 只占 '
+                 f'{own["equity"] if own else per_eq:,.0f} U 配额，'
+                 f'比单跑小 {len(syms)} 倍，回撤也更小。</div>')
+
+    # ③ 手动操作
+    if actions:
+        P.append(_h("需要你手动执行的操作"))
+        P.append(_ul(actions))
+
+    # ④ 三档对照
+    keys_sorted = sorted({i["pk"] for i in infos})
+    if len(keys_sorted) > 1:
+        P.append(_h("三档对照（每币保证金）"))
+        rows = []
+        for k in keys_sorted:
+            row = [i for i in infos if i["pk"] == k]
+            m = {i["symbol"]: i["margin"] for i in row}
+            nm = row[0]["name"]
+            rows.append([f'<b>{nm}</b>' if k == primary else nm]
+                        + [f"{m.get(s, 0):,.0f}" for s in syms])
+        P.append(_table(["档位"] + [coin_name(s) for s in syms], rows,
+                        ["left"] + ["right"] * len(syms)))
+        vts = {i["pk"]: i["vt"] for i in infos}
+        P.append(f'<div style="font-size:11px;color:#9aa0a6;margin-top:6px;">'
+                 f'目标日波动：' + "　".join(
+                     f'{k} {vts[k] * 100:.0f}%' for k in keys_sorted)
+                 + f'　（你跑的是 <b>{primary}</b> 档）</div>')
+
+    # ⑤ 机制
+    P.append(_h("止盈止损怎么工作"))
+    P.append(_ul([
+        "止损 = 方向反转（邮件会告诉你平仓/反手），不用另外挂止损单",
+        "止盈 = 同样等方向反转，让利润奔跑（固定止盈会砍掉贡献收益的大单）",
+        "爆仓价是硬底，3× 逐仓下与仓位大小无关，只取决于杠杆",
+        "每个币独立判断方向，一个币爆仓只亏它自己那份保证金，不影响其他币",
+    ]))
+    P.append(_h("执行提示"))
+    P.append(_ul([
+        "收盘后确认的信号，下一根K线开盘时调仓",
+        "波动变大时自动缩仓；5 组参数方向不一致时净仓位变小，都属正常",
+        "账户涨了会自动等比放大仓位（配额 = 总权益 ÷ 币数），不用手动改",
+    ]))
+    P.append(f'<div style="font-size:11px;color:#9aa0a6;margin-top:16px;">'
+             f'生成时间 {now:%Y-%m-%d %H:%M:%S}（北京时间）</div>')
+
+    head = "/".join(coin_name(s) for s in syms)
+    return _shell(f"{head} 信号{SUBJECT_SUFFIX}", title, "".join(P))
+
+
 # ============================================================ 主流程
-def run(keys, force=False, dry_run=False, test=False, daily=False, log=None):
+def run(keys, force=False, dry_run=False, test=False, daily=False, log=None, symbols=None):
     log = log or setup_logger("live")
     cfg = load_config()
+    syms = symbols_of(cfg, override=symbols)
+    multi = len(syms) >= 2
+    n_sym = len(syms)
 
-    log.info("启动：profiles=%s force=%s dry_run=%s test=%s daily=%s",
-             keys, force, dry_run, test, daily)
+    log.info("启动：profiles=%s symbols=%s 模式=%s force=%s dry_run=%s test=%s daily=%s",
+             keys, syms, ("多标的等权" if multi else "单标的"), force, dry_run, test, daily)
 
-    bars = keep_closed(fetch_klines(cfg["symbol"], cfg["interval"],
-                                    cfg.get("kline_limit", 1000),
-                                    int(cfg["email"].get("max_retries", 3)), log))
-    if len(bars) < 300:
-        raise RuntimeError(f"已收盘K线只有 {len(bars)} 根，不足以计算 EMA60，请检查数据源")
-    staleness = (datetime.now(timezone.utc) - datetime.fromtimestamp(bars[-1]["close_time"] / 1000,
-                                                                    timezone.utc)).days
-    log.info("数据就绪：%d 根，最新已收盘 %s，滞后 %d 天",
-             len(bars), datetime.fromtimestamp(bars[-1]["open_time"] / 1000, CST).date(), staleness)
-    if staleness > int(cfg.get("max_bar_staleness_days", 3)):
-        log.warning("最新K线滞后 %d 天，数据源可能异常", staleness)
+    # ---------- ① 拉取各交易对K线 ----------
+    bars_map = {}
+    for s in syms:
+        b = keep_closed(fetch_klines(s, cfg["interval"], cfg.get("kline_limit", 1000),
+                                     int(cfg["email"].get("max_retries", 3)), log))
+        if len(b) < 300:
+            raise RuntimeError(f"{s} 已收盘K线只有 {len(b)} 根，不足以计算 EMA60，请检查数据源")
+        staleness = (datetime.now(timezone.utc)
+                     - datetime.fromtimestamp(b[-1]["close_time"] / 1000, timezone.utc)).days
+        log.info("%s 数据就绪：%d 根，最新已收盘 %s，滞后 %d 天", s, len(b),
+                 datetime.fromtimestamp(b[-1]["open_time"] / 1000, CST).date(), staleness)
+        if staleness > int(cfg.get("max_bar_staleness_days", 3)):
+            log.warning("%s 最新K线滞后 %d 天，数据源可能异常", s, staleness)
+        bars_map[s] = b
+    ref_bars = bars_map[syms[0]]
+    head = ("/".join(coin_name(s) for s in syms) if multi else coin_name(syms[0]))
 
     # --- 测试邮件
     if test:
-        subject = f"【BTC信号{SUBJECT_SUFFIX}】测试邮件 · 邮件通道验证"
-        body = format_test_body(cfg, bars)
-        html = format_test_body_html(cfg, bars)
+        subject = f"【{head}信号{SUBJECT_SUFFIX}】测试邮件 · 邮件通道验证"
+        body = format_test_body(cfg, ref_bars)
+        html = format_test_body_html(cfg, ref_bars)
         if dry_run:
             log.info("[dry-run] 不实际发送。正文如下：\n%s", body)
             return 0
@@ -874,15 +1284,41 @@ def run(keys, force=False, dry_run=False, test=False, daily=False, log=None):
         return 0
 
     # --- 计算各档位
+    #     多标的：每个币分到「配置本金 ÷ 币数」（与实盘 trade.py 的
+    #     「账户总权益 ÷ 币数」同构，所以邮件里的数字能直接对着下单）
     infos = []
-    for k in keys:
-        inf = compute_profile(cfg["profiles"][k], bars, cfg)
-        inf["key"] = k
-        infos.append(inf)
-        log.info("%s: 方向=%s 净敞口=%.3f 名义=%.0f 参数明细=%s",
-                 inf["name"], inf["side"], inf["net_expo"], abs(inf["net"]), inf["dirs"])
+    for s in syms:
+        for k in keys:
+            prof = cfg["profiles"][k]
+            eq = (float(prof["equity"]) / n_sym) if multi else None
+            inf = compute_profile(prof, bars_map[s], cfg, symbol=s, equity_override=eq)
+            inf["key"] = state_key(s, k, multi)
+            inf["pk"] = k
+            inf["coin"] = coin_name(s)
+            infos.append(inf)
+            log.info("%s %s: 方向=%s 净敞口=%.3f 名义=%.0f 参数明细=%s",
+                     s, inf["name"], inf["side"], inf["net_expo"], abs(inf["net"]), inf["dirs"])
+
+    # 多标的：额外算一份「BTC 单跑参照」——把全部配置本金押在 BTC 上
+    btc_ref = None
+    if multi:
+        btc_sym = "BTCUSDT" if "BTCUSDT" in syms else syms[0]
+        prof = cfg["profiles"][keys[0]]
+        btc_ref = compute_profile(prof, bars_map[btc_sym], cfg, symbol=btc_sym,
+                                  equity_override=float(prof["equity"]))
+        btc_ref["key"] = f"{btc_sym}|ref"
+        btc_ref["pk"] = keys[0]
+        btc_ref["coin"] = coin_name(btc_sym)
 
     state = load_state()
+    # 老版本状态是单标的 {"A":..,"B":..}；切到多标的时把 BTC 那条迁过来，
+    # 否则会丢掉已经跟踪了很久的建仓价（第一根K线会被当成「今天才建仓」）。
+    if multi:
+        migrated = _migrate_state(state, syms)
+        if migrated:
+            log.info("状态迁移：把旧单标的记录 %d 条迁到 %s 名下（保住建仓价）",
+                     migrated, "BTCUSDT" if "BTCUSDT" in syms else syms[0])
+
     changed, first_run = [], []
     for inf in infos:
         prev = state.get(inf["key"])
@@ -901,29 +1337,46 @@ def run(keys, force=False, dry_run=False, test=False, daily=False, log=None):
         is_long = inf["net"] > 0
         if k in changed_keys or k in first_keys:
             entry_px, peak_px = inf["px"], inf["px"]
+            entry_bar = int(inf["bar_open_ms"])
         else:
             entry_px = prev.get("entry_px") or inf["px"]
-            pk = _peak_since(bars, prev.get("entry_bar") or inf["bar_open_ms"], is_long)
+            entry_bar = int(prev.get("entry_bar") or inf["bar_open_ms"])
+            pk = _peak_since(bars_map[inf["symbol"]], entry_bar, is_long)
             peak_px = pk if pk else (prev.get("peak_px") or inf["px"])
-        levels[k] = compute_risk_levels(inf, cfg, entry_px, peak_px)
-        lv = levels[k]
-        log.info("%s: 止损提醒位=%s 爆仓价=%.0f", inf["name"],
-                 f"{lv['stop']:,.0f}" if lv["stop"] else "不设", lv["liq"])
+        lv = compute_risk_levels(inf, cfg, entry_px, peak_px)
+        # 建仓信息（邮件里要显示「当时的下单价」）
+        lv["entry_bar"] = entry_bar
+        lv["entry_dt"] = datetime.fromtimestamp(entry_bar / 1000, CST)
+        lv["entry_new"] = (k in changed_keys or k in first_keys)
+        levels[k] = lv
+        e_px, e_day, e_hold = entry_info(lv, inf)
+        log.info("%s %s: 止损提醒位=%s 爆仓价=%.0f 建仓价=%s（%s，持有 %d 天）",
+                 inf["symbol"], inf["name"],
+                 f"{lv['stop']:,.0f}" if lv["stop"] else "不设", lv["liq"],
+                 f"{e_px:,.2f}" if e_px else "无持仓", e_day or "-", e_hold)
 
-    actions = _build_actions(infos, changed, first_run)
+    actions = (_build_actions_multi(infos, changed, first_run) if multi
+               else _build_actions(infos, changed, first_run))
 
     # 邮件里重点展示哪一档：优先 email.primary_profile，其次 trade.profile，最后 B
     primary = (str((cfg.get("email") or {}).get("primary_profile") or "").strip().upper()
                or str((cfg.get("trade") or {}).get("profile") or "").strip().upper()
                or "B")
-    if primary not in [i.get("key") for i in infos]:
+    if multi:
+        if primary not in keys:
+            primary = keys[0]
+    elif primary not in [i.get("key") for i in infos]:
         primary = infos[0].get("key")
 
     if dry_run:
         log.info("[dry-run] 变化情况：首次=%s 变化=%s",
                  [i["key"] for i in first_run], [i["key"] for _, i in changed])
-        print("\n" + format_body(infos, "（dry-run，未发送）", levels=levels,
-                                 actions=actions, primary=primary))
+        if multi:
+            print("\n" + format_multi_body(infos, "（dry-run，未发送）", "", levels,
+                                           actions, primary, cfg, syms, btc_ref))
+        else:
+            print("\n" + format_body(infos, "（dry-run，未发送）", levels=levels,
+                                     actions=actions, primary=primary))
         return 0
 
     # --- 无变化：不发信，但要把持仓极值（吊灯用）更新到状态里
@@ -938,7 +1391,8 @@ def run(keys, force=False, dry_run=False, test=False, daily=False, log=None):
     if changed:
         parts = []
         for prev, inf in changed:
-            parts.append(f"{inf['key']}档 {_side_txt(prev.get('net_expo', 0) or 0)}"
+            tag = f"{inf['coin']} " if multi else f"{inf['key']}档 "
+            parts.append(f"{tag}{_side_txt(prev.get('net_expo', 0) or 0)}"
                          f"→{_side_txt(inf['net'])}")
         title = "方向变化：" + "、".join(parts)
         note = ""
@@ -955,13 +1409,22 @@ def run(keys, force=False, dry_run=False, test=False, daily=False, log=None):
                 "此后只在方向发生变化时才会推送。")
 
     if first_run:
-        note += "\n首次运行档位：" + "、".join(i["key"] for i in first_run)
+        if multi:
+            note += "\n首次运行：" + "、".join(f"{i['coin']}({i['pk']}档)" for i in first_run)
+        else:
+            note += "\n首次运行档位：" + "、".join(i["key"] for i in first_run)
 
-    subject = f"【BTC信号{SUBJECT_SUFFIX}】{title}"
-    body = format_body(infos, title, note.strip(), levels=levels, actions=actions,
-                       primary=primary)
-    html = format_body_html(infos, title, note.strip(), levels=levels,
-                            actions=actions, primary=primary)
+    subject = f"【{head}信号{SUBJECT_SUFFIX}】{title}"
+    if multi:
+        body = format_multi_body(infos, title, note.strip(), levels, actions,
+                                 primary, cfg, syms, btc_ref)
+        html = format_multi_body_html(infos, title, note.strip(), levels, actions,
+                                      primary, cfg, syms, btc_ref)
+    else:
+        body = format_body(infos, title, note.strip(), levels=levels, actions=actions,
+                           primary=primary)
+        html = format_body_html(infos, title, note.strip(), levels=levels,
+                                actions=actions, primary=primary)
 
     send_email(cfg["email"], subject, body, log, html=html)
     log.info("邮件已发送：%s", subject)
@@ -999,55 +1462,103 @@ def fetch_price(symbol, retries=3, log=None):
     raise RuntimeError(f"取实时价失败：{last_err}")
 
 
-def _collect_levels(infos, cfg, state, bars):
+def _collect_levels(infos, cfg, state, bars_map):
     levels = {}
     for inf in infos:
         k = inf["key"]
         prev = state.get(k) or {}
         is_long = inf["net"] > 0
         entry_px = prev.get("entry_px") or inf["px"]
-        pk = _peak_since(bars, prev.get("entry_bar") or inf["bar_open_ms"], is_long)
+        entry_bar = int(prev.get("entry_bar") or inf["bar_open_ms"])
+        b = bars_map.get(inf["symbol"]) if isinstance(bars_map, dict) else bars_map
+        pk = _peak_since(b, entry_bar, is_long) if b else None
         peak_px = pk if pk else (prev.get("peak_px") or inf["px"])
-        levels[k] = compute_risk_levels(inf, cfg, entry_px, peak_px)
+        lv = compute_risk_levels(inf, cfg, entry_px, peak_px)
+        lv["entry_bar"] = entry_bar
+        lv["entry_dt"] = datetime.fromtimestamp(entry_bar / 1000, CST)
+        lv["entry_new"] = False
+        levels[k] = lv
     return levels
 
 
-def check_alerts(keys, dry_run=False, force=False, log=None):
+def _alert_multi_html(infos, levels, fired, px_map, primary, syms, title):
+    """多标的风控提醒邮件（HTML）。"""
+    now = datetime.now(CST)
+    prim = [i for i in infos if i["pk"] == primary]
+    P = []
+    P.append(_p(f"{now:%Y-%m-%d %H:%M}（北京时间）", 12, "#9aa0a6"))
+    P.append(_box("⚠ 这是「价格触及」提醒，不是策略信号",
+                  _p("策略本身不挂价格止损，是否操作由你决定。", 12, "#8a5a00")))
+    if fired:
+        P.append(_h("触发的提醒"))
+        P.append(_ul(fired))
+    P.append(_h(f"各币当前风控位（{primary} 档）"))
+    rows = []
+    for inf in prim:
+        lv = levels.get(inf["key"], {})
+        px = px_map.get(inf["symbol"], inf["px"])
+        e_px, _eday, _ehold = entry_info(lv, inf)      # 注意：不能用 _h，会覆盖 HTML 辅助函数
+        rows.append([inf["coin"], _side_short(inf["net"]),
+                     f"{e_px:,.4g}" if e_px else "空仓", f"{px:,.4g}",
+                     f"{lv['stop']:,.4g}" if lv.get("stop") else "不设",
+                     f"{lv.get('liq', inf['liq']):,.4g}",
+                     f"{(lv.get('liq', inf['liq']) / px - 1) * 100:+.1f}%"])
+    P.append(_table(["币种", "方向", "建仓价", "现价", "止损位", "爆仓价", "距爆仓"], rows,
+                    ["left", "center", "right", "right", "right", "right", "right"]))
+    P.append(f'<div style="font-size:11px;color:#9aa0a6;margin-top:12px;">'
+             f'生成时间 {now:%Y-%m-%d %H:%M:%S}（北京时间）</div>')
+    head = "/".join(coin_name(s) for s in syms)
+    return _shell(f"{head} 风控{SUBJECT_SUFFIX}", title, "".join(P))
+
+
+def check_alerts(keys, dry_run=False, force=False, log=None, symbols=None):
     """价格触发的风控提醒。只发提醒，不改变策略状态，也不会自动下单。"""
     log = log or setup_logger("alert")
     cfg = load_config()
+    syms = symbols_of(cfg, override=symbols)
+    multi = len(syms) >= 2
+    n_sym = len(syms)
     risk = cfg.get("risk", {}) or {}
     if risk.get("stop_mode", "none") == "none" and not float(risk.get("take_profit_pct", 0) or 0):
         log.info("config.json 里 risk.stop_mode=none 且未设止盈，没有价格提醒可做")
         return 0
 
-    bars = keep_closed(fetch_klines(cfg["symbol"], cfg["interval"],
-                                    cfg.get("kline_limit", 1000), 3, log))
-    px = fetch_price(cfg["symbol"], 3, log)
-    log.info("实时价 %.2f", px)
+    bars_map, px_map = {}, {}
+    for s in syms:
+        bars_map[s] = keep_closed(fetch_klines(s, cfg["interval"],
+                                               cfg.get("kline_limit", 1000), 3, log))
+        px_map[s] = fetch_price(s, 3, log)
+        log.info("%s 实时价 %.6g", s, px_map[s])
 
     infos = []
-    for k in keys:
-        inf = compute_profile(cfg["profiles"][k], bars, cfg)
-        inf["key"] = k
-        infos.append(inf)
+    for s in syms:
+        for k in keys:
+            prof = cfg["profiles"][k]
+            eq = (float(prof["equity"]) / n_sym) if multi else None
+            inf = compute_profile(prof, bars_map[s], cfg, symbol=s, equity_override=eq)
+            inf["key"] = state_key(s, k, multi)
+            inf["pk"] = k
+            inf["coin"] = coin_name(s)
+            infos.append(inf)
 
     state = load_state()
-    levels = _collect_levels(infos, cfg, state, bars)
+    levels = _collect_levels(infos, cfg, state, bars_map)
 
     warn_pct = float(risk.get("liq_warn_pct", 0.10))
     fired = []
     for inf in infos:
         k, lv = inf["key"], levels[inf["key"]]
+        px = px_map.get(inf["symbol"], inf["px"])
         is_long = lv["is_long"]
+        tag = f"{inf['coin']}·{inf['pk']}" if multi else f"{k}档"
         if abs(lv["liq"] / px - 1.0) <= warn_pct:
-            fired.append(f"{k}档接近爆仓")
+            fired.append(f"{tag}接近爆仓")
         if lv.get("stop"):
             if (is_long and px <= lv["stop"]) or ((not is_long) and px >= lv["stop"]):
-                fired.append(f"{k}档触及止损位")
+                fired.append(f"{tag}触及止损位")
         if lv.get("tp"):
             if (is_long and px >= lv["tp"]) or ((not is_long) and px <= lv["tp"]):
-                fired.append(f"{k}档触及止盈位")
+                fired.append(f"{tag}触及止盈位")
 
     log.info("触发检查结果：%s", fired or "无")
 
@@ -1073,22 +1584,32 @@ def check_alerts(keys, dry_run=False, force=False, log=None):
     primary = (str((cfg.get("email") or {}).get("primary_profile") or "").strip().upper()
                or str((cfg.get("trade") or {}).get("profile") or "").strip().upper()
                or "B")
-    if primary not in [i.get("key") for i in infos]:
+    if multi:
+        if primary not in keys:
+            primary = keys[0]
+    elif primary not in [i.get("key") for i in infos]:
         primary = infos[0].get("key")
 
-    subject = f"【BTC风控{SUBJECT_SUFFIX}】" + "、".join(new_fired or fired or ["强制测试"])
-    body = format_alert_body(infos, levels, new_fired or fired or ["强制测试"], px, log,
-                             primary=primary)
+    head = ("/".join(coin_name(s) for s in syms) if multi else coin_name(syms[0]))
+    hit = new_fired or fired or ["强制测试"]
+    subject = f"【{head}风控{SUBJECT_SUFFIX}】" + "、".join(hit)
+
+    if multi:
+        body = format_multi_body(infos, "风控提醒", "触发：" + "、".join(hit),
+                                 levels, [], primary, cfg, syms, None)
+        html = _alert_multi_html(infos, levels, hit, px_map, primary, syms,
+                                 "风控提醒 · " + "、".join(hit))
+    else:
+        px = px_map[syms[0]]
+        body = format_alert_body(infos, levels, hit, px, log, primary=primary)
+        html = format_alert_body_html(infos, levels, hit, px, primary=primary)
 
     if dry_run:
         log.info("[dry-run] 不发送。触发=%s", new_fired or fired)
         print("\n" + body)
         return 0
 
-    send_email(cfg["email"], subject, body, log,
-               html=format_alert_body_html(infos, levels,
-                                           new_fired or fired or ["强制测试"], px,
-                                           primary=primary))
+    send_email(cfg["email"], subject, body, log, html=html)
     log.info("风控提醒已发送：%s", subject)
 
     rec["count"] += 1
@@ -1102,10 +1623,30 @@ def main_alert(argv, keys):
     log = setup_logger("alert")
     try:
         return check_alerts(keys, dry_run="--dry-run" in argv,
-                            force="--force" in argv, log=log)
+                            force="--force" in argv, log=log,
+                            symbols=_symbols_from_argv(argv))
     except Exception as e:                                       # noqa: BLE001
         log.error("风控提醒运行失败：%s", e, exc_info=True)
         return 1
+
+
+def _symbols_from_argv(argv):
+    """从命令行解析交易对覆盖（不改配置文件）：
+       --symbols BTCUSDT,ETHUSDT   临时指定一组交易对
+       --single                    强制单标的（用 config.symbol）
+       --multi                     强制多标的（用 config.symbols）
+    返回列表；返回 None 表示不覆盖，按 config 的 run_mode 决定。
+    """
+    for i, a in enumerate(argv):
+        if a == "--symbols" and i + 1 < len(argv):
+            return [x.strip() for x in argv[i + 1].split(",") if x.strip()]
+        if a.startswith("--symbols="):
+            return [x.strip() for x in a.split("=", 1)[1].split(",") if x.strip()]
+    if "--single" in argv:
+        return [str(load_config().get("symbol") or "BTCUSDT")]
+    if "--multi" in argv:
+        return [str(s) for s in (load_config().get("symbols") or [])]
+    return None
 
 
 def main(argv, keys):
@@ -1113,10 +1654,12 @@ def main(argv, keys):
     dry = "--dry-run" in argv
     test = "--test" in argv
     daily = "--daily" in argv
+    symbols = _symbols_from_argv(argv)
     tag = "live_" + "".join(keys)
     log = setup_logger(tag)
     try:
-        return run(keys, force=force, dry_run=dry, test=test, daily=daily, log=log)
+        return run(keys, force=force, dry_run=dry, test=test, daily=daily, log=log,
+                   symbols=symbols)
     except Exception as e:                                       # noqa: BLE001
         log.error("运行失败：%s", e, exc_info=True)
         return 1

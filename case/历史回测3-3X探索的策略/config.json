@@ -1,11 +1,11 @@
 {
   "_master_switch": {
     "_comment": "========== 总开关（唯一需要你改的地方）==========",
-    "_comment_mode": "mode = observe 只推送不下单（观察期，推荐起步） | live 真金白银自动下单",
-    "_comment_how": "想开始实盘：把下面的 observe 改成 live（保留引号），保存即可。改回来再跑一次就停手。",
-    "mode": "observe",
+    "_comment_mode": "mode = observe 只推送不下单（观察期） | live 真金白银自动下单",
+    "_comment_how": "想停手：把下面的 live 改回 observe（保留引号），保存即可。",
+    "mode": "live",
     "_comment_confirm": "mode=live 时，下面这个必须同时是 true 才会真正下单（双保险，防止误改）",
-    "i_understand_real_money": false
+    "i_understand_real_money": true
   },
 
   "email": {
@@ -16,16 +16,29 @@
     "port": 465,
     "max_retries": 3,
     "_comment_primary": "邮件里重点展示哪一档（A/B/C）——填你实际在跑的那一档",
-    "primary_profile": "B"
+    "primary_profile": "B",
+    "_comment_combine": "true = 多个交易对合并成一封邮件（推荐）；false = 每个币一封",
+    "combine_symbols": true
   },
+
+  "_comment_runmode": "★★★★★ 运行模式开关（决定「仅 BTC」还是「四币合一」）★★★★★",
+  "_comment_runmode_how": "single = 只跑下面 symbol 那一个币（老行为）；multi = 跑下面 symbols 里的所有币、等权。改这一个词就能切换，其它都不用动。",
+  "_comment_runmode_cli": "命令行也可临时覆盖（不改配置）：python trade.py --symbols BTCUSDT,ETHUSDT  或  python trade.py --single  /  --multi",
+  "run_mode": "multi",
+
+  "_comment_symbol": "【单标的模式】run_mode=single 时用这个",
   "symbol": "BTCUSDT",
+
+  "_comment_symbols": "【多标的模式】run_mode=multi 时用这些。每个币分到 账户总权益 ÷ 币数，逐仓隔离，一个币爆仓不影响其他。想只跑 3 个币，删掉一个即可。",
+  "symbols": ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"],
+
   "interval": "1d",
   "kline_limit": 1000,
   "leverage": 3.0,
   "exposure_cap": 3.0,
   "atr_period": 14,
   "params": [[8, 24], [10, 30], [12, 36], [15, 45], [20, 60]],
-  "_comment_equity": "equity = 你投在这一档的本金（USDT）。改这里，邮件里的保证金/数量会自动跟着变。",
+  "_comment_equity": "equity = 单标的模式下的本金（USDT）。多标的模式下这个值只用于「信号强弱参照」，实际仓位按 账户总权益÷币数 动态计算。",
   "profiles": {
     "A": { "name": "A 保守", "vol_target": 0.02, "equity": 1000.0 },
     "B": { "name": "B 推荐", "vol_target": 0.03, "equity": 1000.0 },
@@ -55,7 +68,7 @@
     "_comment_profile": "只跑哪一档（A/B/C）。建议只跑一个，多档需要独立子账户",
     "profile": "B",
     "_comment_dry_run": "dry_run=true 时只打印将执行的下单，不真正提交",
-    "dry_run": true,
+    "dry_run": false,
 
     "_comment_leverage": "开仓前自动为交易对设置杠杆（逐仓）",
     "leverage": 3,
@@ -63,16 +76,18 @@
     "set_leverage_on_start": true,
     "_comment_posmode": "账户必须是【单向持仓】模式。双向持仓下本策略会拒绝运行（币安 App：合约→设置→持仓模式→单向持仓）",
 
-    "_comment_precision": "下单精度，留空则自动从交易所 symbol 信息获取",
+    "_comment_precision": "下单精度【自动从交易所获取】，这里的值只是取不到时的兜底，不用手改",
     "qty_step": 0.001,
     "price_step": 0.1,
     "min_qty": 0.001,
     "min_notional": 5.0,
 
-    "_comment_idempotent": "幂等保护：同一天同一目标方向只下单一次，防止重复下单",
+    "_comment_idempotent": "幂等保护：同一天同一交易对同一目标方向只下单一次，防止重复下单",
     "idempotent": true,
-    "_comment_maxtrade": "单次下单名义上限（USDT），超过就拒绝下单并告警。★账户余额涨了必须同步上调，否则会悄悄限制你的仓位（B档约 1800 U 起就会被卡）。经验值 = 当前本金 × 3",
-    "max_order_notional": 3000,
+
+    "_comment_maxtrade": "单次下单名义上限（USDT）。★填 0 = 自动跟随账户规模（= 该币配额 × 3.15），这是推荐值：账户涨了不会悄悄卡住仓位。填正数 = 固定绝对上限，此时账户涨到 配额×3 以上就要手动上调，否则会静默缩仓。",
+    "max_order_notional": 0,
+
     "_comment_deviation": "实际持仓与目标持仓偏差小于此比例时不下单（避免频繁微调）",
     "rebalance_threshold": 0.05,
 

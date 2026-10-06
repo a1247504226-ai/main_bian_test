@@ -313,7 +313,13 @@ class BinanceFutures:
         except Exception:                                   # noqa: BLE001
             mk = 0.0
         if mk and q * mk < f["min_notional"]:
-            raise ValueError(f"名义 {q * mk:.2f} U 小于最小名义 {f['min_notional']} U")
+            if reduce_only:
+                # 减仓单不做本地硬拦：币安对 reduceOnly 的名义门槛判定与普通单不同，
+                # 本地误拦会导致「平不掉仓」，比被交易所拒单更危险。交给交易所裁决。
+                self._warn("名义 %.2f U 小于最小名义 %.2f U，但这是只减仓单，仍提交（%s）",
+                           q * mk, f["min_notional"], symbol)
+            else:
+                raise ValueError(f"名义 {q * mk:.2f} U 小于最小名义 {f['min_notional']} U")
 
         desc = (f"{side} {q} {symbol}"
                 + ("（只减仓）" if reduce_only else "")
