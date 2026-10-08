@@ -7,12 +7,11 @@ REM  Binance daily candles close at UTC 00:00 = 08:00 Beijing, so 08:01 picks up
 REM  the just-closed daily bar, and 1 minute is enough for the API to update.
 REM
 REM  Logging: ONE FILE PER MONTH -> logs\macdx_YYYYMM.log
-REM  Email:   DAILY=1 (default) sends ONE combined report covering ALL symbols,
-REM           every day, whether or not the direction changed. The report shows
-REM           the current direction, the entry price (the actual fill price when
-REM           trading is on) and the floating PnL for every symbol in one table.
-REM           A direction flip still gets its own action card at the top with the
-REM           full order instruction (recommended entry price / size / amount).
+REM  Email:   DAILY=1 (default) sends one report per symbol EVERY day, whether or
+REM           not the direction changed. The report always shows the current
+REM           direction, the entry price (the actual fill price when trading is
+REM           on) and the floating PnL. A direction flip still sends a distinct
+REM           BUY / EXIT alert with the full order instruction.
 REM  Every run appends to the same monthly file, so nothing is ever replaced.
 REM  On the 1st of a new month the name changes automatically
 REM  (e.g. macdx_202609.log -> macdx_202610.log) and a fresh file is created.

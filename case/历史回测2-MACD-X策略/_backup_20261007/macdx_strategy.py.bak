@@ -498,44 +498,145 @@ def _ljust(s: str, width: int) -> str:
     return str(s) + " " * max(0, width - _dwidth(s))
 
 
-def _fmt_px(v: float, sign: bool = False) -> str:
+def build_mail_text(title: str, subtitle: str, head: str, rows: list,
+                    note: str, ind_rows: list, warn: str, footer: str) -> str:
+    """纯文本兜底版。rows=(标签, 数值, 备注[, 颜色])，颜色在这里忽略。"""
+    body = [head, ""]
+    for r in rows:
+        label, value = r[0], r[1]
+        sub = r[2] if len(r) > 2 else ""
+        line = f"{_ljust(label, 12)}: {value}"
+        if sub:
+            line += f"   （{sub}）"
+        body.append(line)
+    if note:
+        body += ["", note]
+    body += ["", "信号依据"]
+    for r in ind_rows:
+        label, value = r[0], r[1]
+        judge = r[2] if len(r) > 2 else ""
+        line = f"{_ljust(label, 12)}: {_ljust(value, 14)}"
+        if judge:
+            line += f" {judge}"
+        body.append(line)
+    body.append("判定条件：收盘价 > EMA200 且 DIF 快线 > 0")
+    if warn:
+        body += ["", warn.strip()]
+    body += ["", "─" * 34, footer,
+             "本邮件自动生成，仅供研究，不构成投资建议。"]
+    return "\n".join(body)
+
+
+def build_mail_html(title: str, subtitle: str, head: str, rows: list,
+                    note: str, ind_rows: list, warn: str, footer: str,
+                    accent: str = _C_SLATE) -> str:
+    """HTML 版。所有表格 width:100%，手机端自适应。"""
+    FONT = ("-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,"
+            "'PingFang SC','Microsoft YaHei',Arial,sans-serif")
+
+    # ── 行动数据表（两列）──
+    tr = []
+    for i, r in enumerate(rows):
+        label, value = r[0], r[1]
+        sub = r[2] if len(r) > 2 else ""
+        color = r[3] if len(r) > 3 else None
+        bg = "#ffffff" if i % 2 == 0 else "#fafafa"
+        vstyle = f"color:{color};" if color else "color:#1a1a1a;"
+        sub_html = (f'<div style="font-size:12px;color:#8a8a8a;font-weight:400;'
+                    f'margin-top:3px;line-height:1.4">{_esc(sub)}</div>') if sub else ""
+        tr.append(
+            f'<tr style="background:{bg}">'
+            f'<td style="padding:10px;border-bottom:1px solid #ededed;'
+            f'font-size:13px;color:#666;vertical-align:top;white-space:nowrap">'
+            f'{_esc(label)}</td>'
+            f'<td style="padding:10px;border-bottom:1px solid #ededed;'
+            f'font-size:16px;font-weight:700;text-align:right;vertical-align:top;'
+            f'{vstyle}">{value}{sub_html}</td></tr>')
+    act_table = ('<table width="100%" cellpadding="0" cellspacing="0" '
+                 'style="border-collapse:collapse;width:100%">'
+                 + "".join(tr) + '</table>')
+
+    # ── 信号依据表（三列：指标 / 数值 / 判定）──
+    itr = ['<tr style="background:#f5f6f8">'
+           '<td style="padding:7px 10px;font-size:12px;color:#888">指标</td>'
+           '<td style="padding:7px 10px;font-size:12px;color:#888;'
+           'text-align:right">数值</td>'
+           '<td style="padding:7px 10px;font-size:12px;color:#888;'
+           'text-align:right">判定</td></tr>']
+    for i, r in enumerate(ind_rows):
+        label, value = r[0], r[1]
+        judge = r[2] if len(r) > 2 else ""
+        jcolor = r[3] if len(r) > 3 else ""
+        bg = "#ffffff" if i % 2 == 0 else "#fafafa"
+        jstyle = f"color:{jcolor};font-weight:700;" if jcolor else "color:#bbb;"
+        itr.append(
+            f'<tr style="background:{bg}">'
+            f'<td style="padding:8px 10px;border-top:1px solid #ededed;'
+            f'font-size:13px;color:#555;white-space:nowrap">{_esc(label)}</td>'
+            f'<td style="padding:8px 10px;border-top:1px solid #ededed;'
+            f'font-size:14px;color:#1a1a1a;text-align:right;'
+            f'font-variant-numeric:tabular-nums">{_esc(value)}</td>'
+            f'<td style="padding:8px 10px;border-top:1px solid #ededed;'
+            f'font-size:12px;text-align:right;{jstyle}">{_esc(judge)}</td></tr>')
+    ind_table = ('<table width="100%" cellpadding="0" cellspacing="0" '
+                 'style="border-collapse:collapse;width:100%;'
+                 'border:1px solid #ededed;border-radius:6px">'
+                 + "".join(itr) + '</table>')
+
+    note_html = (f'<div style="font-size:13px;color:#555;line-height:1.6;'
+                 f'margin-top:10px">{_esc(note)}</div>') if note else ""
+    warn_html = (f'<div style="margin:14px 16px 0;padding:10px 12px;'
+                 f'background:#fff8e1;border-left:3px solid #f9a825;'
+                 f'font-size:13px;color:#6d4c00;line-height:1.55">'
+                 f'{_esc(warn.strip())}</div>') if warn else ""
+
+    return f"""<div style="margin:0;padding:14px 10px;background:#f4f5f7">
+<div style="max-width:600px;margin:0 auto;background:#ffffff;border-radius:10px;overflow:hidden;font-family:{FONT};color:#1a1a1a">
+
+  <div style="background:{accent};padding:14px 16px">
+    <div style="font-size:17px;font-weight:700;color:#ffffff;line-height:1.3">{_esc(title)}</div>
+    <div style="font-size:12px;color:#ffffff;opacity:.85;margin-top:4px">{_esc(subtitle)}</div>
+  </div>
+
+  <div style="padding:16px 16px 0">
+    <div style="font-size:15px;font-weight:700;color:{accent};margin-bottom:10px">{_esc(head)}</div>
+    {act_table}
+    {note_html}
+  </div>
+
+  <div style="padding:18px 16px 0">
+    <div style="font-size:14px;font-weight:700;color:#333;margin-bottom:9px">信号依据</div>
+    {ind_table}
+    <div style="font-size:12px;color:#8a8a8a;margin-top:8px;line-height:1.5">
+      判定条件：收盘价 &gt; EMA200 且 DIF 快线 &gt; 0
+    </div>
+  </div>
+{warn_html}
+  <div style="padding:14px 16px 16px;margin-top:18px;border-top:1px solid #eee;font-size:11px;color:#9a9a9a;line-height:1.6">
+    {_esc(footer)}<br>
+    本邮件自动生成，仅供研究，不构成投资建议。
+  </div>
+
+</div>
+</div>"""
+
+
+def notify_signal(symbol: str, interval: str, sg: dict,
+                  capital: float = 1000.0, frac: float = 1.0,
+                  src: str = "api", stale: float = 0.0,
+                  total_capital: float | None = None,
+                  n_symbols: int = 1,
+                  daily: bool = True,
+                  fill_price: float | None = None) -> None:
     """
-    价格/指标的自适应小数位。
+    发送信号邮件。有两种：
 
-    固定 2 位小数会把 DOGE 的 0.1234 显示成 0.12、把 DIF -0.0042 显示成 -0.00，
-    看着像 bug。按数量级自动选位数。
-    """
-    a = abs(v)
-    if a >= 1:
-        d = 2
-    elif a >= 0.1:
-        d = 4
-    elif a >= 0.001:
-        d = 5
-    else:
-        d = 8
-    return f"{v:+,.{d}f}" if sign else f"{v:,.{d}f}"
-
-
-
-def collect_signal(symbol: str, interval: str, sg: dict,
-                   capital: float = 1000.0, frac: float = 1.0,
-                   src: str = "api", stale: float = 0.0,
-                   total_capital: float | None = None,
-                   n_symbols: int = 1,
-                   daily: bool = True,
-                   fill_price: float | None = None) -> dict | None:
-    """
-    计算【单个标的】今天该在汇总邮件里呈现什么，但**不发信**。
-
-    返回一个 item dict，由 send_digest() 把所有标的合并成一封邮件；
-    返回 None 表示这个标的今天不需要出现在邮件里（首次运行 / 静默）。
-
-      · 状态变化 → changed=True，item 里带完整下单指令（推荐开仓价等）
-      · 状态不变 → changed=False，item 里带开仓价与浮动盈亏（daily=True 时每天都发）
+      · 状态变化时 —— 「买入信号」/「离场信号」，含完整下单指令（立即发）
+      · 状态不变时 —— 「持仓中」/「空仓中」日报，含开仓价与浮动盈亏
+                      （daily=True 时每天都发；daily=False 则静默，退回旧行为）
 
     fill_price: 实盘成交均价。给了就用它当开仓价（最准）；
-                没给（手动下单）就用「收盘价 × (1+滑点)」当推荐开仓价。
+                没给（手动下单）就用「收盘价 × (1+滑点)」当参考开仓价。
     """
     key = f"{symbol}_{interval}"
     st = _load_state()
@@ -561,14 +662,14 @@ def collect_signal(symbol: str, interval: str, sg: dict,
                      "invest": invest, "qty": qty}
         _save_state(key, now, sg["date"], entry)
         print(f"  [邮件] 首次运行，已记录 {symbol} 状态为【{'持有' if now else '空仓'}】；"
-              f"下次起进入每日汇总。")
-        return None
+              f"下次起每天推送。")
+        return
 
     # ── 状态未变 且 关闭了每日推送：静默 ──
     if not changed and not daily:
         _save_state(key, now, sg["date"])
         print(f"  [邮件] {symbol} 状态未变化（{'持有' if now else '空仓'}），不推送。")
-        return None
+        return
 
     cash_note = "满仓" if frac >= 1.0 else f"留 {(1-frac)*100:.0f}% 现金"
     cur = sg["close"]
@@ -591,6 +692,7 @@ def collect_signal(symbol: str, interval: str, sg: dict,
     # ind_rows = 信号依据 (指标, 数值, 判定文字, 判定颜色)
     note = ""
     if changed and now:
+        subject = f"[MACD-X 现货] {symbol} 买入信号 · {sg['date'][:10]}"
         title, accent, action = f"{symbol} · 买入信号", _C_RED, "买入"
         if fill_price:
             head = "★ 已买入成交（市价单）"
@@ -609,6 +711,7 @@ def collect_signal(symbol: str, interval: str, sg: dict,
         note = "下单后不设止盈止损、不挂条件单、不加杠杆，等离场信号。"
 
     elif changed and not now:
+        subject = f"[MACD-X 现货] {symbol} 离场信号 · {sg['date'][:10]}"
         title, accent, action = f"{symbol} · 离场信号", _C_GREEN, "卖出"
         head = "★ 立即卖出（市价单，全部持仓）"
         rows = [("推荐成交价", f"{cur*(1-p['slip']):,.4f}",
@@ -617,6 +720,7 @@ def collect_signal(symbol: str, interval: str, sg: dict,
         note = "不要反手做空（本策略只做多现货），等下一次买入信号。"
 
     elif now:
+        subject = f"[MACD-X 现货] {symbol} 持仓中 · {sg['date'][:10]}"
         title, accent, action = f"{symbol} · 持仓中", _C_SLATE, "持仓"
         head = "★ 继续持有，无需操作"
         if have_entry:
@@ -646,6 +750,7 @@ def collect_signal(symbol: str, interval: str, sg: dict,
                     f'"entry_price": 你的实际买入均价')
 
     else:
+        subject = f"[MACD-X 现货] {symbol} 空仓中 · {sg['date'][:10]}"
         title, accent, action = f"{symbol} · 空仓中", _C_SLATE, "空仓"
         head = "★ 继续空仓，无需操作"
         gap = (cur / sg["ema_trend"] - 1) * 100 if sg["ema_trend"] else 0.0
@@ -666,301 +771,34 @@ def collect_signal(symbol: str, interval: str, sg: dict,
         ("MACD 柱", f"{sg['hist']*2:+,.4f}", "", ""),
     ]
 
-    # ── 汇总表用的紧凑字段（一行装下一个标的）──
-    # 注意：这里不能用持仓分支里的 pnl_pct —— 买入信号那天也持仓，但没进那个分支。
-    if now and have_entry and ep:
-        pnl_now = (cur / ep - 1) * 100
-        pnl_txt = f"{pnl_now:+.2f}%"
-        pnl_col = _C_RED if pnl_now >= 0 else _C_GREEN
-    else:
-        pnl_txt, pnl_col = "", ""
-    gap_now = (cur / sg["ema_trend"] - 1) * 100 if sg["ema_trend"] else 0.0
-    # 今天刚出买入信号、还没成交 → 概览表里这个「开仓价」其实是推荐价，要打星号区分
-    entry_pending = bool(changed and now and have_entry)
+    warn = ""
+    if stale > 2:
+        warn = (f"⚠ 数据来自本地缓存（联网失败），最后一根 K 线距今 "
+                f"{stale:.1f} 天，信号可能不是最新，请人工核对后再下单。")
 
-    return {
-        "symbol": symbol, "base": base, "key": key,
-        "date": sg["date"], "now": now, "changed": changed,
-        "action": action, "title": title, "head": head,
-        "accent": accent, "rows": rows, "note": note, "ind_rows": ind_rows,
-        "warn": "" if stale <= 2 else (
-            f"⚠ 数据来自本地缓存（联网失败），最后一根 K 线距今 {stale:.1f} 天，"
-            f"信号可能不是最新，请人工核对后再下单。"),
-        # 写回状态文件用的开仓信息（空仓时 None）
-        "state": ({"entry_price": ep,
-                   "entry_date": rec.get("entry_date") or sg["date"],
-                   "invest": rec.get("invest") or invest,
-                   "qty": rec.get("qty") or qty} if (now and have_entry) else None),
-        "entry_pending": entry_pending,
-        # 概览表：方向 / 开仓价 / 当前价 / 浮动盈亏（空仓时显示距 EMA200）
-        "sum": {
-            "dir": "持有" if now else "空仓",
-            "dir_col": _C_RED if now else _C_SLATE,
-            "entry": ((_fmt_px(ep) + "*") if entry_pending else
-                      (_fmt_px(ep) if (now and have_entry) else
-                       ("未记录" if now else "—"))),
-            "entry_unknown": now and not have_entry,
-            "price": _fmt_px(cur),
-            "pnl": pnl_txt, "pnl_col": pnl_col,
-            "gap": f"{gap_now:+.2f}%",
-            "ema": _fmt_px(sg["ema_trend"]),
-            "dif": _fmt_px(sg["macd"], sign=True),
-            "judge": ("✓ 站上" if ema_ok else "✗ 跌破") + " / " +
-                     ("✓ >0" if dif_ok else "✗ <0"),
-            "judge_col": _C_RED if (ema_ok and dif_ok) else _C_GREEN,
-        },
-    }
+    footer = f"{symbol} · {interval} · 信号日 {sg['date'][:10]} · 推送 {now_cn()}"
+    subtitle = f"信号日 {sg['date'][:10]} · 推送 {now_cn()}"
 
-
-# ══════════════════════════ 汇总邮件 ══════════════════════════
-def _digest_subject(items: list, date: str) -> str:
-    """标题：有信号变化就突出，否则报「持仓 N/M」。手机上扫一眼就知道要不要点开。"""
-    ch = [it for it in items if it["changed"]]
-    if len(ch) == 1:
-        it = ch[0]
-        return f"[MACD-X 现货] ⚠ {it['symbol']} {it['action']}信号 · {date}"
-    if len(ch) > 1:
-        names = " ".join(f"{it['base']}{it['action']}" for it in ch)
-        return f"[MACD-X 现货] ⚠ {len(ch)} 个信号变化：{names} · {date}"
-    n_hold = sum(1 for it in items if it["now"])
-    return f"[MACD-X 现货] 日报 · 持仓 {n_hold}/{len(items)} · {date}"
-
-
-def build_digest_text(items: list, subtitle: str, footer: str) -> str:
-    """汇总邮件的纯文本兜底版。"""
-    out = []
-    ch = [it for it in items if it["changed"]]
-    if ch:
-        out.append(f"★ 需要操作（{len(ch)} 个标的）")
-        out.append("")
-        for it in ch:
-            out.append(it["title"] + "    " + it["head"])
-            for r in it["rows"]:
-                label, value = r[0], r[1]
-                sub = r[2] if len(r) > 2 else ""
-                line = f"  {_ljust(label, 10)}: {value}"
-                if sub:
-                    line += f"   （{sub}）"
-                out.append(line)
-            out.append(f"  {it['note']}")
-            out.append("")
-    else:
-        out.append("★ 今日无信号变化，无需操作。")
-        out.append("")
-
-    out.append("── 各标的状态 ──")
-    for it in items:
-        s = it["sum"]
-        tail = s["pnl"] if it["now"] else f"距EMA {s['gap']}"
-        line = (f"  {_ljust(it['base'], 8)} {_ljust(s['dir'], 6)} "
-                f"开仓 {_ljust(s['entry'], 14)} 现价 {_ljust(s['price'], 14)} "
-                f"{tail}")
-        out.append(line)
-    if any(it.get("entry_pending") for it in items):
-        out.append("  * 今日刚出买入信号，开仓价为推荐价，成交后会换成实际成交均价。")
-
-    out.append("")
-    out.append("── 信号依据 ──")
-    for it in items:
-        s = it["sum"]
-        out.append(f"  {_ljust(it['base'], 8)} EMA200 {_ljust(s['ema'], 14)} "
-                   f"DIF {_ljust(s['dif'], 12)} {s['judge']}")
-    out.append("  判定条件：收盘价 > EMA200 且 DIF 快线 > 0")
-
-    warns = [it["warn"] for it in items if it["warn"]]
-    if warns:
-        out += ["", warns[0]]
-    out += ["", "─" * 34, footer,
-            "本邮件自动生成，仅供研究，不构成投资建议。"]
-    return "\n".join(out)
-
-
-def build_digest_html(items: list, subtitle: str, footer: str) -> str:
-    """汇总邮件的 HTML 版：操作卡 + 状态总表 + 信号依据表，手机自适应。"""
-    FONT = ("-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,"
-            "'PingFang SC','Microsoft YaHei',Arial,sans-serif")
-    TD = "padding:7px 5px;font-size:12px;border-top:1px solid #ededed;white-space:nowrap"
-    TDV = TD + ";text-align:right;font-variant-numeric:tabular-nums"
-
-    ch = [it for it in items if it["changed"]]
-
-    # ── ① 需要操作的标的：逐张行动卡 ──
-    cards = ""
-    for it in ch:
-        accent = it["accent"]
-        tr = []
-        for r in it["rows"]:
-            label, value = r[0], r[1]
-            sub = r[2] if len(r) > 2 else ""
-            color = r[3] if len(r) > 3 else None
-            vstyle = f"color:{color};" if color else "color:#1a1a1a;"
-            sub_html = (f'<div style="font-size:11px;color:#8a8a8a;font-weight:400;'
-                        f'margin-top:2px">{_esc(sub)}</div>') if sub else ""
-            tr.append(f'<tr><td style="{TD};color:#666;vertical-align:top">'
-                      f'{_esc(label)}</td>'
-                      f'<td style="{TDV};font-size:15px;font-weight:700;{vstyle};'
-                      f'vertical-align:top">{value}{sub_html}</td></tr>')
-        cards += (
-            f'<div style="margin:0 0 12px;border:1px solid #e8e8e8;'
-            f'border-left:4px solid {accent};border-radius:8px;overflow:hidden">'
-            f'<div style="padding:11px 12px 3px">'
-            f'<div style="font-size:15px;font-weight:700;color:{accent}">'
-            f'{_esc(it["title"])}</div>'
-            f'<div style="font-size:12px;color:#777;margin-top:3px">'
-            f'{_esc(it["head"])}</div></div>'
-            f'<div style="padding:0 12px 11px">'
-            f'<table width="100%" cellpadding="0" cellspacing="0" '
-            f'style="border-collapse:collapse;width:100%">{"".join(tr)}</table>'
-            f'<div style="font-size:12px;color:#666;line-height:1.55;'
-            f'margin-top:8px">{_esc(it["note"])}</div></div></div>')
-
-    act_section = ""
-    if ch:
-        act_section = (
-            f'<div style="padding:16px 16px 0">'
-            f'<div style="font-size:14px;font-weight:700;color:#333;'
-            f'margin-bottom:10px">需要操作（{len(ch)} 个标的）</div>'
-            f'{cards}</div>')
-    else:
-        act_section = (
-            '<div style="margin:16px 16px 0;padding:11px 12px;background:#f1f8f2;'
-            'border-left:3px solid #2e7d32;border-radius:6px;font-size:13px;'
-            'color:#245c28">★ 今日无信号变化，无需操作。</div>')
-
-    # ── ② 各标的状态总表 ──
-    rows = ['<tr style="background:#f5f6f8">'
-            '<td style="padding:7px 5px;font-size:11px;color:#888">标的</td>'
-            '<td style="padding:7px 5px;font-size:11px;color:#888">方向</td>'
-            '<td style="padding:7px 5px;font-size:11px;color:#888;'
-            'text-align:right">开仓价</td>'
-            '<td style="padding:7px 5px;font-size:11px;color:#888;'
-            'text-align:right">当前价</td>'
-            '<td style="padding:7px 5px;font-size:11px;color:#888;'
-            'text-align:right">浮动盈亏</td></tr>']
-    for i, it in enumerate(items):
-        s = it["sum"]
-        bg = "#ffffff" if i % 2 == 0 else "#fafafa"
-        last = (f'<span style="color:{s["pnl_col"]};font-weight:700">{s["pnl"]}</span>'
-                if it["now"] and s["pnl"] else
-                f'<span style="color:#999">{s["gap"]}</span>')
-        rows.append(
-            f'<tr style="background:{bg}">'
-            f'<td style="{TD};font-weight:600;color:#1a1a1a">{_esc(it["base"])}</td>'
-            f'<td style="{TD};color:{s["dir_col"]};font-weight:700">{s["dir"]}</td>'
-            f'<td style="{TDV};color:{"#bbb" if s["entry_unknown"] else "#1a1a1a"}">'
-            f'{_esc(s["entry"])}</td>'
-            f'<td style="{TDV}">{_esc(s["price"])}</td>'
-            f'<td style="{TDV}">{last}</td></tr>')
-    state_table = ('<table width="100%" cellpadding="0" cellspacing="0" '
-                   'style="border-collapse:collapse;width:100%;'
-                   'border:1px solid #ededed;border-radius:6px">'
-                   + "".join(rows) + '</table>')
-    if any(it.get("entry_pending") for it in items):
-        state_table += (
-            '<div style="font-size:11px;color:#8a8a8a;margin-top:7px;'
-            'line-height:1.5">* 今日刚出买入信号，开仓价是推荐价，'
-            '成交后会替换为实际成交均价。</div>')
-
-    # ── ③ 信号依据表 ──
-    irows = ['<tr style="background:#f5f6f8">'
-             '<td style="padding:7px 5px;font-size:11px;color:#888">标的</td>'
-             '<td style="padding:7px 5px;font-size:11px;color:#888;'
-             'text-align:right">EMA200</td>'
-             '<td style="padding:7px 5px;font-size:11px;color:#888;'
-             'text-align:right">DIF</td>'
-             '<td style="padding:7px 5px;font-size:11px;color:#888;'
-             'text-align:right">判定</td></tr>']
-    for i, it in enumerate(items):
-        s = it["sum"]
-        bg = "#ffffff" if i % 2 == 0 else "#fafafa"
-        irows.append(
-            f'<tr style="background:{bg}">'
-            f'<td style="{TD};font-weight:600;color:#1a1a1a">{_esc(it["base"])}</td>'
-            f'<td style="{TDV}">{_esc(s["ema"])}</td>'
-            f'<td style="{TDV}">{_esc(s["dif"])}</td>'
-            f'<td style="{TD};text-align:right;color:{s["judge_col"]};'
-            f'font-weight:700;font-size:11px">{_esc(s["judge"])}</td></tr>')
-    ind_table = ('<table width="100%" cellpadding="0" cellspacing="0" '
-                 'style="border-collapse:collapse;width:100%;'
-                 'border:1px solid #ededed;border-radius:6px">'
-                 + "".join(irows) + '</table>')
-
-    warns = [it["warn"] for it in items if it["warn"]]
-    warn_html = ""
-    if warns:
-        warn_html = (f'<div style="margin:14px 16px 0;padding:10px 12px;'
-                     f'background:#fff8e1;border-left:3px solid #f9a825;'
-                     f'font-size:13px;color:#6d4c00;line-height:1.55">'
-                     f'{_esc(warns[0])}</div>')
-
-    n_hold = sum(1 for it in items if it["now"])
-    head_color = _C_RED if ch else _C_SLATE
-    head_txt = (f"⚠ {len(ch)} 个信号变化" if ch else "今日无信号变化")
-
-    return f"""<div style="margin:0;padding:14px 10px;background:#f4f5f7">
-<div style="max-width:620px;margin:0 auto;background:#ffffff;border-radius:10px;overflow:hidden;font-family:{FONT};color:#1a1a1a">
-
-  <div style="background:{head_color};padding:14px 16px">
-    <div style="font-size:17px;font-weight:700;color:#ffffff;line-height:1.3">
-      MACD-X 现货 · 每日汇总</div>
-    <div style="font-size:12px;color:#ffffff;opacity:.88;margin-top:4px">
-      {_esc(head_txt)} · 持仓 {n_hold}/{len(items)} · {_esc(subtitle)}</div>
-  </div>
-
-  {act_section}
-
-  <div style="padding:18px 16px 0">
-    <div style="font-size:14px;font-weight:700;color:#333;margin-bottom:9px">各标的状态</div>
-    {state_table}
-  </div>
-
-  <div style="padding:18px 16px 0">
-    <div style="font-size:14px;font-weight:700;color:#333;margin-bottom:9px">信号依据</div>
-    {ind_table}
-    <div style="font-size:11px;color:#8a8a8a;margin-top:8px;line-height:1.5">
-      判定条件：收盘价 &gt; EMA200 且 DIF 快线 &gt; 0
-    </div>
-  </div>
-{warn_html}
-  <div style="padding:14px 16px 16px;margin-top:18px;border-top:1px solid #eee;font-size:11px;color:#9a9a9a;line-height:1.6">
-    {_esc(footer)}<br>
-    本邮件自动生成，仅供研究，不构成投资建议。
-  </div>
-
-</div>
-</div>"""
-
-
-def send_digest(items: list, interval: str = "1d") -> bool:
-    """
-    把所有标的合并成**一封**汇总邮件发出。
-
-    发送成功后才写状态文件 —— 发失败就什么都不写，下次运行会自动重试，
-    不会出现「邮件没发出去但状态已经翻篇」的漏单。
-    """
-    if not items:
-        print("  [邮件] 无标的需要推送，本次不发信。")
-        return False
-
-    date = items[0]["date"][:10]
-    subject = _digest_subject(items, date)
-    n_ch = sum(1 for it in items if it["changed"])
-    n_hold = sum(1 for it in items if it["now"])
-    subtitle = f"信号日 {date} · 推送 {now_cn()}"
-    footer = f"{len(items)} 个标的 · {interval} · 信号日 {date} · 推送 {now_cn()}"
-
-    body = build_digest_text(items, subtitle, footer)
-    html = build_digest_html(items, subtitle, footer)
+    body = build_mail_text(title, subtitle, head, rows, note, ind_rows,
+                           warn, footer)
+    html = build_mail_html(title, subtitle, head, rows, note, ind_rows,
+                           warn, footer, accent)
     ok = send_email(subject, body, html=html)
-    if not ok:
-        print("  [邮件] 汇总邮件发送失败，状态未更新（下次运行会重试）")
-        return False
-
-    print(f"  [邮件] 已发送汇总邮件到 {EMAIL_CONFIG['to']}"
-          f"（{len(items)} 个标的：持仓 {n_hold}，信号变化 {n_ch}）")
-    for it in items:
-        _save_state(it["key"], it["now"], it["date"], it["state"])
-    return True
+    if ok:
+        print(f"  [邮件] 已发送【{action}】提醒到 {EMAIL_CONFIG['to']}")
+        # 持仓时把开仓价等写回状态文件，之后每天读出来算浮动盈亏；
+        # 空仓时传 None（hold=False）会自动清掉旧持仓信息。
+        if now and have_entry:
+            _save_state(key, now, sg["date"],
+                        {"entry_price": ep,
+                         "entry_date": rec.get("entry_date") or sg["date"],
+                         "invest": rec.get("invest") or invest,
+                         "qty": rec.get("qty") or qty})
+        else:
+            # 空仓，或持仓但开仓价未知（老仓位）→ 只更新状态，不动 entry_*
+            _save_state(key, now, sg["date"])
+    else:
+        print(f"  [邮件] 发送失败，状态未更新（下次运行会重试推送）")
 
 
 # ══════════════════════════ 0.5 实盘下单 ══════════════════════════
@@ -1613,10 +1451,6 @@ def main():
             print(f"  [提示] 每个标的只有 {per_cap*args.frac:,.0f} U，"
                   f"接近币安最小下单额（约 5~10 U），建议减少标的数量。")
 
-    # 先把所有标的的信号收集起来，循环结束后**合并成一封**汇总邮件发出。
-    # 不在这里逐个发信 —— 5 个标的发 5 封邮件既吵又难看。
-    mail_items: list[dict] = []
-
     for sym in symbols:
         try:
             bars, src, stale = load_bars(sym, args.interval, args.no_fetch)
@@ -1664,22 +1498,15 @@ def main():
                         if rep.get("action") in ("BUY", "SELL") and rep.get("avg_price"):
                             fill_price = float(rep["avg_price"])
             if not args.no_mail:
-                it = collect_signal(sym, args.interval, sg,
-                                    capital=per_cap, frac=args.frac,
-                                    src=src, stale=stale,
-                                    total_capital=args.total_capital,
-                                    n_symbols=len(symbols),
-                                    daily=not args.no_daily,
-                                    fill_price=fill_price)
-                if it:
-                    mail_items.append(it)
+                notify_signal(sym, args.interval, sg,
+                              capital=per_cap, frac=args.frac,
+                              src=src, stale=stale,
+                              total_capital=args.total_capital,
+                              n_symbols=len(symbols),
+                              daily=not args.no_daily,
+                              fill_price=fill_price)
         else:
             print_result(sym, bars, p)
-
-    # ── 全部标的跑完，发一封汇总邮件 ──
-    if args.signal and not args.no_mail:
-        print(f"\n{'─'*78}")
-        send_digest(mail_items, args.interval)
 
     if not args.signal:
         print(f"\n{'='*78}")
