@@ -399,7 +399,10 @@ def _side_txt(net):
 
 def format_body(infos, title, note="", levels=None, actions=None, prev_map=None,
                 primary="B"):
-    """infos: compute_profile 结果列表；levels: {key: 风控位}；actions: [手动操作说明]。
+    """infos: compute_profile 结果列表；levels: {key: 风控位}。
+
+    actions: 结构化操作清单（见 _build_actions / _build_actions_multi），
+    每条都带「保证金 + 操作比例 + 下单数量」，与 trade.py 的下单口径一致。
 
     primary: 重点展示哪一档（A/B/C）——就是你实际在跑的那一档。
     邮件开头直接给出「方向 / 杠杆 / 保证金 / 下单数量」四件事，
@@ -462,12 +465,15 @@ def format_body(infos, title, note="", levels=None, actions=None, prev_map=None,
         L.append("  5 组参数方向互相抵消，净仓位为 0 —— 本次空仓，不操作。")
     L.append("")
 
-    # ---------- ② 需要手动执行的操作 ----------
-    if actions:
-        L.append("★ 需要你手动执行的操作")
+    # ---------- ② 需要执行的操作（保证金 + 操作比例） ----------
+    if actions and actions.get("items"):
+        L.append("★ " + actions["title"])
         L.append("-" * 58)
-        for line in actions:
-            L.append(f"  {line}")
+        for a in actions["items"]:
+            L.append("  " + _fmt_action_txt(a))
+        L.append("  ※ 保证金 = 该仓位占用（数量 × 现价 ÷ 3×）"
+                 "　操作比例 = 本次数量相对原仓位的变动")
+        L.append("  ※ " + actions["note"])
         L.append("")
 
     # ---------- ③ 三档对照（同一份本金，只跑一档） ----------
@@ -663,10 +669,11 @@ def format_body_html(infos, title, note="", levels=None, actions=None, primary="
                       _p("5 组参数方向互相抵消，净仓位为 0 —— 空仓等待。", 13, DARK),
                       "#9aa0a6", "#f7f7f9"))
 
-    # ② 需要你手动执行的操作
-    if actions:
-        P.append(_h("需要你手动执行的操作"))
-        P.append(_ul(actions))
+    # ② 需要执行的操作（保证金 + 操作比例）
+    if actions and actions.get("items"):
+        P.append(_h(actions["title"]))
+        P.append(_action_table_html(actions["items"], kind="profile"))
+        P.append(_action_foot(actions))
 
     # ③ 三档对照表（手机友好）
     if len(infos) > 1:
@@ -938,35 +945,170 @@ def entry_pnl(entry_px, inf):
     return chg * 100.0, chg * float(inf["L"]) * 100.0
 
 
-def _build_actions(infos, changed, first_run):
-    """把「方向变化」翻译成明确的手动操作清单。"""
-    out = []
-    changed_keys = {i["key"] for _, i in changed}
+# ============================================================ 操作清单（保证金 + 操作比例）
+def _action_items(infos, changed, first_run):
+    """把「仓位变化」翻译成结构化操作项 —— 口径与 trade.py 的 _decide() 完全一致。
+
+    只对「首次运行」和「方向发生变化」的标的产出条目；其余标的没有动作。
+
+    每条包含：
+      coin/name   展示用
+      kind        open / close / flip / add / cut / hold
+      label       中文动作名（开多仓 / 平仓 / 反手 / 加仓 / 减仓 / 不动）
+      order       要在币安下的那一单，例如 "SELL 0.039535"（hold 时为 ""）
+      delta       这一单的数量（绝对值）
+      old_qty / new_qty
+      old_margin / new_margin   保证金（U）= |数量| × 现价 ÷ 杠杆
+      pct         操作比例（本次相对原仓位的变动 %）；新开 / 反手 / 空仓为 None
+    """
+    changed_map = {i["key"]: p for p, i in changed}
     first_keys = {i["key"] for i in first_run}
+    out = []
     for inf in infos:
         k = inf["key"]
-        if k in changed_keys:
-            prev = next(p for p, i in changed if i["key"] == k)
-            old_side = _side_txt(prev.get("net_expo", 0) or 0)
-            old_qty = float(prev.get("qty") or 0)
-            new_side = _side_txt(inf["net"])
-            parts = []
-            if old_qty > 0:
-                parts.append(f"平掉{old_side}头 {old_qty:.6f} BTC")
-            else:
-                parts.append("原为空仓")
-            if abs(inf["net"]) > 1e-9:
-                parts.append(f"开{new_side}头 {inf['qty']:.6f} BTC")
-            else:
-                parts.append("本次不建仓")
-            out.append(f"{k}档（{inf['name']}）：" + " → ".join(parts))
-        elif k in first_keys:
-            if abs(inf["net"]) > 1e-9:
-                out.append(f"{k}档（{inf['name']}）：开{_side_txt(inf['net'])}头 "
-                           f"{inf['qty']:.6f} BTC（首次建仓）")
-            else:
-                out.append(f"{k}档（{inf['name']}）：本次空仓")
+        if k not in changed_map and k not in first_keys:
+            continue
+        prev = changed_map.get(k) or {}
+        old_qty = float(prev.get("qty") or 0)
+        new_qty = float(inf["qty"])
+        lev = float(inf.get("L") or 3.0)
+        px = float(inf["px"])
+        old_m = abs(old_qty) * px / lev
+        new_m = float(inf["margin"])
+        o, n = abs(old_qty), abs(new_qty)
+
+        if o < 1e-9 and n < 1e-9:
+            kind, label, order, delta = "hold", "不动", "", 0.0
+        elif o < 1e-9:
+            kind = "open"
+            label = f"开{'多' if new_qty > 0 else '空'}仓"
+            order = f"{'BUY' if new_qty > 0 else 'SELL'} {n:.6f}"
+            delta = n
+        elif n < 1e-9:
+            kind, label = "close", "平仓"
+            order = f"{'SELL' if old_qty > 0 else 'BUY'} {o:.6f}"
+            delta = o
+        elif (old_qty > 0) != (new_qty > 0):
+            kind, label = "flip", "反手"
+            close_side = "SELL" if old_qty > 0 else "BUY"
+            open_side = "BUY" if new_qty > 0 else "SELL"
+            order = f"先 {close_side} {o:.6f}，再 {open_side} {n:.6f}"
+            delta = o + n
+        elif n > o:
+            kind, label = "add", "加仓"
+            order = f"{'BUY' if new_qty > 0 else 'SELL'} {n - o:.6f}"
+            delta = n - o
+        elif n < o:
+            kind, label = "cut", "减仓"
+            order = f"{'SELL' if old_qty > 0 else 'BUY'} {o - n:.6f}"
+            delta = o - n
+        else:
+            kind, label, order, delta = "hold", "不动", "", 0.0
+
+        if kind in ("open", "flip") or o < 1e-9:
+            pct = None
+        else:
+            pct = (n - o) / o * 100.0
+
+        out.append({
+            "key": k, "coin": inf["coin"], "name": inf.get("name") or "",
+            "kind": kind, "label": label, "order": order, "delta": delta,
+            "old_qty": old_qty, "new_qty": new_qty,
+            "old_margin": old_m, "new_margin": new_m, "pct": pct,
+            "side": _side_txt(inf["net"]),
+        })
     return out
+
+
+def _pct_txt(a):
+    """操作比例的展示文案。"""
+    if a["kind"] in ("open",):
+        return "新开"
+    if a["kind"] == "flip":
+        return "反手"
+    if a["pct"] is None:
+        return "—"
+    return f"{a['pct']:+.0f}%"
+
+
+def _split_actions(actions):
+    """兼容新结构化 dict 与老的字符串列表，返回 (items, ref_items, title, note)。"""
+    if isinstance(actions, dict):
+        return (actions.get("items") or [], actions.get("ref_items") or [],
+                actions.get("title") or "需要执行的操作", actions.get("note") or "")
+    return (actions or [], [], "需要执行的操作", "")
+
+
+def _fmt_action_txt(a, with_name=True):
+    """把一条操作渲染成纯文本：保证金 + 操作比例 + 下单数量。"""
+    head = f"{a['coin']}（{a['name']}）" if (with_name and a.get("name")) else a["coin"]
+    if a["kind"] == "hold":
+        return f"{head}：不动　保证金 {a['new_margin']:,.0f} U（仓位未变，无需下单）"
+    mg = f"{a['old_margin']:,.0f} → {a['new_margin']:,.0f} U"
+    return (f"{head}：{a['label']}　操作比例 {_pct_txt(a)}　"
+            f"保证金 {mg}　下单 {a['order']} {a['coin']}")
+
+
+def _action_table_html(items, kind="coin", primary=None):
+    """把操作项渲染成 HTML 表格：动作 / 保证金 / 操作比例 / 下单数量。
+
+    kind:
+      "coin"    —— 第一列「币种·档位」，例如 ETH·B（多标的、三档并列时用）
+      "profile" —— 第一列只写档位名，例如 B 推荐（单标的、只跑一档时用）
+      "plain"   —— 第一列只写币种（BTC 单跑参照这种单一标的用）
+    primary: 用户实际在跑的那一档，加粗突出。
+    """
+    head = {"coin": "币种·档位", "profile": "档位", "plain": "标的"}.get(kind, "币种")
+    rows = []
+    for a in items:
+        pk = a["key"].split("|")[-1] if "|" in a["key"] else ""
+        if kind == "coin":
+            first = f"{a['coin']}·{pk}" if pk else a["coin"]
+        elif kind == "profile":
+            first = a.get("name") or a["coin"]
+        else:
+            first = a["coin"]
+        if primary and pk == primary:
+            first = f"<b>{first}</b>"
+        if a["kind"] == "hold":
+            rows.append([first, "不动", f"{a['new_margin']:,.0f}", "—", "—"])
+        else:
+            rows.append([
+                first, a["label"],
+                f"{a['old_margin']:,.0f} → <b>{a['new_margin']:,.0f}</b>",
+                _pct_txt(a), f"{a['order']} {a['coin']}"])
+    return _table([head, "动作", "保证金(U)", "操作比例", "下单数量"], rows,
+                  ["left", "left", "right", "right", "right"])
+
+
+def _action_foot(actions):
+    """操作表下方的口径说明 + 总开关提示。"""
+    return (f'<div style="font-size:11px;color:#9aa0a6;margin-top:6px;line-height:1.7;">'
+            f'保证金 = 该仓位占用（数量 × 现价 ÷ 3×）　'
+            f'操作比例 = 本次数量相对原仓位的变动<br>{actions["note"]}</div>')
+
+
+def _action_header(cfg):
+    """按总开关决定标题与说明：live 下这些动作是脚本自动做的，不是「要你手动做」。"""
+    mode = ""
+    try:
+        mode = str((cfg.get("_master_switch") or {}).get("mode") or "").strip().lower()
+    except Exception:
+        mode = ""
+    if mode == "live":
+        return ("需要执行的操作（脚本会自动完成）",
+                "你已开启「真实下单」总开关（mode=live）：上面这些动作会由 "
+                "run_trade.bat 自动执行，你不用手动操作。只想看信号不想下单，"
+                "把总开关改回 observe 即可。")
+    return ("需要你手动执行的操作",
+            "当前总开关是 observe，脚本不会自动下单：以上动作请你在币安 App 里手动完成。")
+
+
+def _build_actions(infos, changed, first_run, cfg=None):
+    """单标的版操作清单（结构化）。"""
+    title, note = _action_header(cfg or {})
+    return {"title": title, "note": note,
+            "items": _action_items(infos, changed, first_run), "ref_items": []}
 
 
 def _state_entry(inf, lv, prev):
@@ -983,34 +1125,19 @@ def _state_entry(inf, lv, prev):
 
 
 # ============================================================ 多标的：操作清单与邮件
-def _build_actions_multi(infos, changed, first_run):
-    """多标的版的「手动操作清单」——按币种列出。"""
-    out = []
-    changed_keys = {i["key"] for _, i in changed}
-    first_keys = {i["key"] for i in first_run}
-    for inf in infos:
-        k, coin = inf["key"], inf["coin"]
-        if k in changed_keys:
-            prev = next(p for p, i in changed if i["key"] == k)
-            old_side = _side_txt(prev.get("net_expo", 0) or 0)
-            old_qty = float(prev.get("qty") or 0)
-            parts = []
-            if old_qty > 0:
-                parts.append(f"平掉{old_side}头 {old_qty:.6f} {coin}")
-            else:
-                parts.append("原为空仓")
-            if abs(inf["net"]) > 1e-9:
-                parts.append(f"开{_side_txt(inf['net'])}头 {inf['qty']:.6f} {coin}")
-            else:
-                parts.append("本次不建仓")
-            out.append(f"{coin}（{inf['name']}）：" + " → ".join(parts))
-        elif k in first_keys:
-            if abs(inf["net"]) > 1e-9:
-                out.append(f"{coin}（{inf['name']}）：开{_side_txt(inf['net'])}头 "
-                           f"{inf['qty']:.6f} {coin}（首次建仓）")
-            else:
-                out.append(f"{coin}（{inf['name']}）：本次空仓")
-    return out
+def _build_actions_multi(infos, changed, first_run, cfg=None, ref=None):
+    """多标的版操作清单（结构化）——按币种列出，另带一份 BTC 单跑参照。
+
+    ref = (ref_infos, ref_changed, ref_first)；给 None 表示不算参照那一组。
+    """
+    title, note = _action_header(cfg or {})
+    ref_items = []
+    if ref:
+        r_infos, r_changed, r_first = ref
+        ref_items = _action_items(r_infos, r_changed, r_first)
+    return {"title": title, "note": note,
+            "items": _action_items(infos, changed, first_run),
+            "ref_items": ref_items}
 
 
 def _multi_rows(infos, primary, levels):
@@ -1027,6 +1154,7 @@ def format_multi_body(infos, title, note, levels, actions, primary, cfg, syms, b
     t_margin = sum(i["margin"] for i in prim)
     t_notional = sum(abs(i["net"]) for i in prim)
     t_eq = sum(i["equity"] for i in prim) or 1.0
+    act_items, ref_items, act_title, act_note = _split_actions(actions)
 
     L = []
     L.append(f"{now:%Y-%m-%d %H:%M}（北京时间）  数据 {ref['bar_dt']:%Y-%m-%d} 日线")
@@ -1086,14 +1214,27 @@ def format_multi_body(infos, title, note, levels, actions, primary, cfg, syms, b
         L.append(f"  {btc_ref['side']}  保证金 {btc_ref['margin']:,.0f} U   "
                  f"数量 {btc_ref['qty']:.6f} BTC   名义 {abs(btc_ref['net']):,.0f} U   "
                  f"爆仓价 {lvr.get('liq', btc_ref['liq']):,.0f}")
+        if ref_items:
+            L.append("  ★ 若要按这个方案单跑，本次动作：")
+            for a in ref_items:
+                L.append("    " + _fmt_action_txt(a, with_name=False))
+        else:
+            L.append("  ★ 本次无需操作（仓位未变）")
         L.append("  ※ 这是对照，不是你要下的单。四币方案下 BTC 只占 "
                  f"{by_sym.get(btc_ref['symbol'], btc_ref)['equity']:,.0f} U 配额。")
 
-    if actions:
+    if act_items:
         L.append("")
-        L.append("===== 需要你手动执行的操作 =====")
-        for a in actions:
-            L.append(f"  · {a}")
+        L.append(f"===== {act_title} =====")
+        for a in act_items:
+            line = _fmt_action_txt(a)
+            pk = a["key"].split("|")[-1] if "|" in a["key"] else ""
+            if pk == primary:
+                line += "　← 你在跑这档"
+            L.append("  · " + line)
+        L.append("  ※ 保证金 = 该仓位占用（数量 × 现价 ÷ 3×）"
+                 "　操作比例 = 本次数量相对原仓位的变动")
+        L.append("  ※ " + act_note)
 
     L.append("")
     L.append("===== 三档对照（每币保证金）=====")
@@ -1125,6 +1266,7 @@ def format_multi_body_html(infos, title, note, levels, actions, primary, cfg, sy
     t_notional = sum(abs(i["net"]) for i in prim)
     t_eq = sum(i["equity"] for i in prim) or 1.0
     per_eq = prim[0]["equity"] if prim else 0.0
+    act_items, ref_items, act_title, act_note = _split_actions(actions)
 
     P = []
     P.append(_p(f"{now:%Y-%m-%d %H:%M}（北京时间）　数据 {ref['bar_dt']:%Y-%m-%d} 日线", 12, "#9aa0a6"))
@@ -1193,15 +1335,23 @@ def format_multi_body_html(infos, title, note, levels, actions, primary, cfg, sy
               f"{btc_ref['qty']:.6f}", f"{abs(btc_ref['net']):,.0f} U",
               f"{lvr.get('liq', btc_ref['liq']):,.0f}"]],
             ["center", "right", "right", "right", "right"]))
+        if ref_items:
+            P.append(f'<div style="font-size:12px;font-weight:600;color:{DARK};'
+                     f'margin:10px 0 4px 0;">★ 若要按这个方案单跑，本次动作</div>')
+            P.append(_action_table_html(ref_items, kind="plain"))
+        else:
+            P.append(f'<div style="font-size:12px;color:{GREY};margin-top:8px;">'
+                     f'★ 本次无需操作（仓位未变）</div>')
         P.append(f'<div style="font-size:11px;color:#9aa0a6;margin-top:6px;">'
                  f'※ 这是<b>对照</b>，不要照着下单。四币方案下 BTC 只占 '
                  f'{own["equity"] if own else per_eq:,.0f} U 配额，'
                  f'比单跑小 {len(syms)} 倍，回撤也更小。</div>')
 
-    # ③ 手动操作
-    if actions:
-        P.append(_h("需要你手动执行的操作"))
-        P.append(_ul(actions))
+    # 需要执行的操作（保证金 + 操作比例）
+    if act_items:
+        P.append(_h(act_title))
+        P.append(_action_table_html(act_items, kind="coin", primary=primary))
+        P.append(_action_foot({"note": act_note}))
 
     # ④ 三档对照
     keys_sorted = sorted({i["pk"] for i in infos})
@@ -1355,8 +1505,34 @@ def run(keys, force=False, dry_run=False, test=False, daily=False, log=None, sym
                  f"{lv['stop']:,.0f}" if lv["stop"] else "不设", lv["liq"],
                  f"{e_px:,.2f}" if e_px else "无持仓", e_day or "-", e_hold)
 
-    actions = (_build_actions_multi(infos, changed, first_run) if multi
-               else _build_actions(infos, changed, first_run))
+    # BTC 单跑参照也走同一套状态跟踪，③ 段才能给出「本次要做什么」
+    ref_group = None
+    if btc_ref is not None:
+        rk = btc_ref["key"]
+        rprev = state.get(rk) or {}
+        r_first = not rprev
+        r_chg = (not r_first) and rprev.get("dirs") != btc_ref["dirs"]
+        if r_first or r_chg:
+            entry_px, peak_px = btc_ref["px"], btc_ref["px"]
+            entry_bar = int(btc_ref["bar_open_ms"])
+        else:
+            entry_px = rprev.get("entry_px") or btc_ref["px"]
+            entry_bar = int(rprev.get("entry_bar") or btc_ref["bar_open_ms"])
+            pk = _peak_since(bars_map[btc_ref["symbol"]], entry_bar, btc_ref["net"] > 0)
+            peak_px = pk if pk else (rprev.get("peak_px") or btc_ref["px"])
+        lv = compute_risk_levels(btc_ref, cfg, entry_px, peak_px)
+        lv["entry_bar"] = entry_bar
+        lv["entry_dt"] = datetime.fromtimestamp(entry_bar / 1000, CST)
+        lv["entry_new"] = (r_first or r_chg)
+        levels[rk] = lv
+        ref_group = ([btc_ref],
+                     ([(rprev, btc_ref)] if r_chg else []),
+                     ([btc_ref] if r_first else []))
+        log.info("BTC 单跑参照：方向=%s 净敞口=%.3f 数量=%.6f（首次=%s 方向变化=%s）",
+                 btc_ref["side"], btc_ref["net_expo"], btc_ref["qty"], r_first, r_chg)
+
+    actions = (_build_actions_multi(infos, changed, first_run, cfg=cfg, ref=ref_group)
+               if multi else _build_actions(infos, changed, first_run, cfg=cfg))
 
     # 邮件里重点展示哪一档：优先 email.primary_profile，其次 trade.profile，最后 B
     primary = (str((cfg.get("email") or {}).get("primary_profile") or "").strip().upper()
@@ -1374,14 +1550,27 @@ def run(keys, force=False, dry_run=False, test=False, daily=False, log=None, sym
         if multi:
             print("\n" + format_multi_body(infos, "（dry-run，未发送）", "", levels,
                                            actions, primary, cfg, syms, btc_ref))
+            html_txt = format_multi_body_html(infos, "（dry-run，未发送）", "", levels,
+                                              actions, primary, cfg, syms, btc_ref)
         else:
             print("\n" + format_body(infos, "（dry-run，未发送）", levels=levels,
                                      actions=actions, primary=primary))
+            html_txt = format_body_html(infos, "（dry-run，未发送）", levels=levels,
+                                        actions=actions, primary=primary)
+        # 顺手把 HTML 版落盘，方便在浏览器里看排版（不会发信、不会下单）
+        try:
+            with open("信号邮件预览.html", "w", encoding="utf-8") as f:
+                f.write(html_txt)
+            log.info("[dry-run] HTML 预览已写入 信号邮件预览.html（双击即可查看）")
+        except Exception as e:                                   # noqa: BLE001
+            log.warning("[dry-run] HTML 预览写入失败：%s", e)
         return 0
 
     # --- 无变化：不发信，但要把持仓极值（吊灯用）更新到状态里
     #     加了 --daily 时例外：即使没变化也发一封日报，作为「脚本活着」的回执
-    if not changed and not first_run and not force and not daily:
+    #     BTC 单跑参照若首次跟踪 / 方向变化，也算有变化（否则它的「首次」会被吞掉）
+    ref_pending = bool(ref_group and (ref_group[1] or ref_group[2]))
+    if not changed and not first_run and not ref_pending and not force and not daily:
         log.info("无方向变化，跳过推送")
         for inf in infos:
             state[inf["key"]] = _state_entry(inf, levels[inf["key"]], state.get(inf["key"]))
@@ -1403,6 +1592,10 @@ def run(keys, force=False, dry_run=False, test=False, daily=False, log=None, sym
         title = "每日日报 · 方向未变"
         note = ("今日 5 组参数方向与上一交易日完全一致，未产生新的交易信号。\n"
                 "本邮件为每日例行回执，用来确认脚本仍在正常运行。")
+    elif ref_pending:
+        title = "BTC 单跑参照 · 状态更新"
+        note = ("多标的方案本次无方向变化。下方 ③ 是「BTC 单跑参照」的仓位动作，"
+                "此后它与四币一样，只在方向变化时才更新。")
     else:
         title = "初始化 · 当前持仓状态"
         note = ("这是本脚本的首次运行，仅用于告知当前状态，不代表发生了交易信号。\n"
@@ -1434,6 +1627,11 @@ def run(keys, force=False, dry_run=False, test=False, daily=False, log=None, sym
         rec = _state_entry(inf, levels[k], state.get(k))
         rec["last_sent"] = datetime.now(CST).isoformat()
         state[k] = rec
+    if btc_ref is not None:
+        rk = btc_ref["key"]
+        rec = _state_entry(btc_ref, levels[rk], state.get(rk))
+        rec["last_sent"] = datetime.now(CST).isoformat()
+        state[rk] = rec
     save_state(state)
     log.info("状态已更新 -> %s", STATE_PATH)
     return 0
