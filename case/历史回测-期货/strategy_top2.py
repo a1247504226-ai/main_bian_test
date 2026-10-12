@@ -41,16 +41,42 @@
 
 ━━━ 执行时点（严格无前视）━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
    T 日收盘算出信号  →  T+1 日【开盘】调仓
+
+   注意：「T+1 开盘」= 【T 日当晚 21:00 的夜盘】，不是第二天 9:00。
+   中国期货的一个「交易日」= 前一自然日 21:00 夜盘 + 当日日盘。
+   实测（玻璃 FG，2026-10-12）：
+       10-09 21:05~23:00 夜盘 + 10-12 09:05~15:00 日盘 合并后
+       open 870 / high 875 / low 860 / close 863
+     与实际日线 10-12   open 869 / high 875 / low 860 / close 863 吻合。
+   所以 T 日收盘出的信号，最早能成交的时点就是【T 日 21:00】。
+   运行脚本的时点不敏感（15:30~20:55 之间跑，信号完全一样），
+   真正敏感的是【下单时点】—— 拖到第二天 9:00 就比回测假设晚了半天。
+   例外：长假前最后一个交易日没有夜盘，那天要等下一个交易日 9:00。
+
    回测证明日线硬止损是负贡献（只在震荡里反复砍仓），故不设止损；
    风险控制完全交给「波动率目标仓位 + 杠杆护栏」。
+
+━━━ 邮件推送规则 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+每个交易日推【两封】：早盘前（08:00）+ 晚盘前（20:00），两种形态：
+  · 有仓位变动  → 标题「【⚠ 期货信号·有变更】…」高亮提醒，正文先列操作清单
+  · 无仓位变动  → 标题「【期货信号·持仓】… 浮盈 +440 元」，正文列持仓与盈亏
+正文是手机友好的 HTML 表格（固定列宽，窄屏不折行），另有纯文本兜底。
+盈亏按 signal_state.json 记录的开仓价计算；跟踪权益 = 起始权益 + 已实现 + 浮动。
+两场用不同去重键（notified.am / notified.pm），同一天两封都会发；同一场重复
+运行不会重复发。早盘那封会用【夜盘最新价】算浮盈（当天没走完的 K 线只取价
+格、不参与信号）。想强制再发一封加 daily。
 
 ━━━ 用法 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
    python strategy_top2.py             # 打印今天的信号 + 跑回测
    python strategy_top2.py signal      # 只打印今天的信号（不发邮件）
-   python strategy_top2.py notify      # 检查信号变动，有变动就发邮件（供定时任务调用）
-   python strategy_top2.py notify daily# 不论有无变动都发一封当日简报
+   python strategy_top2.py notify      # 发当日邮件（按当前小时自动判断场次）
+   python strategy_top2.py notify am   # 指定早盘场次（08:00 跑）
+   python strategy_top2.py notify pm   # 指定晚盘场次（20:00 跑）
+   python strategy_top2.py notify daily# 强制发送（该场次已发过也再发一封）
+   python strategy_top2.py notify test # 只打印邮件内容，不真发（排查用）
    python strategy_top2.py backtest    # 只跑回测
-   python strategy_top2.py test-mail   # 发一封测试邮件，验证邮箱配置
+   python strategy_top2.py test-mail   # 发两封样例邮件（有变更 / 无变更）
+   python strategy_top2.py refresh     # 只更新 data/ 下的行情 CSV
 
    数据：读取同目录 data/{代码}.csv（date,open,high,low,close,volume）。
         缺数据时自动用 akshare 拉取（需 pip install akshare）。
@@ -283,16 +309,32 @@ def clean(bars, tol=0.5):
 def load(sym):
     """清洗 + 比例复权。
 
-    返回 (adj_bars, real_last_price)。每根 adj bar 上附带：
+    返回 (adj_bars, real_last_price, live_price)。每根 adj bar 上附带：
         "gap"   —— 该日的【换月跳空】（非换月日为 0），供 carry 信号使用
         "scale" —— 复权累计因子；真实价 = 复权价 / scale
     复权的作用：把换月跳空抹掉，使价格序列的涨跌幅 = 真实持仓盈亏。
+
+    【只保留已收盘的交易日】一个交易日要到 15:00 日盘收盘才算走完。
+    若数据源已经给出"今天"那根 K 线（它只含前一晚夜盘、还没走完），
+    拿它算信号会出错，所以这里直接剔除，只把它当"最新价"用。
+    早盘 08:00 那次运行就靠这个护栏保证信号不会算错。
     """
     raw = read_csv(sym) or fetch(sym)
     if raw is None:
-        return None, None
+        return None, None, None
     raw = clean(raw)
+
+    # 剔除当天还没走完的那根 K 线，只留作最新价
+    live = None
+    if raw and raw[-1]["date"] == time.strftime("%Y-%m-%d") and time.localtime().tm_hour < 15:
+        live = raw[-1]["close"]
+        raw = raw[:-1]
+    if not raw:
+        return None, None, None
+
     real_last = raw[-1]["close"]
+    if live is None:
+        live = real_last
 
     for i in range(1, len(raw)):
         pc, op = raw[i - 1]["close"], raw[i]["open"]
@@ -311,7 +353,7 @@ def load(sym):
             b[c] = raw[i][c] * k
         b["scale"] = k
         out.append(b)
-    return out, real_last
+    return out, real_last, live
 
 
 # ══════════════════════════════════════════════════════ 指标层
@@ -388,7 +430,7 @@ def plan(equity=None, verbose=False):
     eq = EQUITY if equity is None else equity
     cand, skipped, dates = [], [], []
     for sym, mult, mrate in active_instruments(eq):
-        bars, px = load(sym)
+        bars, _c, px = load(sym)
         if bars is None:
             skipped.append({"sym": sym, "name": NAME.get(sym, sym), "why": "无数据"})
             continue
@@ -508,7 +550,7 @@ def show_signal():
         print("\n  ── 最近 15 个交易日的信号 ──")
         ser, dts = {}, None
         for r in rows:
-            b, _ = load(r["sym"])
+            b, _c, _l = load(r["sym"])
             ser[r["sym"]] = signal(b)
             if dts is None or len(b) < len(dts):
                 dts = [x["date"] for x in b]
@@ -571,6 +613,142 @@ def _save_state(st):
         json.dump(st, f, ensure_ascii=False, indent=1)
 
 
+def _pos_norm(v):
+    """把 state 里的一条仓位记录统一成 dict。
+
+    旧版只存方向（0 / ±1），没有手数和成本 —— lots=None 表示"手数未知"，
+    用于区分「真的加减仓」和「旧记录缺字段」，避免升级后误报一次变动。
+    """
+    if isinstance(v, dict):
+        d = int(v.get("dir", 0) or 0)
+        return {"dir": d,
+                "lots": (int(v["lots"]) if v.get("lots") is not None else None),
+                "entry_px": v.get("entry_px"),
+                "entry_date": v.get("entry_date")}
+    d = int(v or 0)
+    return {"dir": d, "lots": None, "entry_px": None, "entry_date": None}
+
+
+def _rebuild_entry(sym, direction):
+    """从信号历史倒推开仓价：最后一次信号翻成 direction 那天的收盘真实价。
+
+    只用于把旧版 state（只有方向、没有成本）迁移成带成本的记录。
+    """
+    bars, _c, _l = load(sym)
+    if bars is None:
+        return None
+    sg = signal(bars)
+    i = len(sg) - 1
+    while i > WARMUP and sg[i] == direction:
+        i -= 1
+    j = min(i + 1, len(bars) - 1)
+    return real_px(bars, j), bars[j]["date"]
+
+
+def _load_positions(st):
+    """读上次记录的仓位，并把旧格式补全成 {sym: {dir, lots, entry_px, entry_date}}。"""
+    out = {}
+    for sym, v in (st.get("positions") or {}).items():
+        p = _pos_norm(v)
+        if p["dir"] != 0 and p["entry_px"] is None:
+            rb = _rebuild_entry(sym, p["dir"])
+            if rb:
+                p["entry_px"], p["entry_date"] = rb
+        out[sym] = p
+    return out
+
+
+def _track(rows, st, data_date):
+    """比对「今日目标仓位」与「上次记录」，更新开仓成本并结算盈亏。
+
+    返回 (positions, changes, pnl, realized_delta)：
+      positions      —— 新的仓位记录（含开仓价，供下次比对）
+      changes        —— 真正发生变动的品种（开仓/平仓/反手/加减仓）
+      pnl            —— 当前持仓的浮动盈亏明细
+      realized_delta —— 本次平仓/减仓兑现的盈亏（元）
+    """
+    old = _load_positions(st)
+    new, changes, pnl = {}, [], []
+    realized = 0.0
+
+    for r in rows:
+        sym, mult, px = r["sym"], r["mult"], r["px"]
+        ndir = r["sig"] if r["lots"] > 0 else 0
+        nlot = r["lots"] if ndir else 0
+
+        o = old.get(sym) or {"dir": 0, "lots": 0, "entry_px": None, "entry_date": None}
+        odir, oent, odat = o["dir"], o["entry_px"], o["entry_date"]
+        lots_known = o["lots"] is not None
+        olot = o["lots"] if lots_known else nlot
+
+        # ── 开仓成本维护 ───────────────────────────────────────────
+        if ndir == 0:
+            ent, edat = None, None
+            if odir and oent is not None:
+                realized += (px - oent) * odir * olot * mult          # 平仓兑现
+        elif odir != ndir:
+            if odir and oent is not None:                              # 反手先平旧仓
+                realized += (px - oent) * odir * olot * mult
+            ent, edat = px, data_date
+        elif oent is None:                                             # 旧记录缺成本
+            ent, edat = _rebuild_entry(sym, ndir) or (px, data_date)
+        elif nlot > olot:                                              # 加仓 → 加权平均
+            ent = (oent * olot + px * (nlot - olot)) / nlot
+            edat = odat
+        elif nlot < olot:                                              # 减仓 → 成本不变
+            ent, edat = oent, odat
+            realized += (px - oent) * ndir * (olot - nlot) * mult
+        else:
+            ent, edat = oent, odat
+
+        if ndir:
+            new[sym] = {"dir": ndir, "lots": nlot, "entry_px": ent, "entry_date": edat}
+
+        # ── 变动判定（旧记录手数未知时不算变动，只补全）───────────
+        if ndir == odir and (not lots_known or nlot == olot):
+            pass
+        else:
+            if ndir == 0:
+                how = "%s → 平仓" % dir_txt(odir)
+            elif odir == 0:
+                how = "开%s仓" % ("多" if ndir > 0 else "空")
+            elif ndir == -odir:
+                how = "%s → %s（反手）" % (dir_txt(odir), dir_txt(ndir))
+            elif nlot > olot:
+                how = "%s 加至 %d 手" % (dir_txt(ndir), nlot)
+            else:
+                how = "%s 减至 %d 手" % (dir_txt(ndir), nlot)
+
+            if r["gap"] > CARRY_THR:
+                basis = "长期升水（contango），做空收展期收益"
+            elif r["gap"] < -CARRY_THR:
+                basis = "长期贴水（backwardation），做多收展期收益"
+            else:
+                basis = "无明显展期结构"
+
+            if ndir == 0:
+                reason = "carry 与趋势不再同向（或信号消失）"
+            elif odir == 0:
+                reason = ("近 252 日累计换月跳空 %+.2f%% 为%s，且 EMA20/60 趋势同向"
+                          % (r["gap"] * 100, "正（长期升水）" if r["gap"] > 0 else "负（长期贴水）"))
+            else:
+                reason = "carry 与趋势同时反向"
+
+            c = dict(r)
+            c.update({"how": how, "reason": reason, "basis": basis})
+            changes.append(c)
+
+        # ── 浮动盈亏 ──────────────────────────────────────────────
+        if ndir and ent is not None:
+            amt = (px - ent) * ndir * nlot * mult
+            base = ent * mult * nlot
+            pnl.append({"sym": sym, "name": r["name"], "dir": ndir, "lots": nlot,
+                        "entry": ent, "entry_date": edat, "px": px, "mult": mult,
+                        "amt": amt, "pct": (amt / base if base else 0.0)})
+
+    return new, changes, pnl, realized
+
+
 # ── 邮件样式（全部内联：邮件客户端不认 <style> 标签）──────────────
 _C_TH = ("padding:8px 5px;background:#eef1f5;border-bottom:2px solid #d5dbe3;"
          "font-size:12.5px;color:#4a5460;font-weight:700;text-align:left")
@@ -578,19 +756,31 @@ _C_TD = "padding:9px 5px;border-bottom:1px solid #eceff3;font-size:14px;color:#1
 _C_NUM = _C_TD + ";text-align:right"
 _COLOR = {1: "#c62828", -1: "#2e7d32", 0: "#98a2ad"}      # 红涨绿跌
 
+# 盈亏表列多（6 列），用更紧凑的字号，保证 390px 手机屏不折行
+_C_TH2 = ("padding:7px 3px;background:#eef1f5;border-bottom:2px solid #d5dbe3;"
+          "font-size:11.5px;color:#4a5460;font-weight:700;text-align:left")
+_C_TD2 = "padding:7px 3px;border-bottom:1px solid #eceff3;font-size:12.5px;color:#1c2128;word-break:break-word"
+_C_NUM2 = _C_TD2 + ";text-align:right"
 
-def _tbl(headers, widths, rows, note_rows=None):
+
+def _tbl(headers, widths, rows, note_rows=None, dense=False, right=None):
     """生成手机友好的 HTML 表格。
 
     用 table-layout:fixed + colgroup 固定列宽 —— 否则手机窄屏下表会撑破容器、
     最右一列被截掉。note_rows = {行号: 说明文字}，跨列显示在该行下方。
+    dense=True 用更小的表头字号（列多的盈亏表用）；
+    right = 需要右对齐的列下标集合（数值列，跟数据行对齐）。
     """
     note_rows = note_rows or {}
+    right = right or ()
+    th = _C_TH2 if dense else _C_TH
     cols = "".join('<col style="width:' + w + '">' for w in widths)
     h = ('<table style="width:100%;max-width:100%;border-collapse:collapse;'
          'table-layout:fixed;margin:6px 0 2px" cellpadding="0" cellspacing="0">'
          '<colgroup>' + cols + '</colgroup>')
-    h += "<tr>" + "".join('<th style="%s">%s</th>' % (_C_TH, x) for x in headers) + "</tr>"
+    h += "<tr>" + "".join(
+        '<th style="%s%s">%s</th>' % (th, ";text-align:right" if i in right else "", x)
+        for i, x in enumerate(headers)) + "</tr>"
     for i, cells in enumerate(rows):
         h += "<tr>" + "".join(cells) + "</tr>"
         if i in note_rows:
@@ -600,18 +790,39 @@ def _tbl(headers, widths, rows, note_rows=None):
     return h + "</table>"
 
 
-def _build_mail(rows, changes, data_date, daily=False):
-    """把变动组装成邮件标题 + 正文（HTML 表格，手机可读）。"""
-    if changes:
+def _money(x):
+    """带符号的金额文本（元），用于邮件正文。"""
+    if abs(x) < 0.5:
+        return "0"
+    return ("+" if x > 0 else "-") + format(abs(x), ",.0f")
+
+
+def _build_mail(rows, changes, data_date, positions=None, pnl=None,
+                realized=0.0, start_equity=None, start_date=None, first=False):
+    """组装邮件标题 + 正文（HTML 表格，手机可读）。
+
+    · 有仓位变动 → 标题高亮「⚠ 有变更」，正文顶部先列操作清单
+    · 无仓位变动 → 标题直接报当前浮盈/浮亏，正文列持仓与盈亏明细
+    """
+    pnl = pnl or []
+    md = data_date[5:] if data_date and len(data_date) >= 10 else (data_date or "")
+    tot_pnl = sum(x["amt"] for x in pnl)
+
+    # ── 标题：有变动重点提醒，无变动直接报盈亏 ──────────────────
+    if first:
+        subject = "【期货信号·基线】%s  初始持仓 %d 项" % (md, len(pnl))
+    elif changes:
         parts = ["%s %s" % (c["name"], c["how"]) for c in changes]
-        subject = "【期货信号】%s  %s" % (data_date, " / ".join(parts))
+        subject = "【⚠ 期货信号·有变更】%s  %s" % (md, " / ".join(parts))
+    elif pnl:
+        subject = "【期货信号·持仓】%s  %s %s 元" % (
+            md, "浮盈" if tot_pnl >= 0 else "浮亏", format(abs(tot_pnl), ",.0f"))
     else:
-        subject = "【期货信号】%s  无变动" % data_date
+        subject = "【期货信号·持仓】%s  当前空仓" % md
 
     tn = sum(r["notional"] for r in rows)
     tm = sum(r["margin"] for r in rows)
-    tn_held = sum(r["notional"] for r in rows)
-    worst = tn_held * 0.08
+    worst = tn * 0.08
 
     # ── ① 本次变动表 ──
     ch_rows, ch_notes = [], {}
@@ -627,34 +838,43 @@ def _build_mail(rows, changes, data_date, daily=False):
         ])
         ch_notes[k] = "%s　·　日波动 %.2f%%　敞口 %.2fx" % (c["basis"], c["dvol"] * 100, c["expo"])
     ch_tbl = _tbl(["品种", "操作", "手数", "现价", "保证金"],
-                  ["28%", "18%", "12%", "20%", "22%"], ch_rows, ch_notes)
+                  ["28%", "18%", "12%", "20%", "22%"], ch_rows, ch_notes,
+                  right=(2, 3, 4))
 
-    # ── ② 当前持仓表（只列有信号的，再补一行空仓汇总）──
-    act = [r for r in rows if r["sig"] != 0]
-    idle = [r for r in rows if r["sig"] == 0]
-    pos_rows = []
-    for r in act:
-        col = _COLOR[r["sig"]]
+    # ── ② 持仓盈亏表（6 列，紧凑字号保证手机不折行）──
+    pos_rows, pos_notes = [], {}
+    for k, p in enumerate(pnl):
+        col = _COLOR[p["dir"]]
+        pcol = _COLOR[1] if p["amt"] >= 0 else _COLOR[-1]      # 红盈绿亏
         pos_rows.append([
-            '<td style="%s"><b>%s</b> <span style="font-size:12px;color:#8a949e">%s</span></td>'
-            % (_C_TD, r["name"], r["sym"]),
-            '<td style="%s;color:%s;font-weight:700">%s</td>' % (_C_TD, col, dir_txt(r["sig"])),
-            '<td style="%s">%d</td>' % (_C_NUM, r["lots"]),
-            '<td style="%s">%s</td>' % (_C_NUM, format(r["notional"], ",.0f")),
-            '<td style="%s">%s</td>' % (_C_NUM, format(r["margin"], ",.0f")),
+            '<td style="%s"><b>%s</b> <span style="font-size:11px;color:#8a949e">%s</span></td>'
+            % (_C_TD2, p["name"], p["sym"]),
+            '<td style="%s;color:%s;font-weight:700">%s</td>' % (_C_TD2, col, dir_txt(p["dir"])),
+            '<td style="%s">%d</td>' % (_C_NUM2, p["lots"]),
+            '<td style="%s">%s</td>' % (_C_NUM2, format(p["entry"], ",.1f")),
+            '<td style="%s">%s</td>' % (_C_NUM2, format(p["px"], ",.1f")),
+            '<td style="%s;color:%s;font-weight:700">%s<br>'
+            '<span style="font-size:11px;font-weight:400">%+.2f%%</span></td>'
+            % (_C_NUM2, pcol, _money(p["amt"]), p["pct"] * 100),
         ])
-    if not pos_rows:
-        pos_rows.append(['<td style="%s" colspan="5">当前无持仓（全部空仓）</td>' % _C_TD])
+        pos_notes[k] = "%s 建仓　·　名义 %s 元" % (
+            p["entry_date"] or "—", format(p["px"] * p["lots"] * p["mult"], ",.0f"))
+    if pos_rows:
+        tcol = _COLOR[1] if tot_pnl >= 0 else _COLOR[-1]
+        bt = ";border-top:2px solid #d5dbe3"
+        pos_rows.append([
+            '<td style="%s;font-weight:700%s">合计</td>' % (_C_TD2, bt),
+            '<td style="%s%s"></td>' % (_C_TD2, bt),
+            '<td style="%s;font-weight:700%s">%d</td>' % (_C_NUM2, bt, sum(p["lots"] for p in pnl)),
+            '<td style="%s%s"></td>' % (_C_TD2, bt),
+            '<td style="%s%s"></td>' % (_C_TD2, bt),
+            '<td style="%s;color:%s;font-weight:700%s">%s</td>' % (_C_NUM2, tcol, bt, _money(tot_pnl)),
+        ])
     else:
-        pos_rows.append([
-            '<td style="%s;font-weight:700;border-top:2px solid #d5dbe3">合计</td>' % _C_TD,
-            '<td style="%s;border-top:2px solid #d5dbe3"></td>' % _C_TD,
-            '<td style="%s;border-top:2px solid #d5dbe3">%d</td>' % (_C_NUM, sum(r["lots"] for r in act)),
-            '<td style="%s;font-weight:700;border-top:2px solid #d5dbe3">%s</td>' % (_C_NUM, format(tn, ",.0f")),
-            '<td style="%s;font-weight:700;border-top:2px solid #d5dbe3">%s</td>' % (_C_NUM, format(tm, ",.0f")),
-        ])
-    pos_tbl = _tbl(["品种", "方向", "手数", "名义(元)", "保证金(元)"],
-                   ["28%", "14%", "12%", "22%", "24%"], pos_rows)
+        pos_rows.append(['<td style="%s" colspan="6">当前无持仓（全部空仓）</td>' % _C_TD2])
+    pos_tbl = _tbl(["品种", "方向", "手数", "开仓价", "现价", "浮动盈亏"],
+                   ["23%", "11%", "11%", "17%", "17%", "21%"], pos_rows,
+                   pos_notes, dense=True, right=(2, 3, 4, 5))
 
     # ── 组装 ──
     P = "margin:0 0 4px;font-size:15px;font-weight:700;color:#1c2128"
@@ -664,24 +884,46 @@ def _build_mail(rows, changes, data_date, daily=False):
          'line-height:1.7;width:100%;max-width:600px;margin:0 auto;'
          'overflow-wrap:break-word;word-break:break-word">']
 
-    h.append('<div style="background:#1c2128;color:#fff;padding:14px 16px;border-radius:8px">'
-             '<div style="font-size:17px;font-weight:700">期货信号 · 展期收益 + 趋势</div>'
+    bar_bg = "#b3261e" if changes else "#1c2128"          # 有变更 → 红色标题条
+    tag = "⚠ 仓位有变更" if changes else "每日持仓简报"
+    h.append('<div style="background:%s;color:#fff;padding:14px 16px;border-radius:8px">'
+             '<div style="font-size:17px;font-weight:700">期货信号 · %s</div>'
              '<div style="font-size:13px;opacity:.85;margin-top:6px;line-height:1.6">'
              '数据截止 %s　·　权益 %s 元<br><b>下一交易日开盘执行</b></div></div>'
-             % (data_date, format(EQUITY, ",.0f")))
+             % (bar_bg, tag, data_date, format(EQUITY, ",.0f")))
 
     if changes:
         h.append('<p style="%s;margin-top:18px">■ 本次需要操作（%d 项）</p>' % (P, len(changes)))
         h.append(ch_tbl)
     else:
         h.append('<p style="%s;margin-top:18px">■ 本次无仓位变动</p>' % P)
-        h.append('<p style="%s">持仓与上次一致，无需下单。</p>' % S)
+        h.append('<p style="%s">持仓与上次一致，今天不需要下单。</p>' % S)
 
-    h.append('<p style="%s;margin-top:20px">■ 当前持仓</p>' % P)
+    h.append('<p style="%s;margin-top:20px">■ 当前持仓与盈亏</p>' % P)
     h.append(pos_tbl)
-    h.append('<p style="%s;margin-top:6px">名义敞口 %.2f 倍权益　·　'
-             '保证金占权益 %.1f%%　·　剩余可用 %s 元</p>'
-             % (S, tn / EQUITY, tm / EQUITY * 100, format(EQUITY - tm, ",.0f")))
+
+    if pnl:
+        pcol = _COLOR[1] if tot_pnl >= 0 else _COLOR[-1]
+        h.append('<p style="%s;margin-top:6px">持仓浮动盈亏 <b style="color:%s">%s 元</b>'
+                 '　·　名义敞口 %.2f 倍权益　·　保证金占权益 %.1f%%</p>'
+                 % (S, pcol, _money(tot_pnl), tn / EQUITY, tm / EQUITY * 100))
+    else:
+        h.append('<p style="%s;margin-top:6px">当前无持仓，名义敞口 0.00 倍权益。</p>' % S)
+
+    if start_equity:
+        cur_eq = start_equity + realized + tot_pnl
+        d = cur_eq - start_equity
+        dcol = _COLOR[1] if d >= 0 else _COLOR[-1]
+        h.append('<p style="%s;margin-top:14px;padding:10px 12px;background:#f6f8fa;'
+                 'border-radius:6px;line-height:1.8">跟踪权益 <b>%s</b> → '
+                 '<b style="color:%s">%s</b> 元<br>'
+                 '<span style="font-size:12px">累计 %s 元（%+.2f%%）　·　已实现 %s 元'
+                 '　·　浮动 %s 元<br>自 %s 起按信号跟踪</span></p>'
+                 % (S, format(start_equity, ",.0f"), dcol, format(cur_eq, ",.0f"),
+                    _money(d), d / start_equity * 100, _money(realized),
+                    _money(tot_pnl), start_date or "—"))
+
+    idle = [r for r in rows if r["sig"] == 0]
     if idle:
         h.append('<p style="%s">空仓（无信号）：%s</p>'
                  % (S, "、".join("%s %s" % (r["name"], r["sym"]) for r in idle)))
@@ -702,24 +944,31 @@ def _build_mail(rows, changes, data_date, daily=False):
          "-" * 46]
     if changes:
         L.append("本次需要操作（%d 项）" % len(changes))
-        L.append("%-12s %-8s %5s %9s %9s" % ("品种", "操作", "手数", "现价", "保证金"))
+        L.append("%-12s %-10s %4s %9s %9s" % ("品种", "操作", "手数", "现价", "保证金"))
         for c in changes:
-            L.append("%-12s %-8s %5d %9s %9s"
-                     % (c["name"], c["how"], c["lots"], format(c["px"], ",.1f"),
-                        format(c["margin"], ",.0f")))
+            L.append("%-12s %-10s %4d %9s %9s"
+                     % (c["name"], c["how"], c["lots"],
+                        format(c["px"], ",.1f"), format(c["margin"], ",.0f")))
     else:
-        L.append("本次无仓位变动。")
+        L.append("本次无仓位变动，今天不需要下单。")
     L.append("")
-    L.append("当前持仓")
-    L.append("%-12s %-6s %5s %10s %10s" % ("品种", "方向", "手数", "名义", "保证金"))
-    for r in act:
-        L.append("%-12s %-6s %5d %10s %10s"
-                 % (r["name"], dir_txt(r["sig"]), r["lots"],
-                    format(r["notional"], ",.0f"), format(r["margin"], ",.0f")))
-    if not act:
+    L.append("当前持仓与盈亏")
+    L.append("%-12s %-4s %4s %9s %9s %10s"
+             % ("品种", "方向", "手数", "开仓价", "现价", "浮动盈亏"))
+    for p in pnl:
+        L.append("%-12s %-4s %4d %9s %9s %10s"
+                 % (p["name"], dir_txt(p["dir"]), p["lots"],
+                    format(p["entry"], ",.1f"), format(p["px"], ",.1f"), _money(p["amt"])))
+    if not pnl:
         L.append("（无持仓）")
     L.append("-" * 46)
-    L.append("名义 %.2f 倍权益   保证金占权益 %.1f%%" % (tn / EQUITY, tm / EQUITY * 100))
+    L.append("浮动盈亏合计 %s 元   名义 %.2f 倍权益   保证金占权益 %.1f%%"
+             % (_money(tot_pnl), tn / EQUITY, tm / EQUITY * 100))
+    if start_equity:
+        cur_eq = start_equity + realized + tot_pnl
+        L.append("跟踪权益 %s → %s 元（累计 %s 元）"
+                 % (format(start_equity, ",.0f"), format(cur_eq, ",.0f"),
+                    _money(cur_eq - start_equity)))
     L.append("")
     L.append("风险提示：不设止损；极端情形约亏 %.1f%% 权益；历史回测不代表未来表现。"
              % (worst / EQUITY * 100))
@@ -728,76 +977,80 @@ def _build_mail(rows, changes, data_date, daily=False):
 
 
 def notify(argv=None):
-    """检查信号变动，有变动（或 daily）就发邮件。
+    """每个交易日推送邮件（早盘前、晚盘前各一次）。
 
-    参数： daily    —— 无变动也发当日简报
+    · 有仓位变动 → 标题高亮「⚠ 有变更」，正文顶部先列操作清单
+    · 无仓位变动 → 标题直接报当前浮盈/浮亏，正文列持仓与盈亏明细
+
+    参数： am       —— 早盘场次（08:00 跑）
+          pm       —— 晚盘场次（20:00 跑）
+          都不写时按当前小时自动判断：15 点前算 am，之后算 pm
+          daily    —— 强制发送（该场次今天已发过也再发一封）
           nofetch  —— 跳过数据更新（用本地 CSV）
+          test     —— 只把邮件内容打印出来，不真的发出去
+
+    两场用不同的去重键（notified.am / notified.pm），所以同一天两场都会发；
+    但同一场重复运行不会重复发。
     """
     argv = argv or []
     daily = "daily" in argv
+    dry = "test" in argv
+    if "am" in argv:
+        slot = "am"
+    elif "pm" in argv:
+        slot = "pm"
+    else:
+        slot = "am" if time.localtime().tm_hour < 15 else "pm"
+
     if "nofetch" not in argv:
         print("更新行情数据…")
         n_ok, bad = refresh(verbose=True)
         if bad:
             print("  注意：%d 个品种拉取失败，沿用本地数据" % len(bad))
         print()
+
     rows, skipped, data_date = plan()
     if data_date is None:
         print("没有可用数据，放弃")
         return
-    cur_pos = {r["sym"]: (r["sig"] if r["lots"] > 0 else 0) for r in rows}
 
     st = _load_state()
-    old_pos = st.get("positions", {})
-    last_date = st.get("data_date")
-
-    if last_date == data_date and not daily:
-        print("数据未更新（仍为 %s），无需通知。如需强制发送请加 daily。" % data_date)
+    notified = dict(st.get("notified") or {})
+    if notified.get(slot) == data_date and not daily:
+        print("【%s 场次】数据仍为 %s，这一场已经推过了，跳过。"
+              "想强制再发一封请加 daily。" % (slot, data_date))
         return
 
-    changes = []
-    for r in rows:
-        new = cur_pos[r["sym"]]
-        old = old_pos.get(r["sym"], 0)
-        if new == old:
-            continue
-        if new == 0:
-            how = "%s → 平仓" % dir_txt(old)
-            reason = "carry 与趋势不再同向（或信号消失）"
-        elif old == 0:
-            how = "开%s仓" % ("多" if new > 0 else "空")
-            reason = ("近 252 日累计换月跳空 %+.2f%% 为%s，且 EMA20/60 趋势同向"
-                      % (r["gap"] * 100, "正（长期升水）" if r["gap"] > 0 else "负（长期贴水）"))
-        else:
-            how = "%s → %s（反手）" % (dir_txt(old), dir_txt(new))
-            reason = "carry 与趋势同时反向"
-        if r["gap"] > CARRY_THR:
-            basis = "长期升水（contango），做空收展期收益"
-        elif r["gap"] < -CARRY_THR:
-            basis = "长期贴水（backwardation），做多收展期收益"
-        else:
-            basis = "无明显展期结构"
-        c = dict(r)
-        c.update({"how": how, "reason": reason, "basis": basis})
-        changes.append(c)
+    # 权益基数变了（用户加/减本金）→ 跟踪基线重置，避免盈亏数字对不上
+    start_equity = st.get("start_equity")
+    realized = float(st.get("realized", 0.0) or 0.0)
+    start_date = st.get("start_date")
+    if start_equity is None or abs(float(start_equity) - EQUITY) > 0.5:
+        if start_equity is not None:
+            print("权益基数由 %s 改为 %s 元，跟踪基线重置。"
+                  % (format(float(start_equity), ",.0f"), format(EQUITY, ",.0f")))
+        start_equity, realized, start_date = EQUITY, 0.0, data_date
 
-    # 首次运行：把当前仓位当作"已通知"的基线
-    first = not old_pos
-    subject, text, html = _build_mail(rows, changes, data_date, daily)
-    if first:
-        subject = "【期货信号】%s  初始基线（%d 个品种）" % (data_date, len(rows))
-        text = "（首次运行，以下为当前持仓基线；后续只在实际变动时通知）\n\n" + text
+    newpos, changes, pnl, rdelta = _track(rows, st, data_date)
+    realized += rdelta
 
-    if not changes and not daily:
-        print("信号无变动（数据日 %s），不发邮件。" % data_date)
-        _save_state({"data_date": data_date, "positions": cur_pos,
-                     "updated": time.strftime("%Y-%m-%d %H:%M:%S")})
+    first = not (st.get("positions") or {})
+    subject, text, html = _build_mail(rows, changes, data_date, newpos, pnl,
+                                      realized, start_equity, start_date, first)
+
+    if dry:
+        print("【试运行，不发送】[%s 场次] %s" % (slot, subject))
+        print()
+        print(text)
         return
 
     ok, msg = send_mail(subject, text, html)
-    print("%s  →  %s" % (subject, msg))
+    print("[%s 场次] %s  →  %s" % (slot, subject, msg))
     if ok:
-        _save_state({"data_date": data_date, "positions": cur_pos,
+        notified[slot] = data_date
+        _save_state({"data_date": data_date, "positions": newpos,
+                     "realized": realized, "start_equity": start_equity,
+                     "start_date": start_date, "notified": notified,
                      "updated": time.strftime("%Y-%m-%d %H:%M:%S")})
     else:
         print("邮件发送失败，状态未更新，下次运行会重试。")
@@ -812,7 +1065,7 @@ def backtest(verbose=True):
     """
     S = {}
     for sym, mult, mrate in active_instruments():
-        bars, _ = load(sym)
+        bars, _c, _l = load(sym)
         if bars is None:
             continue
         lot_notional = real_px(bars, len(bars) - 1) * mult
@@ -961,20 +1214,31 @@ if __name__ == "__main__":
         ok, bad = refresh()
         print("\n成功 %d 个%s" % (ok, "，失败：" + " ".join(bad) if bad else ""))
     if cmd == "test-mail":
-        # 发一封【真实格式】的样例，让用户直接看到以后收到长什么样
+        # 发两封【真实格式】的样例，让用户直接看到以后会收到长什么样：
+        #   ① 有仓位变更（标题高亮）  ② 无变更（持仓盈亏简报）
         rows, skipped, dd = plan()
-        sample = []
+        sample, demo_pos, demo_pnl = [], {}, []
         for r in rows:
-            if r["sig"] != 0:
-                c = dict(r)
-                c["how"] = "开%s仓" % ("多" if r["sig"] > 0 else "空")
-                c["basis"] = ("长期升水（contango），做空收展期收益" if r["gap"] > CARRY_THR
-                              else "长期贴水（backwardation），做多收展期收益")
-                sample.append(c)
-                break
-        subj, text, html = _build_mail(rows, sample, dd)
-        subj = "[样例] " + subj
-        ok, m = send_mail(subj, text, html)
-        print("样例邮件：", m)
-        if not ok:
-            print("（提示：检查 MAIL 里的授权码 / 收发件人）")
+            if r["sig"] == 0 or r["lots"] <= 0:
+                continue
+            c = dict(r)
+            c["how"] = "开%s仓" % ("多" if r["sig"] > 0 else "空")
+            c["basis"] = ("长期升水（contango），做空收展期收益" if r["gap"] > CARRY_THR
+                          else "长期贴水（backwardation），做多收展期收益")
+            sample.append(c)
+            # 造一个「3% 浮盈」的持仓，用来展示盈亏表长什么样
+            ent = r["px"] * (1 - 0.03 * r["sig"])
+            amt = (r["px"] - ent) * r["sig"] * r["lots"] * r["mult"]
+            demo_pos[r["sym"]] = {"dir": r["sig"], "lots": r["lots"],
+                                  "entry_px": ent, "entry_date": dd}
+            demo_pnl.append({"sym": r["sym"], "name": r["name"], "dir": r["sig"],
+                             "lots": r["lots"], "entry": ent, "entry_date": dd,
+                             "px": r["px"], "mult": r["mult"], "amt": amt,
+                             "pct": amt / (ent * r["mult"] * r["lots"])})
+        for tag, ch in (("样例1·有变更", sample), ("样例2·无变更", [])):
+            subj, text, html = _build_mail(rows, ch, dd, demo_pos, demo_pnl,
+                                           0.0, EQUITY, dd)
+            ok, m = send_mail("[%s] %s" % (tag, subj), text, html)
+            print("%s  →  %s" % (tag, m))
+            if not ok:
+                print("（提示：检查 MAIL 里的授权码 / 收发件人）")
