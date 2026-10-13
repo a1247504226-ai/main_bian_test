@@ -1,8 +1,19 @@
 # -*- coding: utf-8 -*-
 # =====================================================================
-#  版本：v3.3        最后更新：2026-10-12
+#  版本：v3.4        最后更新：2026-10-13
 #
-#  v3.3 改动（就是这一版）：
+#  v3.4 改动（就是这一版）：
+#    · 新增「BTC 单跑 · 本次要调仓」独立提醒段：BTC 单跑（③ 段）调仓时，
+#      不再只缩在 ③ 段表格最后一列，而是像四币一样单独列出来提醒你
+#    · 该段只列「真的有动作」的档位（开/平/加/减/反手），仓位未变的不列
+#    · 四币无方向变化、但 BTC 单跑有调仓时，也会发一封「BTC 单跑调仓」邮件
+#      （触发阈值 = trade.rebalance_threshold，默认 5%，避免每天微调刷屏）
+#    · BTC 单跑三档首次跑不再误报「三档同时开仓」：自动从四币同档继承
+#      建仓价 / 持仓极值（qty 用单跑自己的目标仓位，等价于「仓位已对」）
+#    · 修 bug：③ 段不再出现「加仓（BUY 0.000000）」这种浮点误差噪音
+#    · 修 bug：无变化跳过推送时，BTC 单跑状态也会同步，不再把累计小变化当大调仓
+#
+#  v3.3 改动：
 #    · 「需要执行的操作」改成 保证金 + 操作比例 + 下单数量（不再写「平掉→开」）
 #    · 标题跟着总开关走：live = 脚本自动完成 / observe = 需要你手动执行
 #    · 四币模式的「需要执行的操作」只列你在跑的 B 档（原来 3 档全列）
@@ -1017,6 +1028,10 @@ def _action_items(infos, changed, first_run, prev_map=None):
             open_side = "BUY" if new_qty > 0 else "SELL"
             order = f"先 {close_side} {o:.6f}，再 {open_side} {n:.6f}"
             delta = o + n
+        elif abs(n - o) <= max(1e-9, 1e-6 * max(o, n)):
+            # 写盘取整 / 浮点误差造成的极小差异，视为「仓位未变」，
+            # 否则 ③ 段会出现「加仓（BUY 0.000000）」这种没意义的噪音。
+            kind, label, order, delta = "hold", "不动", "", 0.0
         elif n > o:
             kind, label = "add", "加仓"
             order = f"{'BUY' if new_qty > 0 else 'SELL'} {n - o:.6f}"
@@ -1060,6 +1075,41 @@ def _split_actions(actions):
         return (actions.get("items") or [], actions.get("ref_items") or [],
                 actions.get("title") or "需要执行的操作", actions.get("note") or "")
     return (actions or [], [], "需要执行的操作", "")
+
+
+def _ref_threshold(cfg):
+    """BTC 单跑「本次要调仓」的触发阈值（小数）。
+
+    与 trade.py 的 trade.rebalance_threshold 同口径（默认 0.05 = 5%），
+    账户净值每天的小幅微调不会被当成「调仓」来提醒。
+    """
+    try:
+        v = float((cfg or {}).get("trade", {}).get("rebalance_threshold", 0.05))
+    except Exception:                                            # noqa: BLE001
+        v = 0.05
+    return v if v > 0 else 0.05
+
+
+def _ref_actions(ref_items, threshold=0.05):
+    """从 BTC 单跑三档的操作项里挑出「真的有动作」的档位（仓位未变的不算）。
+
+    只有「首次 / 方向变化 / 调仓幅度超过阈值」才算动作：
+      · 开仓 / 平仓 / 反手  —— 一定算
+      · 加仓 / 减仓        —— 幅度 ≥ threshold 才算（默认 5%，与 trade.py 的
+                              rebalance_threshold 同口径，避免账户净值每天微调刷屏）
+    这样 ③ 段的「仓位未变」不会跑进「本次要调仓」提醒里。
+    """
+    out = []
+    for a in (ref_items or []):
+        kind = a.get("kind")
+        if kind in (None, "hold"):
+            continue
+        if kind in ("add", "cut"):
+            pct = a.get("pct")
+            if pct is None or abs(float(pct)) / 100.0 < float(threshold or 0):
+                continue
+        out.append(a)
+    return out
 
 
 def _fmt_action_txt(a, with_name=True):
@@ -1268,6 +1318,20 @@ def format_multi_body(infos, title, note, levels, actions, primary, cfg, syms, b
                  "　操作比例 = 本次数量相对原仓位的变动")
         L.append("  ※ " + act_note)
 
+    # ③-b BTC 单跑本次的调仓动作：单独列出来提醒（原来只缩在 ③ 段表格最后一列）
+    ref_acts = _ref_actions(ref_items, _ref_threshold(cfg))
+    if ref_acts:
+        own_eq = (by_sym.get("BTCUSDT") or (btc_refs[0] if btc_refs else {})).get("equity", 0)
+        L.append("")
+        L.append("===== BTC 单跑 · 本次要调仓（A/B/C 三档）=====")
+        for a in ref_acts:
+            line = _fmt_action_txt(a)
+            if a["key"].split("|")[-1] == primary:
+                line += "　← 你关注的是这档"
+            L.append("  · " + line)
+        L.append(f"  ※ BTC 单跑 = 每档把全部本金押 BTC 的对照方案，脚本【不会】自动执行；"
+                 f"四币方案下 BTC 只占 {own_eq:,.0f} U 配额，数量会小 {len(syms)} 倍。")
+
     L.append("")
     L.append("===== 止盈止损怎么工作 =====")
     for t in ["止损 = 方向反转（邮件会告诉你平仓/反手），不用另外挂止损单",
@@ -1382,6 +1446,17 @@ def format_multi_body_html(infos, title, note, levels, actions, primary, cfg, sy
         P.append(_action_table_html(act_items, kind="coin", primary=primary))
         P.append(_action_foot({"note": act_note}))
 
+    # ③-b BTC 单跑本次的调仓动作：单独列出来提醒（原来只缩在 ③ 段表格最后一列）
+    ref_acts = _ref_actions(ref_items, _ref_threshold(cfg))
+    if ref_acts:
+        own_eq = (by_sym.get("BTCUSDT") or (btc_refs[0] if btc_refs else {})).get("equity", 0)
+        P.append(_h("BTC 单跑 · 本次要调仓（A/B/C 三档）"))
+        P.append(_action_table_html(ref_acts, kind="profile", primary=primary))
+        P.append(f'<div style="font-size:11px;color:#9aa0a6;margin-top:6px;line-height:1.7;">'
+                 f'BTC 单跑 = 每档把全部本金押 BTC 的<b>对照</b>方案，'
+                 f'<b>脚本不会自动执行</b>；四币方案下 BTC 只占 {own_eq:,.0f} U 配额，'
+                 f'数量会小 {len(syms)} 倍。</div>')
+
     # ⑤ 机制
     P.append(_h("止盈止损怎么工作"))
     P.append(_ul([
@@ -1481,6 +1556,21 @@ def run(keys, force=False, dry_run=False, test=False, daily=False, log=None, sym
         if migrated:
             log.info("状态迁移：把旧单标的记录 %d 条迁到 %s 名下（保住建仓价）",
                      migrated, "BTCUSDT" if "BTCUSDT" in syms else syms[0])
+        # BTC 单跑三档用的是独立状态键（BTCUSDT|ref|A/B/C），第一次跑会被全部
+        # 当成「首次开仓」，凭空冒出一封「三档同时开仓」的假调仓邮件。
+        # 这里从四币里同一档的 BTC 记录继承 dirs / 建仓价 / 持仓极值，
+        # 但 qty 用单跑自己的目标仓位 —— 等价于「仓位已经是对的」，不产生动作。
+        for r in btc_refs:
+            rk = r["key"]
+            if rk in state:
+                continue
+            base = state.get(f"{r['symbol']}|{r['pk']}")
+            if isinstance(base, dict):
+                rec = dict(base)
+                rec["qty"] = round(float(r["qty"]), 8)
+                state[rk] = rec
+                log.info("BTC 单跑 %s：从四币同档继承状态（建仓价 %s，视为仓位未变）",
+                         r["pk"], rec.get("entry_px"))
 
     changed, first_run = [], []
     for inf in infos:
@@ -1529,9 +1619,10 @@ def run(keys, force=False, dry_run=False, test=False, daily=False, log=None, sym
 
     # BTC 单跑参照（A/B/C 三档）也走同一套状态跟踪，③ 段才能给出每档「本次要做什么」。
     # 判据与上面四币一致：只有首次 / 空仓→有仓 / 方向反转才重置建仓价。
-    ref_items, ref_pending = [], False
+    ref_items, ref_pending, ref_acts = [], False, []
+    r_changed, r_first_run = [], []
     if btc_refs:
-        r_infos, r_changed, r_first_run, r_prev_map = [], [], [], {}
+        r_infos, r_prev_map = [], {}
         for r in btc_refs:
             rk = r["key"]
             rprev = state.get(rk)
@@ -1567,7 +1658,10 @@ def run(keys, force=False, dry_run=False, test=False, daily=False, log=None, sym
                      rprev is None, bool(rprev) and rprev.get("dirs") != r["dirs"])
         # 三档都要显示动作（含「仓位未变」），所以传 prev_map
         ref_items = _action_items(r_infos, r_changed, r_first_run, prev_map=r_prev_map)
-        ref_pending = bool(r_changed or r_first_run)
+        # BTC 单跑「真的有调仓」时也算有变化，否则它的动作会被「无变化跳过推送」吞掉。
+        # 阈值与 trade.py 的 rebalance_threshold 同口径，避免净值每天微调就发信。
+        ref_acts = _ref_actions(ref_items, _ref_threshold(cfg))
+        ref_pending = bool(r_changed or r_first_run or ref_acts)
 
     # 邮件里重点展示哪一档：优先 email.primary_profile，其次 trade.profile，最后 B
     primary = (str((cfg.get("email") or {}).get("primary_profile") or "").strip().upper()
@@ -1613,6 +1707,11 @@ def run(keys, force=False, dry_run=False, test=False, daily=False, log=None, sym
         log.info("无方向变化，跳过推送")
         for inf in infos:
             state[inf["key"]] = _state_entry(inf, levels[inf["key"]], state.get(inf["key"]))
+        # BTC 单跑参照组也要同步状态，否则它的「上次仓位」会一直停在旧值，
+        # 下次跑会把这段时间累计的小变化当成一次大调仓。
+        for r in btc_refs:
+            rk = r["key"]
+            state[rk] = _state_entry(r, levels[rk], state.get(rk))
         save_state(state)
         return 0
 
@@ -1632,9 +1731,15 @@ def run(keys, force=False, dry_run=False, test=False, daily=False, log=None, sym
         note = ("今日 5 组参数方向与上一交易日完全一致，未产生新的交易信号。\n"
                 "本邮件为每日例行回执，用来确认脚本仍在正常运行。")
     elif ref_pending:
-        title = "BTC 单跑参照 · 状态更新"
-        note = ("多标的方案本次无方向变化。下方 ③ 是「BTC 单跑参照」的仓位动作，"
-                "此后它与四币一样，只在方向变化时才更新。")
+        if ref_acts and not r_first_run:
+            title = "BTC 单跑 · 本次要调仓"
+            note = ("四币方案本次没有方向变化，但「BTC 单跑」这组需要调仓"
+                    "（见下方单独列出的提醒）。")
+        else:
+            title = "BTC 单跑 · 状态更新"
+            note = "四币方案本次无方向变化。下方是「BTC 单跑」这组的状态与动作。"
+        note += ("　BTC 单跑 = 每档把全部本金押 BTC 的对照方案，脚本不会自动执行，"
+                 "只作为你在「四币 vs 单跑」之间取舍时的参考。")
     else:
         title = "初始化 · 当前持仓状态"
         note = ("这是本脚本的首次运行，仅用于告知当前状态，不代表发生了交易信号。\n"
