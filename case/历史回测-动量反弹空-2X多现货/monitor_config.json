@@ -1,0 +1,49 @@
+{
+  "_说明": "每日策略检测的全部可调参数。改完直接生效，无需改代码。",
+
+  "email": {
+    "_说明": "password 是 163 邮箱的 SMTP 授权码（不是登录密码），以明文保存在本机，注意不要外传此文件。",
+    "enabled": true,
+    "sender": "a1247504226@163.com",
+    "password": "XKCINXNMOMMDCAFI",
+    "to": ["1247504226@qq.com"],
+    "server": "smtp.163.com",
+    "port": 465,
+    "use_ssl": true,
+    "max_retries": 3,
+    "strategy_label": "BTC动量策略 · SMA50过滤多头 2×做空"
+  },
+
+  "binance": {
+    "_说明": "默认关闭且为演练模式。要真实下单需同时满足三个条件：enabled=true、填好 api_key/api_secret、命令行加 --live。",
+    "enabled": false,
+    "dry_run": true,
+    "use_testnet": true,
+    "api_key": "",
+    "api_secret": "",
+    "spot_base": "https://api.binance.com",
+    "futures_base": "https://fapi.binance.com",
+    "testnet_spot_base": "https://testnet.binance.vision",
+    "testnet_futures_base": "https://testnet.binancefuture.com",
+    "symbol": "BTCUSDT",
+    "leverage": 2,
+    "margin_type": "ISOLATED",
+    "min_notional_usdt": 20.0
+  },
+
+  "strategy": {
+    "_说明": "与 btc_strategy.py 回测口径保持一致。base_capital_usdt 是邮件里所有成本/盈亏的计算基准（固定本金，不复利）。primary_set 是唯一的一组均线参数。regime_ma 是长期均线过滤：只约束多头，收盘价在 SMA(regime_ma) 下方时不开多、空头照做；设 0 关闭。participate_from_next_trade=true 表示当前这笔你没有参与、不计入账户，等下一次仓位变化时再按本金开始计算。",
+    "symbol": "BTCUSDT",
+    "vt": 0.03,
+    "exposure_cap": 1.0,
+    "atr_n": 14,
+    "regime_ma": 50,
+    "warmup": 60,
+    "cache_max_age_hours": 1,
+    "base_capital_usdt": 1000.0,
+    "primary_set": [10, 30],
+    "participate_from_next_trade": true,
+    "always_mail": true,
+    "mail_only_on_change": false
+  }
+}
