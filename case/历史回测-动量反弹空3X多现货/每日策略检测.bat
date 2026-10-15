@@ -80,14 +80,21 @@ rem ---- 3. run the check ------------------------------------------------------
 rem  -S skips the "site" module, which silences a harmless Python-2 style
 rem  sitecustomize.py warning on some Windows Python installs.
 rem  btc_monitor.py only uses the standard library, so -S is safe.
-%PY% -S "%~dp0btc_monitor.py" %*
-set "RC=%ERRORLEVEL%"
-if not "%RC%"=="0" (
-    echo.
-    echo [note] -S mode failed, retrying with the normal interpreter ...
-    %PY% "%~dp0btc_monitor.py" %*
-    set "RC=%ERRORLEVEL%"
+rem
+rem  IMPORTANT: whether -S works is probed with a ONE-LINE python command,
+rem  never by re-running the real script. An earlier version retried the whole
+rem  script without -S whenever the -S attempt returned non-zero; if that first
+rem  attempt had already sent the report email, the retry sent it AGAIN and the
+rem  user got two identical emails. The script is now run EXACTLY ONCE.
+set "PYFLAG=-S"
+%PY% -S -c "import sys" >nul 2>&1
+if errorlevel 1 (
+    set "PYFLAG="
+    echo [note] -S is not usable on this Python, using the normal interpreter.
 )
+
+%PY% %PYFLAG% "%~dp0btc_monitor.py" %*
+set "RC=%ERRORLEVEL%"
 
 echo.
 if "%RC%"=="0" (

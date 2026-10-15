@@ -25,6 +25,7 @@ BTC 日线趋势策略 · 每日检测（邮件推送 + 可选币安下单）
     python btc_monitor.py --json out.json 额外把结果写成 JSON
     python btc_monitor.py --dump-html p.html  把邮件正文另存为 HTML（本地预览用，不发邮件）
     python btc_monitor.py --reset-state   清空本地状态（重新建立基准）
+    python btc_monitor.py --force-mail    同一根日线已发过邮件时，仍然再发一封
 
 口径说明
 --------
@@ -42,6 +43,9 @@ BTC 日线趋势策略 · 每日检测（邮件推送 + 可选币安下单）
   且必须命令行显式加 --live 才可能真实发单。任何一步不满足，都只打印计划不下单。
 · 密钥缺失、网络失败、余额不足 → 一律降级为「只报告不下单」，绝不盲目下单。
 · 持仓成本价按回测口径（信号翻转次日开盘成交）从历史推演，不依赖任何外部接口。
+· 同一根已收盘日线**只发一封邮件**：state 里记 last_mailed_bar，重复运行自动跳过。
+  这样即便计划任务 / 手动双击 / 批处理重试叠加触发，你也不会收到多封重复邮件
+  （确实想强发时用 --force-mail）。
 """
 
 import hashlib
@@ -135,7 +139,8 @@ def load_state():
                 return json.load(f)
         except Exception:
             pass
-    return {"version": 1, "positions": {}, "last_run": None, "last_bar": None, "alerts": []}
+    return {"version": 1, "positions": {}, "last_run": None, "last_bar": None,
+            "last_mailed_bar": None, "last_mail_at": None, "alerts": []}
 
 
 def save_state(st):
@@ -957,6 +962,7 @@ def main():
     live = "--live" in argv
     refresh = "--refresh" in argv
     reset = "--reset-state" in argv
+    force_mail = "--force-mail" in argv
     json_out = None
     if "--json" in argv:
         try:
@@ -1119,14 +1125,26 @@ def main():
             f.write(mail_html)
         log("      邮件正文已另存：%s" % html_out)
 
+    # 同一根已收盘日线只发一封：防止「计划任务 + 手动双击 + 批处理重试」叠加出重复邮件
+    mailed_bar = state.get("last_mailed_bar")
+    dup = (mailed_bar == res["bar_date"]) and not force_mail
+
     if no_mail:
         ok, info = False, "已跳过（--no-mail）"
     elif st["mail_only_on_change"] and not changes:
         ok, info = False, "已跳过（信号未变）"
+    elif dup:
+        ok, info = False, ("已跳过（%s 这根日线已经发过邮件，防重复；要强发请加 --force-mail）"
+                           % res["bar_date"])
+        log(("  ✔ " if ok else "  ✘ ") + info)
+        log("  上次发信时间：%s" % (state.get("last_mail_at") or "—"))
     else:
         log("正在发送邮件 ...")
         ok, info = send_mail(cfg, subject, mail_html)
         log(("  ✔ " if ok else "  ✘ ") + info)
+        if ok:
+            state["last_mailed_bar"] = res["bar_date"]
+            state["last_mail_at"] = fdt()
 
     # ---- 状态落盘 ----
     state["positions"] = {
