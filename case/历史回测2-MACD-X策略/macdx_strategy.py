@@ -1,0 +1,1712 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+================================================================================
+ MACD-X 策略 —— 加密货币趋势跟随（自包含单文件，纯标准库，可直接运行）
+================================================================================
+
+【策略规则】
+  入场（两条同时满足，次日开盘买入）
+      ① 收盘价 > EMA(200)          —— 长期趋势向上
+      ② MACD 快线 > 0              —— 中期动能向上
+
+  出场（满足其一，次日开盘卖出）
+      ① 收盘价 < EMA(200)  或  MACD 快线 < 0
+      ② 黑天鹅硬止损：跌破入场价 -35%（9 年回测从未触发，纯保险）
+
+  仓位：满仓进出（实盘建议单标的 50%~70%）
+
+【为什么不做常规止盈止损】（这是本策略最反直觉、也是最重要的地方）
+  回测证据：同一入场信号，只改出场方式，平均单笔收益——
+      止损 30%、不止盈 .................. +56.4%
+      止损 20% + 止盈 30% ................ +3.6%
+  加上止盈，收益砍掉 94%。原因是加密资产收益极度右偏：
+  少数几笔 +300%~400% 的交易贡献几乎全部利润，止盈砍掉的正是这几笔。
+  「泡沫/超买」信号在加密市场是【动量延续】信号而非反转信号——
+  实测泡沫信号出现后 90 天平均还要涨 38%（同期全样本 14.6%）。
+
+【成本假设】
+  手续费 0.1%/单边 + 滑点 0.05%/单边（币安现货 taker 保守估计）
+
+【用法】
+  python macdx_strategy.py                          # 回测默认 5 个标的
+  python macdx_strategy.py --symbols BTCUSDT ETHUSDT BNBUSDT SOLUSDT DOGEUSDT
+  python macdx_strategy.py --symbols BTCUSDT ETHUSDT BNBUSDT SOLUSDT DOGEUSDT --signal  # 每日监控这 5 个
+  python macdx_strategy.py --symbol BTCUSDT --interval 4h
+  python macdx_strategy.py --symbol BTCUSDT --signal     # 只看当前该不该持仓 + 邮件推送
+  python macdx_strategy.py --symbols BTCUSDT --no-fetch  # 用本地 data/ 缓存
+  python macdx_strategy.py --test-mail                  # 发一封测试邮件验证配置
+  python macdx_strategy.py --symbol BTCUSDT --signal --no-mail   # 只看信号不发信
+  python macdx_strategy.py --symbol BTCUSDT --signal --no-proxy  # 强制直连
+  python macdx_strategy.py --symbol BTCUSDT --signal --proxy http://127.0.0.1:7890
+
+【网络与代理】
+  代理在文件顶部 PROXY 里改，默认 127.0.0.1:7897（Clash / Mihomo 默认端口）。
+  抓取时【代理 / 直连交替重试】，并记住上次走通的线路优先使用：
+  代理挂了就一路直连，不会每个分页都白等一次超时（实测 76s → 29s）。
+  退避为指数 + 随机抖动。整轮下载失败会重试 RETRY['outer'] 轮，
+  仍失败则用 data/ 下的本地缓存兜底，照样算信号、照样推送
+  （邮件里会标注数据滞后天数）——不会因网络问题静默失效。
+  最后有 RETRY['budget'] 总时间预算兜底，网络再烂也不会卡死定时任务。
+
+【定时运行（Windows）】
+  直接调用同目录的 run_signal.bat，它已配好日志、Python 路径探测和 30 天日志轮转。
+  注册每天 08:01 执行（管理员 CMD 跑一次）：
+      schtasks /Create /TN "MACD-X-Daily" /TR "<本目录>\run_signal.bat" /SC DAILY /ST 08:01 /F
+
+【日志（--log-file）】
+  --log-file PATH  把本次全部输出同时写进该文件。
+  ★ 日志一律由 Python 以 UTF-8 + BOM 写出，不要在 bat 里用 ">>" 重定向。
+    原因：中文 Windows 的 %date% 会展开成「2026/09/30 周三」，那是 GBK 字节；
+    而 Python 输出是 UTF-8。两种编码混进同一个文件，用记事本打开会一半乱码。
+    交给 Python 写，编码就只有一种；带 BOM 是为了让记事本正确识别成 UTF-8。
+  日志开头会记录脚本目录/工作目录/Python 路径/完整命令行，
+  换目录或换解释器时一眼就能看出来（排查"我到底跑的是哪一份"）。
+
+【实盘下单（--trade，默认关闭）】
+  这是真金白银的开关，故意设计成【双重开关】：
+      --trade              启用交易模块，但仍是【演练】：只打印"将要下什么单"，不发真实订单
+      --trade --live       真正下单（会花真钱）
+  少给任何一个都是空跑，防止"手滑加了 --trade 就跑成真实交易"。
+
+  配套参数：
+      --testnet            用币安测试网（假钱），上线前先用它跑通全流程
+      --trade-proxy URL    下单专用代理，如 http://127.0.0.1:7897（币安在国内常需代理）
+      --max-order N        单笔投入上限（USDT），防手滑
+
+  急停：在脚本目录新建一个空文件 STOP_TRADING，所有下单立即被拒绝（不用改代码）。
+        也可以跑 `python binance_trader.py --halt` / `--resume`。
+
+  执行逻辑（重要）：
+    · 以【交易所真实余额】判断当前有没有持仓，不以本地状态文件为准
+    · 每天都会检查一次（幂等）：昨天漏单今天会自动补上
+    · 数据来自本地缓存且滞后 >2 天时，为安全起见不下单，只发信号
+    · 下单前做三重校验：最小名义金额、数量步长、可用余额
+
+  API Key 存放（不要写进代码）：
+    优先读环境变量 BINANCE_API_KEY / BINANCE_API_SECRET，
+    其次读同目录 binance_keys.json，最后读 binance_keys.txt。
+    币安后台只勾【允许现货交易】，绝不勾【允许提现】，并绑定 IP 白名单。
+
+  自检命令：python binance_trader.py --check        （查连通性/权限/余额）
+
+【资金分配（重要，最容易搞错）】
+  --capital N         【单个标的】的分配额。跑 5 个标的就代表 5×N。
+  --total-capital N   账户【总资金】，脚本自动 ÷ 标的数量。
+                      例：--total-capital 1000 跑 5 个标的 → 每个 200 U。
+
+  ★ 为什么要有 --total-capital：
+    如果只用 --capital 1000 跑 5 个标的，邮件会告诉你每个都投 1000 U，
+    加起来要 5000 U —— 而用户账户里只有 1000 U。这是个静默的误导。
+    用 --total-capital 就不会有这个问题，邮件里会写明"总资金 1000 ÷ 5 = 每个 200"。
+
+  --frac              每个标的投入其分配额的比例，默认 1.0（满仓）。
+    实测满仓优于部分仓位（收益 58.2% vs 51.3%，Calmar 0.93 vs 0.89）——
+    因为本策略的风险控制是"趋势破坏就转空仓"，不靠留现金。
+    留现金不会让回撤等比例下降，只会等比例砍掉收益。
+
+【邮件推送】
+  只在【信号状态发生变化】时发信：空仓→持有 = 买入提醒，持有→空仓 = 离场提醒。
+  状态不变不发信（不会每天打扰）。状态存在 signal_state.json，首次运行只记录不发。
+  日线在 UTC 00:00 收盘（= 北京时间 08:00），所以【北京时间每天 08:01】跑一次：
+      python macdx_strategy.py --symbols BTCUSDT ETHUSDT BNBUSDT SOLUSDT DOGEUSDT --total-capital 1000
+  Windows 直接双击同目录的 run_signal.bat（已配好定时任务命令），Linux 用 cron。
+
+  依赖：无（只用 Python 标准库）。Python 3.9+
+================================================================================
+"""
+from __future__ import annotations
+import argparse
+import calendar
+import csv
+import json
+import math
+import os
+import random
+import smtplib
+import ssl
+import sys
+import time
+import traceback
+import urllib.request
+from datetime import datetime, timedelta, timezone
+from email.header import Header
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
+# Windows 控制台默认 GBK，遇到 ✓ ✗ 等字符会崩。强制 UTF-8 输出。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
+_STDOUT0, _STDERR0 = sys.stdout, sys.stderr   # 原始流，供日志分流用
+_LOG_FP = None
+
+
+class _Tee:
+    """把输出同时写到控制台和日志文件。"""
+
+    def __init__(self, stream, fp):
+        self._stream, self._fp = stream, fp
+
+    def write(self, data):
+        try:
+            self._stream.write(data)
+        except Exception:
+            pass
+        try:
+            self._fp.write(data)
+        except Exception:
+            pass
+        return len(data)
+
+    def flush(self):
+        for s in (self._stream, self._fp):
+            try:
+                s.flush()
+            except Exception:
+                pass
+
+    def isatty(self):
+        try:
+            return self._stream.isatty()
+        except Exception:
+            return False
+
+    @property
+    def encoding(self):
+        return "utf-8"
+
+    def reconfigure(self, **kw):   # 兼容再次调用
+        pass
+
+
+def start_logging(path: str) -> None:
+    """
+    开启日志分流。日志一律由 Python 以 **UTF-8（带 BOM）** 写出。
+
+    为什么要这样：如果让 .bat 用 `>>` 重定向，bat 那边的 `%date%` 在中文 Windows
+    上会展开成「2026/09/30 周三」——含中文，是 GBK 字节；而 Python 输出是 UTF-8。
+    两种编码混进同一个文件，用记事本（GBK）打开时 Python 那部分全是乱码。
+    把日志完全交给 Python 写，编码就只有一个，彻底解决。
+    带 BOM 是为了让 Windows 记事本能正确识别成 UTF-8。
+    """
+    global _LOG_FP
+    d = os.path.dirname(os.path.abspath(path))
+    if d:
+        os.makedirs(d, exist_ok=True)
+    is_new = (not os.path.exists(path)) or os.path.getsize(path) == 0
+    fp = open(path, "a", encoding="utf-8", newline="")
+    if is_new:
+        fp.write("\ufeff")
+    _LOG_FP = fp
+    sys.stdout = _Tee(_STDOUT0, fp)
+    sys.stderr = _Tee(_STDERR0, fp)
+
+
+def _log_header(argv: list) -> None:
+    print("=" * 78)
+    print(f"MACD-X 运行日志    {now_cn()}（北京时间）")
+    print(f"脚本目录 : {os.path.dirname(os.path.abspath(__file__))}")
+    print(f"工作目录 : {os.getcwd()}")
+    print(f"Python   : {sys.executable}")
+    print(f"版本     : {sys.version.split()[0]}  平台 {sys.platform}")
+    print(f"命令行   : {' '.join(argv)}")
+    print("=" * 78)
+
+
+def _log_footer(rc: int) -> None:
+    if _LOG_FP is None:
+        return
+    try:
+        print("-" * 78)
+        print(f"运行结束    {now_cn()}    退出码 {rc}")
+        print("")
+        _LOG_FP.flush()
+        _LOG_FP.close()
+    except Exception:
+        pass
+
+
+def _prescan_log_file(argv: list) -> str | None:
+    """在 argparse 之前先找出 --log-file，这样连参数错误也能记进日志。"""
+    for i, a in enumerate(argv):
+        if a == "--log-file" and i + 1 < len(argv):
+            return argv[i + 1]
+        if a.startswith("--log-file="):
+            return a.split("=", 1)[1]
+    return None
+
+# ─────────────────────────── 时区配置 ───────────────────────────
+# 你原稿用的是 pytz.timezone('Asia/Shanghai')。本脚本坚持【零依赖】，
+# 所以改用 Python 3.9+ 自带的 zoneinfo，功能完全等价、不用装 pytz。
+# Windows 若没装 tzdata，自动降级成固定 UTC+8 —— 中国没有夏令时，结果一模一样。
+try:
+    from zoneinfo import ZoneInfo
+    tz_shanghai = ZoneInfo("Asia/Shanghai")
+except Exception:  # pragma: no cover
+    tz_shanghai = timezone(timedelta(hours=8), "Asia/Shanghai")
+
+TZ_SHANGHAI = tz_shanghai  # 别名，两种写法都能用
+
+
+def now_cn(fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
+    """当前北京时间字符串。"""
+    return datetime.now(tz_shanghai).strftime(fmt)
+
+# ─────────────────────────── 可调参数 ───────────────────────────
+PARAMS = {
+    # 指标
+    "macd_fast": 12,
+    "macd_slow": 26,
+    "macd_signal": 9,
+    "trend_ema": 200,      # 长期趋势均线（100=更激进，200=更稳健）
+    "atr_n": 14,
+    # 出场
+    "exit_confirm": 1,     # 跌破后需连续 N 根确认（1=立即离场；3 在 BTC 上更优但在 ETH 上更差，故取 1）
+    "hard_sl": 0.35,       # 黑天鹅硬止损（占入场价），0=关闭
+    # 成本
+    "fee": 0.001,          # 手续费/单边
+    "slip": 0.0005,        # 滑点/单边
+    # 资金
+    "init_capital": 10000.0,
+    "capital_frac": 1.0,   # 单次投入比例。回测与实盘都用 1.0（满仓）
+                           # 实测：降到 0.7 收益 58.2%→51.3%，而 Calmar 0.93→0.89
+                           # （风险调整后反而更差）。本策略的风险控制靠"离场信号
+                           # 转空仓"实现，不靠留现金，所以留现金纯属稀释收益。
+}
+
+DATA_API = "https://data-api.binance.vision/api/v3/klines"
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+
+# ─────────────────────────── 邮件推送配置 ───────────────────────────
+# 仅在「信号状态发生变化」时推送（空仓→持有 = 买入，持有→空仓 = 离场），
+# 状态不变时不发信，避免每天重复打扰。
+EMAIL_CONFIG = {
+    "from": "a1247504226@163.com",
+    "to": "1247504226@qq.com",
+    "password": "XKCINXNMOMMDCAFI",     # 163 邮箱的 SMTP 授权码（不是登录密码）
+    "server": "smtp.163.com",
+    "port": 465,                        # 465 = SSL；25 = 普通；587 = STARTTLS
+    "max_retries": 3,
+}
+# 状态记录文件（用来判断信号是否发生变化）
+STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "signal_state.json")
+
+# ─────────────────────────── 实盘下单配置 ───────────────────────────
+# 【默认全关】。这是真金白银的开关，故意设计成必须显式打开：
+#   --trade            启用交易模块（此时仍是【演练】，只打印不下单）
+#   --trade --live     真正下单（会花真钱）
+# 双重开关是为了防止"手滑加了 --trade 就跑成真实交易"。
+TRADE_CONFIG = {
+    "enabled": False,        # 由 --trade 打开
+    "live": False,           # 由 --live 打开（必须与 enabled 同时为 True 才真下单）
+    "testnet": False,        # 由 --testnet 打开（币安测试网，用假钱）
+    "proxy": None,           # 下单走哪个代理；None = 直连
+    "max_order_usdt": None,  # 单笔投入上限，None = 用 binance_trader 内部默认（5000U）
+}
+
+# ─────────────────────────── 代理配置 ───────────────────────────
+# 注意：HTTPS_PROXY 这里写 http:// 而不是 https://。
+#   Clash / Mihomo 的入站端口是【明文 HTTP】，对 https 目标走 CONNECT 隧道。
+#   写 https:// 在 urllib 里恰好也能用（它只取 host:port，仍走 CONNECT），
+#   但那是巧合；写 http:// 才是规范写法，requests / pip / curl 也都能认。
+PROXY = {
+    "enabled": True,
+    "http": "http://127.0.0.1:7897",
+    "https": "http://127.0.0.1:7897",
+}
+
+# 网络重试：代理软件常被系统休眠/切节点打断，单次失败很正常
+RETRY = {
+    "per_page": 6,      # 单页请求最大尝试次数
+    "outer": 3,         # 整轮下载失败后的整体重试轮数
+    "timeout": 20,      # 单次请求超时（秒）
+    "budget": 120.0,    # 【总时间预算】单个标的联网最多花多少秒，超了就走缓存兜底。
+                        # 定时任务靠它保证不会卡死：网络再烂也最多等这么久。
+}
+
+
+def apply_proxy(enabled: bool | None = None,
+                http: str | None = None, https: str | None = None) -> None:
+    """把代理写进环境变量（脚本内 urllib 走独立 opener，环境变量主要给外部工具看）。"""
+    global PROXY
+    if enabled is not None:
+        PROXY["enabled"] = enabled
+    if http:
+        PROXY["http"] = http
+    if https:
+        PROXY["https"] = https
+    if PROXY["enabled"]:
+        os.environ["HTTP_PROXY"] = PROXY["http"]
+        os.environ["HTTPS_PROXY"] = PROXY["https"]
+        os.environ["http_proxy"] = PROXY["http"]
+        os.environ["https_proxy"] = PROXY["https"]
+    else:
+        for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+            os.environ.pop(k, None)
+
+
+_OPENERS: dict = {}
+
+
+def _opener(use_proxy: bool):
+    """获取 opener。True=走代理，False=强制直连（连环境变量里的代理也忽略）。"""
+    key = "proxy" if use_proxy else "direct"
+    if key not in _OPENERS:
+        if use_proxy:
+            handler = urllib.request.ProxyHandler(
+                {"http": PROXY["http"], "https": PROXY["https"]})
+        else:
+            handler = urllib.request.ProxyHandler({})  # 空 dict = 显式禁用代理
+        _OPENERS[key] = urllib.request.build_opener(handler)
+    return _OPENERS[key]
+
+
+def http_get(url: str, timeout: float = 20.0, use_proxy: bool = True) -> bytes:
+    """带代理切换的 GET。"""
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with _opener(use_proxy).open(req, timeout=timeout) as r:
+        return r.read()
+
+
+# 记住上次走通的线路，下次优先用它。
+# 代理软件时开时关，如果每次都从代理试起，代理没开时每页都要白等一次超时，
+# 三个标的四个分页就是十几次无用重试。记住线路后，代理挂了就一路直连，快得多。
+_ROUTE = {"prefer": "proxy"}
+
+
+def _route_order() -> list[bool]:
+    """返回线路尝试顺序（True=代理，False=直连）。"""
+    if not PROXY["enabled"]:
+        return [False]
+    return [True, False] if _ROUTE["prefer"] == "proxy" else [False, True]
+
+
+def send_email(subject: str, body: str, cfg: dict | None = None,
+               html: str | None = None) -> bool:
+    """
+    发送邮件。失败时按 max_retries 重试，全部失败返回 False（不影响主流程）。
+
+    给了 html 就发 multipart/alternative：邮件客户端优先渲染 HTML 版
+    （手机上是自适应的表格），纯文本版作为兜底（老客户端 / 纯文本阅读器）。
+    """
+    cfg = dict(EMAIL_CONFIG, **(cfg or {}))
+    # 允许用环境变量覆盖密码，避免明文硬编码
+    pwd = os.environ.get("MACDX_MAIL_PASSWORD") or cfg["password"]
+    if html:
+        msg = MIMEMultipart("alternative")
+        msg.attach(MIMEText(body, "plain", "utf-8"))
+        msg.attach(MIMEText(html, "html", "utf-8"))
+    else:
+        msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = Header(subject, "utf-8")
+    msg["From"] = cfg["from"]
+    msg["To"] = cfg["to"]
+    last = ""
+    for attempt in range(int(cfg.get("max_retries", 3))):
+        try:
+            ctx = ssl.create_default_context()
+            # 关键：显式指定纯 ASCII 的 local_hostname。
+            # smtplib 发 EHLO 时会带上本机主机名，若计算机名含中文会直接
+            # UnicodeEncodeError（'ascii' codec can't encode ...），连不上服务器。
+            lh = "MACDX-Client"
+            if int(cfg["port"]) == 465:
+                with smtplib.SMTP_SSL(cfg["server"], int(cfg["port"]),
+                                      local_hostname=lh, timeout=30, context=ctx) as s:
+                    s.login(cfg["from"], pwd)
+                    s.sendmail(cfg["from"], [cfg["to"]], msg.as_string())
+            else:
+                with smtplib.SMTP(cfg["server"], int(cfg["port"]),
+                                  local_hostname=lh, timeout=30) as s:
+                    s.ehlo()
+                    s.starttls(context=ctx)
+                    s.ehlo()
+                    s.login(cfg["from"], pwd)
+                    s.sendmail(cfg["from"], [cfg["to"]], msg.as_string())
+            return True
+        except Exception as e:
+            last = str(e)
+            if attempt < int(cfg.get("max_retries", 3)) - 1:
+                time.sleep(3)
+    print(f"  [邮件] 发送失败（已重试 {cfg.get('max_retries', 3)} 次）：{last[:120]}")
+    return False
+
+
+def _load_state() -> dict:
+    try:
+        if os.path.exists(STATE_FILE):
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+
+def _save_state(key: str, hold: bool, date: str, entry: dict | None = None) -> None:
+    """
+    写入状态（原子写：先写 .tmp 再 replace，断电不会写坏 JSON）。
+
+    entry: 持仓信息 dict（entry_price / entry_date / invest / qty）。
+           买入时传入，之后每天读出来算浮动盈亏；
+           卖出时传 None（配合 hold=False），自动清掉旧持仓信息。
+    """
+    st = _load_state()
+    rec = st.get(key, {})
+    rec["hold"] = hold
+    rec["date"] = date
+    rec["updated"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    if entry:
+        rec.update(entry)
+    elif not hold:
+        for k in ("entry_price", "entry_date", "invest", "qty"):
+            rec.pop(k, None)
+    st[key] = rec
+    try:
+        tmp = STATE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(st, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, STATE_FILE)
+    except Exception as e:
+        print(f"  [警告] 状态文件写入失败：{e}")
+
+
+# ══════════════════════════ 邮件渲染 ══════════════════════════
+# 每封信同时给两个版本：
+#   · HTML   —— 主版本。数据全部用自适应表格（width:100%，不写死像素），
+#               手机上不会错位；字号 ≥13px，不需要左右滑动。
+#   · 纯文本 —— 兜底。老客户端、纯文本阅读器、被剥离 HTML 的转发场景。
+# 颜色遵循国内习惯：涨 / 盈利 = 红，跌 / 亏损 = 绿。
+_C_RED = "#c62828"
+_C_GREEN = "#2e7d32"
+_C_SLATE = "#37474f"
+
+
+def _esc(s) -> str:
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;"))
+
+
+def _dwidth(s: str) -> int:
+    """字符串显示宽度（CJK 算 2 格），用于纯文本版对齐。"""
+    return sum(2 if ord(ch) > 0x2E80 else 1 for ch in str(s))
+
+
+def _ljust(s: str, width: int) -> str:
+    return str(s) + " " * max(0, width - _dwidth(s))
+
+
+def _fmt_px(v: float, sign: bool = False) -> str:
+    """
+    价格/指标的自适应小数位。
+
+    固定 2 位小数会把 DOGE 的 0.1234 显示成 0.12、把 DIF -0.0042 显示成 -0.00，
+    看着像 bug。按数量级自动选位数。
+    """
+    a = abs(v)
+    if a >= 1:
+        d = 2
+    elif a >= 0.1:
+        d = 4
+    elif a >= 0.001:
+        d = 5
+    else:
+        d = 8
+    return f"{v:+,.{d}f}" if sign else f"{v:,.{d}f}"
+
+
+
+def collect_signal(symbol: str, interval: str, sg: dict,
+                   capital: float = 1000.0, frac: float = 1.0,
+                   src: str = "api", stale: float = 0.0,
+                   total_capital: float | None = None,
+                   n_symbols: int = 1,
+                   daily: bool = True,
+                   fill_price: float | None = None) -> dict | None:
+    """
+    计算【单个标的】今天该在汇总邮件里呈现什么，但**不发信**。
+
+    返回一个 item dict，由 send_digest() 把所有标的合并成一封邮件；
+    返回 None 表示这个标的今天不需要出现在邮件里（首次运行 / 静默）。
+
+      · 状态变化 → changed=True，item 里带完整下单指令（推荐开仓价等）
+      · 状态不变 → changed=False，item 里带开仓价与浮动盈亏（daily=True 时每天都发）
+
+    fill_price: 实盘成交均价。给了就用它当开仓价（最准）；
+                没给（手动下单）就用「收盘价 × (1+滑点)」当推荐开仓价。
+    """
+    key = f"{symbol}_{interval}"
+    st = _load_state()
+    rec = st.get(key, {})
+    prev = rec.get("hold")
+    now = bool(sg["should_hold"])
+    p = PARAMS
+    base = symbol.replace("USDT", "")
+
+    fill = sg["close"] * (1 + p["slip"])
+    invest = capital * frac
+    qty = invest * (1 - p["fee"]) / fill if fill > 0 else 0.0
+
+    first_run = prev is None
+    changed = (not first_run) and (prev != now)
+
+    # ── 首次运行：只记录，不发交易信号（否则一上来就误报一笔「买入」）──
+    if first_run:
+        entry = None
+        if now:
+            ep = fill_price if fill_price else fill
+            entry = {"entry_price": ep, "entry_date": sg["date"],
+                     "invest": invest, "qty": qty}
+        _save_state(key, now, sg["date"], entry)
+        print(f"  [邮件] 首次运行，已记录 {symbol} 状态为【{'持有' if now else '空仓'}】；"
+              f"下次起进入每日汇总。")
+        return None
+
+    # ── 状态未变 且 关闭了每日推送：静默 ──
+    if not changed and not daily:
+        _save_state(key, now, sg["date"])
+        print(f"  [邮件] {symbol} 状态未变化（{'持有' if now else '空仓'}），不推送。")
+        return None
+
+    cash_note = "满仓" if frac >= 1.0 else f"留 {(1-frac)*100:.0f}% 现金"
+    cur = sg["close"]
+
+    # ══════════ 开仓价判定 ══════════
+    # 优先级：① 实盘成交均价（最准）② 状态文件里记录的 ③ 本次刚入场 → 推荐价
+    #         ④ 都没有（日报上线前就已持仓）→ 不编造，标「未记录」
+    have_entry = False
+    ep, ep_src = None, ""
+    if now:
+        if fill_price:
+            ep, ep_src, have_entry = float(fill_price), "实盘成交均价", True
+        elif rec.get("entry_price"):
+            ep, ep_src, have_entry = float(rec["entry_price"]), "开仓当日记录", True
+        elif changed:
+            ep, ep_src, have_entry = fill, "推荐开仓价", True
+
+    # ══════════ 主题 + 结构化数据 ══════════
+    # rows     = 行动数据 (标签, 数值, 备注, 颜色)
+    # ind_rows = 信号依据 (指标, 数值, 判定文字, 判定颜色)
+    note = ""
+    if changed and now:
+        title, accent, action = f"{symbol} · 买入信号", _C_RED, "买入"
+        if fill_price:
+            head = "★ 已买入成交（市价单）"
+            rows = [("实际开仓价", f"{ep:,.4f}", "实盘成交均价")]
+        else:
+            head = "★ 立即买入（市价单）"
+            rows = [("推荐开仓价", f"{fill:,.4f}",
+                     f"收盘 {cur:,.2f} ×(1+{p['slip']*100:.3f}% 滑点)")]
+        rows.append(("买入数量", f"{qty:.6f} {base}", ""))
+        rows.append(("投入金额", f"{invest:,.0f} U",
+                     f"{cash_note} · 无杠杆 · 手续费约 {invest*p['fee']:.2f} U"))
+        if total_capital and n_symbols > 1:
+            rows.append(("资金分配",
+                         f"总资金 {total_capital:,.0f} U ÷ {n_symbols} 标的",
+                         f"本标的 {capital:,.0f} U"))
+        note = "下单后不设止盈止损、不挂条件单、不加杠杆，等离场信号。"
+
+    elif changed and not now:
+        title, accent, action = f"{symbol} · 离场信号", _C_GREEN, "卖出"
+        head = "★ 立即卖出（市价单，全部持仓）"
+        rows = [("推荐成交价", f"{cur*(1-p['slip']):,.4f}",
+                 f"收盘 {cur:,.2f} ×(1-{p['slip']*100:.3f}% 滑点)"),
+                ("卖出数量", "全部持仓", "换回 USDT")]
+        note = "不要反手做空（本策略只做多现货），等下一次买入信号。"
+
+    elif now:
+        title, accent, action = f"{symbol} · 持仓中", _C_SLATE, "持仓"
+        head = "★ 继续持有，无需操作"
+        if have_entry:
+            inv = rec.get("invest") or invest
+            q = rec.get("qty") or qty
+            ed = rec.get("entry_date") or sg["date"]
+            pnl_pct = (cur / ep - 1) * 100
+            pnl_u = inv * (cur / ep - 1)
+            pnl_color = _C_RED if pnl_pct >= 0 else _C_GREEN
+            try:
+                held = max(0, (datetime.strptime(sg["date"][:10], "%Y-%m-%d")
+                               - datetime.strptime(ed[:10], "%Y-%m-%d")).days)
+            except Exception:
+                held = 0
+            rows = [("开仓价", f"{ep:,.4f}", ep_src),
+                    ("当前价", f"{cur:,.4f}", ""),
+                    ("浮动盈亏", f"{pnl_pct:+.2f}%",
+                     f"{pnl_u:+,.2f} U / 投入 {inv:,.0f} U", pnl_color),
+                    ("持有", f"{held} 天", f"约 {q:.6f} {base}")]
+            note = "等离场信号，中途不干预。"
+        else:
+            gap_ep = (cur / sg["ema_trend"] - 1) * 100 if sg["ema_trend"] else 0.0
+            rows = [("开仓价", "未记录", "日报上线前已持仓，不编造"),
+                    ("当前价", f"{cur:,.4f}", ""),
+                    ("距 EMA200", f"{gap_ep:+.2f}%", "")]
+            note = (f'想显示盈亏 → 在 signal_state.json 的 {key} 里补一行 '
+                    f'"entry_price": 你的实际买入均价')
+
+    else:
+        title, accent, action = f"{symbol} · 空仓中", _C_SLATE, "空仓"
+        head = "★ 继续空仓，无需操作"
+        gap = (cur / sg["ema_trend"] - 1) * 100 if sg["ema_trend"] else 0.0
+        rows = [("当前价", f"{cur:,.4f}", ""),
+                ("距 EMA200", f"{gap:+.2f}%", "")]
+        note = "重新入场条件：收盘价站上 EMA200 且 DIF 快线 > 0。"
+
+    # ── 信号依据（三种线全列，用户曾因只看柱子而误判）──
+    ema_ok = bool(sg["price_above_ema"])
+    dif_ok = bool(sg["macd_above_zero"])
+    ind_rows = [
+        ("收盘价", f"{cur:,.4f}", "", ""),
+        ("EMA200", f"{sg['ema_trend']:,.4f}",
+         "✓ 站上" if ema_ok else "✗ 跌破", _C_RED if ema_ok else _C_GREEN),
+        ("DIF 快线", f"{sg['macd']:+,.4f}",
+         "✓ > 0" if dif_ok else "✗ < 0", _C_RED if dif_ok else _C_GREEN),
+        ("DEA 慢线", f"{sg['dea']:+,.4f}", "", ""),
+        ("MACD 柱", f"{sg['hist']*2:+,.4f}", "", ""),
+    ]
+
+    # ── 汇总表用的紧凑字段（一行装下一个标的）──
+    # 注意：这里不能用持仓分支里的 pnl_pct —— 买入信号那天也持仓，但没进那个分支。
+    if now and have_entry and ep:
+        pnl_now = (cur / ep - 1) * 100
+        pnl_txt = f"{pnl_now:+.2f}%"
+        pnl_col = _C_RED if pnl_now >= 0 else _C_GREEN
+    else:
+        pnl_txt, pnl_col = "", ""
+    gap_now = (cur / sg["ema_trend"] - 1) * 100 if sg["ema_trend"] else 0.0
+    # 今天刚出买入信号、还没成交 → 概览表里这个「开仓价」其实是推荐价，要打星号区分
+    entry_pending = bool(changed and now and have_entry)
+
+    return {
+        "symbol": symbol, "base": base, "key": key,
+        "date": sg["date"], "now": now, "changed": changed,
+        "action": action, "title": title, "head": head,
+        "accent": accent, "rows": rows, "note": note, "ind_rows": ind_rows,
+        "warn": "" if stale <= 2 else (
+            f"⚠ 数据来自本地缓存（联网失败），最后一根 K 线距今 {stale:.1f} 天，"
+            f"信号可能不是最新，请人工核对后再下单。"),
+        # 写回状态文件用的开仓信息（空仓时 None）
+        "state": ({"entry_price": ep,
+                   "entry_date": rec.get("entry_date") or sg["date"],
+                   "invest": rec.get("invest") or invest,
+                   "qty": rec.get("qty") or qty} if (now and have_entry) else None),
+        "entry_pending": entry_pending,
+        # 概览表：方向 / 开仓价 / 当前价 / 浮动盈亏（空仓时显示距 EMA200）
+        "sum": {
+            "dir": "持有" if now else "空仓",
+            "dir_col": _C_RED if now else _C_SLATE,
+            "entry": ((_fmt_px(ep) + "*") if entry_pending else
+                      (_fmt_px(ep) if (now and have_entry) else
+                       ("未记录" if now else "—"))),
+            "entry_unknown": now and not have_entry,
+            "price": _fmt_px(cur),
+            "pnl": pnl_txt, "pnl_col": pnl_col,
+            "gap": f"{gap_now:+.2f}%",
+            "ema": _fmt_px(sg["ema_trend"]),
+            "dif": _fmt_px(sg["macd"], sign=True),
+            "judge": ("✓ 站上" if ema_ok else "✗ 跌破") + " / " +
+                     ("✓ >0" if dif_ok else "✗ <0"),
+            "judge_col": _C_RED if (ema_ok and dif_ok) else _C_GREEN,
+        },
+    }
+
+
+# ══════════════════════════ 汇总邮件 ══════════════════════════
+def _digest_subject(items: list, date: str) -> str:
+    """标题：有信号变化就突出，否则报「持仓 N/M」。手机上扫一眼就知道要不要点开。"""
+    ch = [it for it in items if it["changed"]]
+    if len(ch) == 1:
+        it = ch[0]
+        return f"[MACD-X 现货] ⚠ {it['symbol']} {it['action']}信号 · {date}"
+    if len(ch) > 1:
+        names = " ".join(f"{it['base']}{it['action']}" for it in ch)
+        return f"[MACD-X 现货] ⚠ {len(ch)} 个信号变化：{names} · {date}"
+    n_hold = sum(1 for it in items if it["now"])
+    return f"[MACD-X 现货] 日报 · 持仓 {n_hold}/{len(items)} · {date}"
+
+
+def build_digest_text(items: list, subtitle: str, footer: str) -> str:
+    """汇总邮件的纯文本兜底版。"""
+    out = []
+    ch = [it for it in items if it["changed"]]
+    if ch:
+        out.append(f"★ 需要操作（{len(ch)} 个标的）")
+        out.append("")
+        for it in ch:
+            out.append(it["title"] + "    " + it["head"])
+            for r in it["rows"]:
+                label, value = r[0], r[1]
+                sub = r[2] if len(r) > 2 else ""
+                line = f"  {_ljust(label, 10)}: {value}"
+                if sub:
+                    line += f"   （{sub}）"
+                out.append(line)
+            out.append(f"  {it['note']}")
+            out.append("")
+    else:
+        out.append("★ 今日无信号变化，无需操作。")
+        out.append("")
+
+    out.append("── 各标的状态 ──")
+    for it in items:
+        s = it["sum"]
+        tail = s["pnl"] if it["now"] else f"距EMA {s['gap']}"
+        line = (f"  {_ljust(it['base'], 8)} {_ljust(s['dir'], 6)} "
+                f"开仓 {_ljust(s['entry'], 14)} 现价 {_ljust(s['price'], 14)} "
+                f"{tail}")
+        out.append(line)
+    if any(it.get("entry_pending") for it in items):
+        out.append("  * 今日刚出买入信号，开仓价为推荐价，成交后会换成实际成交均价。")
+
+    out.append("")
+    out.append("── 信号依据 ──")
+    for it in items:
+        s = it["sum"]
+        out.append(f"  {_ljust(it['base'], 8)} EMA200 {_ljust(s['ema'], 14)} "
+                   f"DIF {_ljust(s['dif'], 12)} {s['judge']}")
+    out.append("  判定条件：收盘价 > EMA200 且 DIF 快线 > 0")
+
+    warns = [it["warn"] for it in items if it["warn"]]
+    if warns:
+        out += ["", warns[0]]
+    out += ["", "─" * 34, footer,
+            "本邮件自动生成，仅供研究，不构成投资建议。"]
+    return "\n".join(out)
+
+
+def build_digest_html(items: list, subtitle: str, footer: str) -> str:
+    """汇总邮件的 HTML 版：操作卡 + 状态总表 + 信号依据表，手机自适应。"""
+    FONT = ("-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,"
+            "'PingFang SC','Microsoft YaHei',Arial,sans-serif")
+    TD = "padding:7px 5px;font-size:12px;border-top:1px solid #ededed;white-space:nowrap"
+    TDV = TD + ";text-align:right;font-variant-numeric:tabular-nums"
+
+    ch = [it for it in items if it["changed"]]
+
+    # ── ① 需要操作的标的：逐张行动卡 ──
+    cards = ""
+    for it in ch:
+        accent = it["accent"]
+        tr = []
+        for r in it["rows"]:
+            label, value = r[0], r[1]
+            sub = r[2] if len(r) > 2 else ""
+            color = r[3] if len(r) > 3 else None
+            vstyle = f"color:{color};" if color else "color:#1a1a1a;"
+            sub_html = (f'<div style="font-size:11px;color:#8a8a8a;font-weight:400;'
+                        f'margin-top:2px">{_esc(sub)}</div>') if sub else ""
+            tr.append(f'<tr><td style="{TD};color:#666;vertical-align:top">'
+                      f'{_esc(label)}</td>'
+                      f'<td style="{TDV};font-size:15px;font-weight:700;{vstyle};'
+                      f'vertical-align:top">{value}{sub_html}</td></tr>')
+        cards += (
+            f'<div style="margin:0 0 12px;border:1px solid #e8e8e8;'
+            f'border-left:4px solid {accent};border-radius:8px;overflow:hidden">'
+            f'<div style="padding:11px 12px 3px">'
+            f'<div style="font-size:15px;font-weight:700;color:{accent}">'
+            f'{_esc(it["title"])}</div>'
+            f'<div style="font-size:12px;color:#777;margin-top:3px">'
+            f'{_esc(it["head"])}</div></div>'
+            f'<div style="padding:0 12px 11px">'
+            f'<table width="100%" cellpadding="0" cellspacing="0" '
+            f'style="border-collapse:collapse;width:100%">{"".join(tr)}</table>'
+            f'<div style="font-size:12px;color:#666;line-height:1.55;'
+            f'margin-top:8px">{_esc(it["note"])}</div></div></div>')
+
+    act_section = ""
+    if ch:
+        act_section = (
+            f'<div style="padding:16px 16px 0">'
+            f'<div style="font-size:14px;font-weight:700;color:#333;'
+            f'margin-bottom:10px">需要操作（{len(ch)} 个标的）</div>'
+            f'{cards}</div>')
+    else:
+        act_section = (
+            '<div style="margin:16px 16px 0;padding:11px 12px;background:#f1f8f2;'
+            'border-left:3px solid #2e7d32;border-radius:6px;font-size:13px;'
+            'color:#245c28">★ 今日无信号变化，无需操作。</div>')
+
+    # ── ② 各标的状态总表 ──
+    rows = ['<tr style="background:#f5f6f8">'
+            '<td style="padding:7px 5px;font-size:11px;color:#888">标的</td>'
+            '<td style="padding:7px 5px;font-size:11px;color:#888">方向</td>'
+            '<td style="padding:7px 5px;font-size:11px;color:#888;'
+            'text-align:right">开仓价</td>'
+            '<td style="padding:7px 5px;font-size:11px;color:#888;'
+            'text-align:right">当前价</td>'
+            '<td style="padding:7px 5px;font-size:11px;color:#888;'
+            'text-align:right">浮动盈亏</td></tr>']
+    for i, it in enumerate(items):
+        s = it["sum"]
+        bg = "#ffffff" if i % 2 == 0 else "#fafafa"
+        last = (f'<span style="color:{s["pnl_col"]};font-weight:700">{s["pnl"]}</span>'
+                if it["now"] and s["pnl"] else
+                f'<span style="color:#999">{s["gap"]}</span>')
+        rows.append(
+            f'<tr style="background:{bg}">'
+            f'<td style="{TD};font-weight:600;color:#1a1a1a">{_esc(it["base"])}</td>'
+            f'<td style="{TD};color:{s["dir_col"]};font-weight:700">{s["dir"]}</td>'
+            f'<td style="{TDV};color:{"#bbb" if s["entry_unknown"] else "#1a1a1a"}">'
+            f'{_esc(s["entry"])}</td>'
+            f'<td style="{TDV}">{_esc(s["price"])}</td>'
+            f'<td style="{TDV}">{last}</td></tr>')
+    state_table = ('<table width="100%" cellpadding="0" cellspacing="0" '
+                   'style="border-collapse:collapse;width:100%;'
+                   'border:1px solid #ededed;border-radius:6px">'
+                   + "".join(rows) + '</table>')
+    if any(it.get("entry_pending") for it in items):
+        state_table += (
+            '<div style="font-size:11px;color:#8a8a8a;margin-top:7px;'
+            'line-height:1.5">* 今日刚出买入信号，开仓价是推荐价，'
+            '成交后会替换为实际成交均价。</div>')
+
+    # ── ③ 信号依据表 ──
+    irows = ['<tr style="background:#f5f6f8">'
+             '<td style="padding:7px 5px;font-size:11px;color:#888">标的</td>'
+             '<td style="padding:7px 5px;font-size:11px;color:#888;'
+             'text-align:right">EMA200</td>'
+             '<td style="padding:7px 5px;font-size:11px;color:#888;'
+             'text-align:right">DIF</td>'
+             '<td style="padding:7px 5px;font-size:11px;color:#888;'
+             'text-align:right">判定</td></tr>']
+    for i, it in enumerate(items):
+        s = it["sum"]
+        bg = "#ffffff" if i % 2 == 0 else "#fafafa"
+        irows.append(
+            f'<tr style="background:{bg}">'
+            f'<td style="{TD};font-weight:600;color:#1a1a1a">{_esc(it["base"])}</td>'
+            f'<td style="{TDV}">{_esc(s["ema"])}</td>'
+            f'<td style="{TDV}">{_esc(s["dif"])}</td>'
+            f'<td style="{TD};text-align:right;color:{s["judge_col"]};'
+            f'font-weight:700;font-size:11px">{_esc(s["judge"])}</td></tr>')
+    ind_table = ('<table width="100%" cellpadding="0" cellspacing="0" '
+                 'style="border-collapse:collapse;width:100%;'
+                 'border:1px solid #ededed;border-radius:6px">'
+                 + "".join(irows) + '</table>')
+
+    warns = [it["warn"] for it in items if it["warn"]]
+    warn_html = ""
+    if warns:
+        warn_html = (f'<div style="margin:14px 16px 0;padding:10px 12px;'
+                     f'background:#fff8e1;border-left:3px solid #f9a825;'
+                     f'font-size:13px;color:#6d4c00;line-height:1.55">'
+                     f'{_esc(warns[0])}</div>')
+
+    n_hold = sum(1 for it in items if it["now"])
+    head_color = _C_RED if ch else _C_SLATE
+    head_txt = (f"⚠ {len(ch)} 个信号变化" if ch else "今日无信号变化")
+
+    return f"""<div style="margin:0;padding:14px 10px;background:#f4f5f7">
+<div style="max-width:620px;margin:0 auto;background:#ffffff;border-radius:10px;overflow:hidden;font-family:{FONT};color:#1a1a1a">
+
+  <div style="background:{head_color};padding:14px 16px">
+    <div style="font-size:17px;font-weight:700;color:#ffffff;line-height:1.3">
+      MACD-X 现货 · 每日汇总</div>
+    <div style="font-size:12px;color:#ffffff;opacity:.88;margin-top:4px">
+      {_esc(head_txt)} · 持仓 {n_hold}/{len(items)} · {_esc(subtitle)}</div>
+  </div>
+
+  {act_section}
+
+  <div style="padding:18px 16px 0">
+    <div style="font-size:14px;font-weight:700;color:#333;margin-bottom:9px">各标的状态</div>
+    {state_table}
+  </div>
+
+  <div style="padding:18px 16px 0">
+    <div style="font-size:14px;font-weight:700;color:#333;margin-bottom:9px">信号依据</div>
+    {ind_table}
+    <div style="font-size:11px;color:#8a8a8a;margin-top:8px;line-height:1.5">
+      判定条件：收盘价 &gt; EMA200 且 DIF 快线 &gt; 0
+    </div>
+  </div>
+{warn_html}
+  <div style="padding:14px 16px 16px;margin-top:18px;border-top:1px solid #eee;font-size:11px;color:#9a9a9a;line-height:1.6">
+    {_esc(footer)}<br>
+    本邮件自动生成，仅供研究，不构成投资建议。
+  </div>
+
+</div>
+</div>"""
+
+
+def send_digest(items: list, interval: str = "1d") -> bool:
+    """
+    把所有标的合并成**一封**汇总邮件发出。
+
+    发送成功后才写状态文件 —— 发失败就什么都不写，下次运行会自动重试，
+    不会出现「邮件没发出去但状态已经翻篇」的漏单。
+    """
+    if not items:
+        print("  [邮件] 无标的需要推送，本次不发信。")
+        return False
+
+    date = items[0]["date"][:10]
+    subject = _digest_subject(items, date)
+    n_ch = sum(1 for it in items if it["changed"])
+    n_hold = sum(1 for it in items if it["now"])
+    subtitle = f"信号日 {date} · 推送 {now_cn()}"
+    footer = f"{len(items)} 个标的 · {interval} · 信号日 {date} · 推送 {now_cn()}"
+
+    body = build_digest_text(items, subtitle, footer)
+    html = build_digest_html(items, subtitle, footer)
+    ok = send_email(subject, body, html=html)
+    if not ok:
+        print("  [邮件] 汇总邮件发送失败，状态未更新（下次运行会重试）")
+        return False
+
+    print(f"  [邮件] 已发送汇总邮件到 {EMAIL_CONFIG['to']}"
+          f"（{len(items)} 个标的：持仓 {n_hold}，信号变化 {n_ch}）")
+    for it in items:
+        _save_state(it["key"], it["now"], it["date"], it["state"])
+    return True
+
+
+# ══════════════════════════ 0.5 实盘下单 ══════════════════════════
+def trade_if_needed(symbol: str, sg: dict, capital: float, frac: float) -> dict | None:
+    """
+    按当前信号执行实盘下单（现货）。
+
+    【为什么每天都调用，而不是只在信号变化时调用】
+      execute_signal 是幂等的：它先读【交易所真实余额】判断当前状态，
+      只有"目标状态 ≠ 实际状态"时才动手。
+      所以每天调用是安全的，而且更稳健——如果昨天那笔单因为网络问题失败了，
+      今天会自动补上。反过来，只在状态变化时调用，一旦漏单就永远补不回来。
+    """
+    if not TRADE_CONFIG["enabled"]:
+        return None
+
+    # 懒加载：即使把 binance_trader.py 删掉，本脚本依然能正常发信号
+    try:
+        import binance_trader as BT
+    except ImportError:
+        print("  [交易] 找不到 binance_trader.py，跳过下单（信号推送不受影响）。")
+        return None
+
+    live = bool(TRADE_CONFIG["live"])
+    print(f"\n  [交易] {'★ 真实下单模式' if live else '演练模式（不会发真实订单）'}"
+          f"  环境：{'测试网' if TRADE_CONFIG['testnet'] else '主网'}")
+
+    try:
+        key, secret = BT.load_keys()
+    except Exception as e:
+        print(f"  [交易] 跳过：{e}")
+        return None
+
+    try:
+        client = BT.BinanceSpot(key, secret,
+                                testnet=TRADE_CONFIG["testnet"],
+                                proxy=TRADE_CONFIG["proxy"])
+        client.sync_time()
+        rep = BT.execute_signal(client, symbol, bool(sg["should_hold"]),
+                                capital=capital, frac=frac,
+                                live=live,
+                                max_order=TRADE_CONFIG["max_order_usdt"])
+    except Exception as e:
+        print(f"  [交易] 执行异常：{type(e).__name__}: {e}")
+        return None
+
+    act = rep.get("action", "?")
+    if rep.get("detail"):
+        print(f"  [交易] {act} · {rep['detail']}")
+    if rep.get("reason"):
+        print(f"  [交易] 说明：{rep['reason']}")
+    if rep.get("order"):
+        o = rep["order"]
+        print(f"  [交易] 订单回报：id={o.get('orderId')} 状态={o.get('status')} "
+              f"成交量={o.get('executedQty')} 成交额={o.get('cummulativeQuoteQty')}")
+    if not rep.get("ok", True):
+        print("  [交易] ⚠ 本次未成功执行，请人工核对账户。")
+    return rep
+
+
+# ══════════════════════════ 1. 数据获取 ══════════════════════════
+def fetch_klines(symbol: str, interval: str = "1d", start_ms: int | None = None,
+                 verbose: bool = True, deadline: float | None = None) -> list[dict]:
+    """
+    从币安公开 API 分页拉取 K 线。
+
+    【抗代理抖动的抓取策略】
+      每一页最多重试 RETRY['per_page'] 次，并且【代理 / 直连交替】尝试：
+      第 1 次走代理，第 2 次直连，第 3 次代理……
+      这样无论「代理挂了」还是「直连被墙」，都能自动绕过去，不需要人工干预。
+      退避用指数 + 随机抖动，避免多个线程同时重连打爆本地代理。
+      deadline 是绝对时间戳（time.time() 口径），到点立刻放弃 —— 定时任务靠它保证不卡死。
+    """
+    if start_ms is None:
+        start_ms = calendar.timegm(time.strptime("2017-01-01", "%Y-%m-%d")) * 1000
+    end_ms = int(time.time() * 1000)
+    rows, cur = [], start_ms
+
+    while cur < end_ms:
+        url = (f"{DATA_API}?symbol={symbol}&interval={interval}"
+               f"&startTime={cur}&endTime={end_ms}&limit=1000")
+        batch, last_err = None, ""
+        order = _route_order()
+        for attempt in range(int(RETRY["per_page"])):
+            # 先试上次走通的线路，失败再换另一条，然后交替；--no-proxy 时永远直连
+            use_proxy = order[attempt % len(order)]
+            try:
+                batch = json.loads(http_get(url, RETRY["timeout"], use_proxy).decode())
+                _ROUTE["prefer"] = "proxy" if use_proxy else "direct"
+                break
+            except Exception as e:
+                last_err = f"{type(e).__name__}: {e}"
+                if attempt < int(RETRY["per_page"]) - 1:
+                    wait = min(2 * (2 ** attempt), 20) + random.uniform(0, 1.5)
+                    if deadline and time.time() + wait > deadline:
+                        raise RuntimeError(
+                            f"{symbol} 时间预算用尽（{RETRY['budget']:.0f}s），"
+                            f"停止重试：{last_err[:80]}")
+                    if verbose:
+                        print(f"    [{symbol}] 第 {attempt+1} 次失败"
+                              f"（{'代理' if use_proxy else '直连'}）：{last_err[:70]}"
+                              f" → {wait:.1f}s 后重试", flush=True)
+                    time.sleep(wait)
+        if batch is None:
+            raise RuntimeError(f"{symbol} 该页下载失败（已试 "
+                               f"{RETRY['per_page']} 次）：{last_err[:100]}")
+        if not batch:
+            break
+        rows.extend(batch)
+        cur = batch[-1][0] + 1
+        if verbose:
+            ds = time.strftime("%Y-%m-%d", time.gmtime(batch[-1][0] / 1000))
+            print(f"    {symbol} {interval}: {len(rows)} 根, 最新 {ds}", flush=True)
+        if len(batch) < 1000:
+            break
+        time.sleep(0.25)
+
+    seen, out = set(), []
+    for r in rows:
+        if r[0] in seen:
+            continue
+        seen.add(r[0])
+        out.append({
+            "dt": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(r[0] / 1000)),
+            "o": float(r[1]), "h": float(r[2]), "l": float(r[3]),
+            "c": float(r[4]), "v": float(r[5]),
+        })
+    out.sort(key=lambda x: x["dt"])
+    return out
+
+
+def save_csv(bars: list[dict], path: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["datetime", "open", "high", "low", "close", "volume"])
+        for b in bars:
+            w.writerow([b["dt"], b["o"], b["h"], b["l"], b["c"], b["v"]])
+
+
+def load_csv(path: str) -> list[dict]:
+    out = []
+    with open(path, "r", encoding="utf-8") as f:
+        for r in csv.DictReader(f):
+            out.append({"dt": r["datetime"], "o": float(r["open"]), "h": float(r["high"]),
+                        "l": float(r["low"]), "c": float(r["close"]), "v": float(r["volume"])})
+    return out
+
+
+def load_bars(symbol: str, interval: str, no_fetch: bool = False,
+              verbose: bool = True) -> tuple[list[dict], str, float]:
+    """
+    取数据：优先联网抓，抓不到就用本地缓存兜底。
+
+    返回 (bars, 来源, 数据陈旧天数)。
+    来源: 'api' | 'cache' | 'cache(兜底)'
+    「不影响推送」的关键就在这：网络再怎么抽风，只要有历史缓存就照样算信号、照样发邮件，
+    最多在邮件里标注一下数据可能过期。
+    """
+    path = os.path.join(DATA_DIR, f"{symbol}_{interval}.csv")
+    cache: list[dict] = []
+    if os.path.exists(path):
+        try:
+            cache = load_csv(path)
+        except Exception as e:
+            print(f"  [警告] 本地缓存 {path} 读取失败：{e}")
+
+    if no_fetch:
+        return cache, "cache", _stale_days(cache)
+
+    last_err = ""
+    deadline = time.time() + float(RETRY["budget"])   # 总时间预算，到点走缓存
+    for rnd in range(int(RETRY["outer"])):
+        if time.time() >= deadline:
+            print(f"  [超时] {symbol} 已达联网时间预算 "
+                  f"{RETRY['budget']:.0f}s，改用本地缓存。")
+            break
+        try:
+            if verbose:
+                print(f"  下载 {symbol} {interval} ...（第 {rnd+1}/{RETRY['outer']} 轮）")
+            bars = fetch_klines(symbol, interval, verbose=verbose, deadline=deadline)
+            if bars:
+                try:
+                    save_csv(bars, path)
+                except Exception as e:
+                    print(f"  [警告] 缓存写入失败：{e}")
+                return bars, "api", _stale_days(bars)
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+            if verbose:
+                print(f"  [警告] {symbol} 第 {rnd+1} 轮下载失败：{last_err[:100]}")
+            w = 5 * (rnd + 1) + random.uniform(0, 2)
+            # 睡完还在预算内才值得重试，否则直接跳出走缓存
+            if rnd < int(RETRY["outer"]) - 1 and time.time() + w < deadline:
+                if verbose:
+                    print(f"          {w:.1f}s 后整轮重试 ...", flush=True)
+                time.sleep(w)
+
+    if cache:
+        print(f"  [降级] {symbol} 联网失败，改用本地缓存（最后一根 "
+              f"{cache[-1]['dt']}）。信号可能不是最新的。")
+        return cache, "cache(兜底)", _stale_days(cache)
+    raise RuntimeError(f"{symbol} 联网下载失败且无本地缓存：{last_err[:120]}")
+
+
+def _stale_days(bars: list[dict]) -> float:
+    """最后一根 K 线距离现在多少天（UTC 口径）。"""
+    if not bars:
+        return 999.0
+    try:
+        t = calendar.timegm(time.strptime(bars[-1]["dt"], "%Y-%m-%d %H:%M:%S"))
+        return (time.time() - t) / 86400.0
+    except Exception:
+        return 999.0
+
+
+# ══════════════════════════ 2. 指标 ══════════════════════════
+def ema(vals: list[float], n: int) -> list[float]:
+    k = 2.0 / (n + 1)
+    out = [float("nan")] * len(vals)
+    if len(vals) < n:
+        return out
+    prev = sum(vals[:n]) / n
+    out[n - 1] = prev
+    for i in range(n, len(vals)):
+        prev = vals[i] * k + prev * (1 - k)
+        out[i] = prev
+    return out
+
+
+def macd(closes: list[float], fast=12, slow=26, signal=9):
+    """返回 (macd线, 信号线, 柱)。信号线的 EMA 从 macd 有效值起算，避免 NaN 污染。"""
+    ef, es = ema(closes, fast), ema(closes, slow)
+    line = [ef[i] - es[i] if not (math.isnan(ef[i]) or math.isnan(es[i])) else float("nan")
+            for i in range(len(closes))]
+    sig = [float("nan")] * len(closes)
+    k = 2.0 / (signal + 1)
+    buf, prev, started = [], None, False
+    for i, v in enumerate(line):
+        if math.isnan(v):
+            continue
+        if not started:
+            buf.append(v)
+            if len(buf) == signal:
+                prev = sum(buf) / signal
+                sig[i] = prev
+                started = True
+        else:
+            prev = v * k + prev * (1 - k)
+            sig[i] = prev
+    hist = [line[i] - sig[i] for i in range(len(closes))]
+    return line, sig, hist
+
+
+def atr(bars: list[dict], n: int = 14) -> list[float]:
+    N = len(bars)
+    tr = [float("nan")] * N
+    for i in range(1, N):
+        pc = bars[i - 1]["c"]
+        tr[i] = max(bars[i]["h"] - bars[i]["l"], abs(bars[i]["h"] - pc), abs(bars[i]["l"] - pc))
+    out = [float("nan")] * N
+    if N < n + 1:
+        return out
+    out[n] = sum(tr[1:n + 1]) / n
+    for i in range(n + 1, N):
+        out[i] = (out[i - 1] * (n - 1) + tr[i]) / n
+    return out
+
+
+def compute_indicators(bars: list[dict], p: dict) -> dict:
+    closes = [b["c"] for b in bars]
+    line, sig, hist = macd(closes, p["macd_fast"], p["macd_slow"], p["macd_signal"])
+    return {
+        "close": closes,
+        "macd": line, "signal": sig, "hist": hist,
+        "ema_trend": ema(closes, p["trend_ema"]),
+        "atr": atr(bars, p["atr_n"]),
+    }
+
+
+# ══════════════════════════ 3. 信号 ══════════════════════════
+def regime_on(ind: dict, i: int) -> bool:
+    """是否处于「应持有」状态：收盘 > EMA(200) 且 MACD 快线 > 0。"""
+    c = ind["close"][i]
+    e = ind["ema_trend"][i]
+    m = ind["macd"][i]
+    if math.isnan(e) or math.isnan(m):
+        return False
+    return c > e and m > 0
+
+
+def interval_seconds(interval: str) -> int:
+    """把 '1d'/'4h'/'1h'/'15m' 转成秒。"""
+    unit = interval[-1]
+    n = int(interval[:-1] or 1)
+    return n * {"m": 60, "h": 3600, "d": 86400, "w": 604800}.get(unit, 86400)
+
+
+def last_bar_closed(bars: list[dict], interval: str) -> bool:
+    """
+    最新一根 K 线是否已经收盘。
+
+    实盘必须区分：日线的 '2026-09-29 00:00:00' 这根要到 UTC 次日 00:00 才定盘，
+    白天跑脚本时它的 close 只是当前价，收盘前还会变。用它发信号 = 误报。
+    """
+    try:
+        # dt 是 UTC 时间字符串，必须用 timegm（mktime 会按本地时区解释，会错 8 小时）
+        st_utc = calendar.timegm(time.strptime(bars[-1]["dt"], "%Y-%m-%d %H:%M:%S"))
+    except Exception:
+        return True
+    return time.time() >= st_utc + interval_seconds(interval)
+
+
+def current_signal(bars: list[dict], p: dict | None = None) -> dict:
+    """返回最新一根 K 线的策略状态，用于实盘判断。"""
+    p = dict(PARAMS, **(p or {}))
+    ind = compute_indicators(bars, p)
+    i = len(bars) - 1
+    on = regime_on(ind, i)
+    c, e, m = ind["close"][i], ind["ema_trend"][i], ind["macd"][i]
+    dea = ind["signal"][i]
+    hist = m - dea if not (math.isnan(m) or math.isnan(dea)) else float("nan")
+    return {
+        "date": bars[i]["dt"],
+        "close": c,
+        "ema_trend": e,
+        "macd": m,           # DIF 快线 —— 策略用的是这一条
+        "dea": dea,          # DEA 慢线（信号线）
+        "hist": hist,        # 柱 = DIF - DEA（币安图表上最显眼的那根柱子，显示值 ×2）
+        "atr": ind["atr"][i],
+        "price_above_ema": (not math.isnan(e)) and c > e,
+        "macd_above_zero": (not math.isnan(m)) and m > 0,
+        "action": "持有 / 买入" if on else "空仓 / 离场",
+        "should_hold": on,
+    }
+
+
+# ══════════════════════════ 4. 回测引擎 ══════════════════════════
+def backtest(bars: list[dict], p: dict | None = None, verbose: bool = False) -> dict:
+    """
+    事件驱动回测。
+
+    【无前视偏差的执行约定】
+      · 趋势信号在第 i 根【收盘】确认 → 第 i+1 根【开盘】成交（入场与离场都是）
+      · 唯一例外：黑天鹅硬止损是【挂单】，价格日内触及即成交 —— 这是真实可执行的
+    """
+    p = dict(PARAMS, **(p or {}))
+    ind = compute_indicators(bars, p)
+    n = len(bars)
+    fee, slip = p["fee"], p["slip"]
+
+    cash = p["init_capital"]
+    pos = None
+    pending_entry = None   # 待入场：次日开盘执行
+    pending_exit = None    # 待离场：次日开盘执行（收盘确认的趋势信号）
+    off_count = 0
+    trades, equity, dates = [], [], []
+
+    def _sell(i, px_raw, reason, bar_dt):
+        """按给定价格平仓并记账。"""
+        nonlocal cash, pos, pending_exit, off_count
+        px = px_raw * (1 - slip)
+        proceeds = pos["shares"] * px * (1 - fee)
+        cash += proceeds
+        trades.append({
+            "entry_dt": pos["entry_dt"], "exit_dt": bar_dt,
+            "entry": pos["entry"], "exit": px,
+            "ret": px / pos["entry"] - 1,
+            "pnl": proceeds - pos["cost"],
+            "bars_held": i - pos["entry_i"],
+            "reason": reason,
+            "mfe": pos["peak"] / pos["entry"] - 1,
+        })
+        pos, pending_exit, off_count = None, None, 0
+
+    for i in range(n):
+        b = bars[i]
+        o_, h_, l_, c_ = b["o"], b["h"], b["l"], b["c"]
+        et = ind["ema_trend"][i]
+        macd_i = ind["macd"][i]
+
+        if pos is not None:
+            pos["peak"] = max(pos["peak"], h_)
+
+        # ── A. 执行前一根收盘确认的离场（次日开盘成交）──
+        if pos is not None and pending_exit is not None and i == pending_exit:
+            _sell(i, o_, "趋势破坏", b["dt"])
+
+        # ── B. 硬止损（挂单，日内触及即成交；跳空优先）──
+        if pos is not None and p["hard_sl"] > 0:
+            stop = pos["entry"] * (1 - p["hard_sl"])
+            if o_ <= stop:
+                _sell(i, o_, "硬止损(跳空)", b["dt"])
+            elif l_ <= stop:
+                _sell(i, stop, "硬止损", b["dt"])
+
+        # ── C. 执行前一根收盘确认的入场（次日开盘成交）──
+        if pos is None and pending_entry is not None and i == pending_entry:
+            px = o_ * (1 + slip)
+            invest = cash * p["capital_frac"]
+            shares = invest * (1 - fee) / px
+            if shares > 0:
+                pos = {"entry": px, "shares": shares, "cost": invest,
+                       "entry_i": i, "entry_dt": b["dt"], "peak": max(o_, c_)}
+                cash -= invest
+            pending_entry = None
+        elif pending_entry is not None and i > pending_entry:
+            pending_entry = None
+
+        # ── D. 收盘后判定信号 ──
+        if pos is not None:
+            if pending_exit is None:
+                off = ((not math.isnan(et)) and c_ < et) or \
+                      ((not math.isnan(macd_i)) and macd_i < 0)
+                if off:
+                    off_count += 1
+                    if off_count >= p["exit_confirm"]:
+                        pending_exit = i + 1
+                else:
+                    off_count = 0
+        else:
+            if pending_entry is None and i < n - 1 and regime_on(ind, i):
+                pending_entry = i + 1
+
+        equity.append(cash + (pos["shares"] * c_ if pos else 0.0))
+        dates.append(b["dt"])
+
+    # 期末强制平仓
+    if pos is not None:
+        px = bars[-1]["c"] * (1 - slip)
+        proceeds = pos["shares"] * px * (1 - fee)
+        cash += proceeds
+        trades.append({"entry_dt": pos["entry_dt"], "exit_dt": bars[-1]["dt"],
+                       "entry": pos["entry"], "exit": px, "ret": px / pos["entry"] - 1,
+                       "pnl": proceeds - pos["cost"], "bars_held": n - 1 - pos["entry_i"],
+                       "reason": "期末持仓", "mfe": pos["peak"] / pos["entry"] - 1})
+        equity[-1] = cash
+
+    return {"equity": equity, "dates": dates, "trades": trades, "params": p, "ind": ind}
+
+
+def buy_hold(bars: list[dict], p: dict | None = None) -> dict:
+    """买入持有基准（同样扣成本）。"""
+    p = dict(PARAMS, **(p or {}))
+    px0 = bars[0]["o"] * (1 + p["slip"])
+    shares = p["init_capital"] * (1 - p["fee"]) / px0
+    return {"equity": [shares * b["c"] for b in bars],
+            "dates": [b["dt"] for b in bars], "trades": []}
+
+
+# ══════════════════════════ 5. 绩效统计 ══════════════════════════
+def max_drawdown(eq: list[float]) -> float:
+    peak, mdd = eq[0], 0.0
+    for v in eq:
+        peak = max(peak, v)
+        mdd = max(mdd, (peak - v) / peak)
+    return mdd
+
+
+def stats(res: dict, bars_per_year: float = 365.0) -> dict:
+    eq, tr = res["equity"], res["trades"]
+    if not eq:
+        return {}
+    years = len(eq) / bars_per_year
+    total = eq[-1] / eq[0] - 1
+    cagr = (eq[-1] / eq[0]) ** (1 / max(years, 1e-9)) - 1
+    mdd = max_drawdown(eq)
+
+    wins = [t for t in tr if t["pnl"] > 0]
+    losses = [t for t in tr if t["pnl"] <= 0]
+    gp = sum(t["pnl"] for t in wins)
+    gl = -sum(t["pnl"] for t in losses)
+
+    rets = [eq[i] / eq[i - 1] - 1 for i in range(1, len(eq)) if eq[i - 1] > 0]
+    sharpe = 0.0
+    if rets:
+        mu = sum(rets) / len(rets)
+        sd = math.sqrt(sum((r - mu) ** 2 for r in rets) / max(len(rets) - 1, 1))
+        if sd > 0:
+            sharpe = mu / sd * math.sqrt(bars_per_year)
+
+    # 最大连续亏损
+    cur = mx = 0
+    for t in tr:
+        cur = cur + 1 if t["pnl"] <= 0 else 0
+        mx = max(mx, cur)
+
+    return {
+        "final_equity": eq[-1], "total_return": total, "cagr": cagr,
+        "max_drawdown": mdd, "calmar": cagr / mdd if mdd > 0 else 0.0,
+        "sharpe": sharpe, "n_trades": len(tr),
+        "winrate": len(wins) / len(tr) if tr else 0.0,
+        "profit_factor": gp / gl if gl > 0 else float("inf"),
+        "avg_hold": sum(t["bars_held"] for t in tr) / len(tr) if tr else 0.0,
+        "exposure": min(sum(t["bars_held"] for t in tr) / len(eq), 1.0),
+        "max_consec_loss": mx,
+        "exit_reasons": {r: sum(1 for t in tr if t["reason"] == r)
+                         for r in {t["reason"] for t in tr}},
+    }
+
+
+def yearly(res: dict) -> dict:
+    eq, dates = res["equity"], res["dates"]
+    out, prev, start = {}, None, eq[0]
+    for i, d in enumerate(dates):
+        y = d[:4]
+        if prev is None:
+            prev = y
+        if y != prev:
+            out[prev] = eq[i - 1] / start - 1
+            prev, start = y, eq[i - 1]
+    if prev:
+        out[prev] = eq[-1] / start - 1
+    return out
+
+
+# ══════════════════════════ 6. 输出 ══════════════════════════
+def fmt_pct(v: float, sign: bool = True) -> str:
+    return f"{v*100:+.1f}%" if sign else f"{v*100:.1f}%"
+
+
+def print_result(name: str, bars: list[dict], p: dict) -> dict:
+    res = backtest(bars, p)
+    s = stats(res)
+    bh = buy_hold(bars, p)
+    sb = stats(bh)
+
+    print(f"\n{'='*78}")
+    print(f" {name}   {bars[0]['dt'][:10]} → {bars[-1]['dt'][:10]}  "
+          f"({len(bars)/365:.1f} 年, {len(bars)} 根)")
+    print(f"{'='*78}")
+    print(f"  {'':22}{'总收益':>12}{'年化':>10}{'最大回撤':>11}{'Calmar':>9}{'夏普':>8}{'笔数':>7}{'胜率':>8}")
+    print(f"  {'MACD-X 策略':22}{s['total_return']*100:>11,.0f}%{s['cagr']*100:>9.1f}%"
+          f"{s['max_drawdown']*100:>10.1f}%{s['calmar']:>9.2f}{s['sharpe']:>8.2f}"
+          f"{s['n_trades']:>7}{s['winrate']*100:>7.1f}%")
+    print(f"  {'买入持有':22}{sb['total_return']*100:>11,.0f}%{sb['cagr']*100:>9.1f}%"
+          f"{sb['max_drawdown']*100:>10.1f}%{sb['calmar']:>9.2f}{sb['sharpe']:>8.2f}{0:>7}{'-':>8}")
+    print(f"  ── 策略年化 / 持有年化 = {s['cagr']/sb['cagr']:.2f}x    "
+          f"策略回撤 / 持有回撤 = {s['max_drawdown']/sb['max_drawdown']:.2f}x")
+    print(f"  ── 盈亏比 {s['profit_factor']:.2f}   平均持仓 {s['avg_hold']:.0f} 根   "
+          f"持仓时间占比 {s['exposure']*100:.1f}%   最大连亏 {s['max_consec_loss']} 笔")
+    print(f"  ── 出场原因: {s['exit_reasons']}")
+    yr = yearly(res)
+    print("  ── 年度: " + "  ".join(f"{k}:{v*100:+.0f}%" for k, v in sorted(yr.items()) if k != "2017"))
+    return {"stats": s, "bh": sb, "yearly": yr, "res": res}
+
+
+def main():
+    ap = argparse.ArgumentParser(description="MACD-X 加密货币趋势跟随策略")
+    ap.add_argument("--symbols", nargs="*",
+                    default=["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "DOGEUSDT"])
+    ap.add_argument("--symbol", default=None, help="只跑单个标的")
+    ap.add_argument("--interval", default="1d")
+    ap.add_argument("--signal", action="store_true", help="只输出当前信号，不回测")
+    ap.add_argument("--no-fetch", action="store_true", help="使用本地 data/ 缓存，不联网")
+    ap.add_argument("--trend-ema", type=int, default=None, help="覆盖趋势均线周期")
+    ap.add_argument("--confirm", type=int, default=None, help="覆盖离场确认根数")
+    ap.add_argument("--no-mail", action="store_true", help="本次不发送邮件")
+    ap.add_argument("--no-daily", action="store_true",
+                    help="关闭每日推送：只在方向变化时发信（默认每天都发一条）")
+    ap.add_argument("--include-today", action="store_true",
+                    help="把尚未收盘的最新一根 K 线也算进信号（默认剔除，避免盘中误报）")
+    ap.add_argument("--no-proxy", action="store_true", help="本次不走代理（强制直连）")
+    ap.add_argument("--proxy", default=None,
+                    help="覆盖代理地址，例如 http://127.0.0.1:7897")
+    ap.add_argument("--retries", type=int, default=None,
+                    help="覆盖每页最大重试次数（默认 6）")
+    ap.add_argument("--test-mail", action="store_true", help="发送一封测试邮件后退出")
+    ap.add_argument("--capital", type=float, default=1000.0,
+                    help="【单个标的】的分配资金，用于计算建议下单量，默认 1000。"
+                         "如果它是从总资金均分来的，用 --total-capital 自动算")
+    ap.add_argument("--total-capital", type=float, default=None,
+                    help="账户总资金。给了它就会自动 ÷ 标的数量，得到每个标的的分配额。"
+                         "例：1000u 跑 5 个标的 -> 每个 200u")
+    ap.add_argument("--frac", type=float, default=1.0,
+                    help="仓位比例，默认 1.0 = 满仓（与回测假设一致）。"
+                         "小于 1 会稀释收益，且实测风险调整后并不更优")
+    ap.add_argument("--log-file", default=None,
+                    help="把本次输出同时写入该文件（UTF-8 带 BOM），定时任务用")
+    # ── 实盘下单（默认全关，双重开关）──
+    ap.add_argument("--trade", action="store_true",
+                    help="启用币安下单模块（此时仍是演练，只打印不下单）")
+    ap.add_argument("--live", action="store_true",
+                    help="【危险】配合 --trade 才真实下单，会花真钱")
+    ap.add_argument("--testnet", action="store_true",
+                    help="用币安测试网（假钱），上线前先用它跑通全流程")
+    ap.add_argument("--trade-proxy", default=None,
+                    help="下单专用代理，如 http://127.0.0.1:7897；不填则直连")
+    ap.add_argument("--max-order", type=float, default=None,
+                    help="单笔投入上限（USDT），防止手滑下大单")
+    args = ap.parse_args()
+
+    # ── 交易开关装配 ──
+    TRADE_CONFIG["enabled"] = bool(args.trade)
+    TRADE_CONFIG["live"] = bool(args.live)
+    TRADE_CONFIG["testnet"] = bool(args.testnet)
+    TRADE_CONFIG["proxy"] = args.trade_proxy
+    TRADE_CONFIG["max_order_usdt"] = args.max_order
+    if args.live and not args.trade:
+        print("⚠ 只给了 --live 没给 --trade：仍按【演练】处理（双重开关设计）。")
+
+    if args.log_file and _LOG_FP is None:   # __main__ 里可能已经开过了
+        start_logging(args.log_file)
+        _log_header(sys.argv)
+
+    # ── 代理与重试设置（必须在任何网络请求之前）──
+    if args.proxy:
+        apply_proxy(True, http=args.proxy, https=args.proxy)
+    elif args.no_proxy:
+        apply_proxy(False)
+    else:
+        apply_proxy(PROXY["enabled"])
+    if args.retries:
+        RETRY["per_page"] = max(1, args.retries)
+
+    if args.signal:
+        print(f"\n[MACD-X 现货] {now_cn()}（北京时间）  代理: "
+              f"{'开 ' + PROXY['http'] if PROXY['enabled'] else '关'}   "
+              f"重试: {RETRY['per_page']} 次/页")
+
+    if args.test_mail:
+        ok = send_email("[MACD-X 现货] 邮件推送测试",
+                        "如果你收到这封邮件，说明 MACD-X 的邮件推送配置正常。\n"
+                        f"发件：{EMAIL_CONFIG['from']}\n"
+                        f"收件：{EMAIL_CONFIG['to']}\n"
+                        f"服务器：{EMAIL_CONFIG['server']}:{EMAIL_CONFIG['port']}\n\n"
+                        "之后只会在「买入 / 离场」信号出现时收到邮件。")
+        print("测试邮件发送成功 ✓" if ok else "测试邮件发送失败 ✗（请检查授权码与服务器端口）")
+        return
+
+    p = dict(PARAMS)
+    if args.trend_ema:
+        p["trend_ema"] = args.trend_ema
+    if args.confirm is not None:
+        p["exit_confirm"] = args.confirm
+
+    symbols = [args.symbol] if args.symbol else args.symbols
+    bpy = 365.0 if args.interval.endswith("d") else 365.0 * 6  # 日线/4h 的年化因子
+
+    # ── 资金分配 ──
+    # 关键：--capital 是【单个标的】的分配额，不是账户总资金。
+    # 5 个标的各 1000U 意味着需要 5000U，用户很容易误以为只需 1000U。
+    # 用 --total-capital 明确表达"我账户一共多少钱"，脚本自动均分。
+    per_cap = args.capital
+    if args.total_capital is not None and len(symbols) > 0:
+        per_cap = args.total_capital / len(symbols)
+        print(f"  [资金] 总资金 {args.total_capital:,.0f} U ÷ {len(symbols)} 个标的 "
+              f"= 每个标的 {per_cap:,.0f} U")
+        if per_cap * args.frac < 10:
+            print(f"  [提示] 每个标的只有 {per_cap*args.frac:,.0f} U，"
+                  f"接近币安最小下单额（约 5~10 U），建议减少标的数量。")
+
+    # 先把所有标的的信号收集起来，循环结束后**合并成一封**汇总邮件发出。
+    # 不在这里逐个发信 —— 5 个标的发 5 封邮件既吵又难看。
+    mail_items: list[dict] = []
+
+    for sym in symbols:
+        try:
+            bars, src, stale = load_bars(sym, args.interval, args.no_fetch)
+        except Exception as e:
+            print(f"  [跳过] {sym}: {e}")
+            continue
+        if len(bars) < p["trend_ema"] + 50:
+            print(f"  [跳过] {sym} 数据不足（{len(bars)} 根）")
+            continue
+
+        if args.signal:
+            sig_bars = bars
+            if not args.include_today and not last_bar_closed(sig_bars, args.interval):
+                sig_bars = sig_bars[:-1]
+                print(f"\n  [注意] 最新一根 {args.interval} K 线尚未收盘，"
+                      f"已自动剔除，信号基于上一根已收盘 K 线"
+                      f"（{sig_bars[-1]['dt']}）。用 --include-today 可强制包含。")
+            if len(sig_bars) < p["trend_ema"] + 50:
+                print(f"  [跳过] {sym} 已收盘数据不足（{len(sig_bars)} 根）")
+                continue
+            sg = current_signal(sig_bars, p)
+            print(f"\n【{sym} 当前信号】  数据源: {src}" +
+                  (f"  ⚠ 数据已滞后 {stale:.1f} 天" if stale > 2 else ""))
+            print(f"  最新 K 线      : {sg['date']}")
+            print(f"  收盘价         : ${sg['close']:,.4f}")
+            print(f"  EMA({p['trend_ema']})     : ${sg['ema_trend']:,.4f}   "
+                  f"价格{'在均线上方 ✓' if sg['price_above_ema'] else '在均线下方 ✗'}")
+            print(f"  DIF 快线       : {sg['macd']:+.4f}   "
+                  f"{'在零轴上方 ✓' if sg['macd_above_zero'] else '在零轴下方 ✗'}   ← 策略用这条")
+            print(f"  DEA 慢线       : {sg['dea']:+.4f}")
+            print(f"  MACD 柱        : {sg['hist']*2:+.4f}   ← 币安图表那根柱子（显示值 ×2）")
+            print(f"  ATR(14)        : ${sg['atr']:,.4f}")
+            print(f"  →  策略动作     : 【{sg['action']}】")
+            # 实盘下单：每天都跑（幂等），默认演练。
+            # 【顺序很重要】先下单拿到真实成交均价，再发邮件，
+            #   这样邮件里的「开仓价（下单价）」就是交易所的实际成交价，而不是估算值。
+            fill_price = None
+            if TRADE_CONFIG["enabled"]:
+                if stale > 2:
+                    print("  [交易] 数据来自本地缓存且已滞后，为安全起见本次不下单。")
+                else:
+                    rep = trade_if_needed(sym, sg, per_cap, args.frac)
+                    if rep:
+                        # 只有真的成交（BUY/SELL）才采信它的均价
+                        if rep.get("action") in ("BUY", "SELL") and rep.get("avg_price"):
+                            fill_price = float(rep["avg_price"])
+            if not args.no_mail:
+                it = collect_signal(sym, args.interval, sg,
+                                    capital=per_cap, frac=args.frac,
+                                    src=src, stale=stale,
+                                    total_capital=args.total_capital,
+                                    n_symbols=len(symbols),
+                                    daily=not args.no_daily,
+                                    fill_price=fill_price)
+                if it:
+                    mail_items.append(it)
+        else:
+            print_result(sym, bars, p)
+
+    # ── 全部标的跑完，发一封汇总邮件 ──
+    if args.signal and not args.no_mail:
+        print(f"\n{'─'*78}")
+        send_digest(mail_items, args.interval)
+
+    if not args.signal:
+        print(f"\n{'='*78}")
+        print(" 说明：策略为趋势状态跟随，年均约 4 笔交易，不需要盯盘。")
+        print(" 历史回测不代表未来收益，本脚本仅供研究，不构成投资建议。")
+        print(f"{'='*78}\n")
+
+
+if __name__ == "__main__":
+    _rc = 0
+    # 先把 --log-file 捞出来，这样连 argparse 报错都能记进日志
+    _lf = _prescan_log_file(sys.argv)
+    if _lf and _LOG_FP is None:
+        try:
+            start_logging(_lf)
+            _log_header(sys.argv)
+        except Exception as e:
+            print(f"[警告] 日志文件打开失败：{e}")
+    try:
+        main()
+    except SystemExit as e:
+        _rc = e.code if isinstance(e.code, int) else 0
+        _log_footer(_rc)
+        raise
+    except BaseException:
+        traceback.print_exc()
+        _rc = 1
+        _log_footer(_rc)
+        raise
+    _log_footer(_rc)

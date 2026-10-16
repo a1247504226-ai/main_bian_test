@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>多币种探索报告：ETH / 前十币种 比 BTC 更好吗</title>
+<style>
+:root{
+  --bg:#f5f6f8; --card:#ffffff; --ink:#1a1d24; --ink2:#5a6070; --line:#e3e6ec;
+  --red:#d5342b; --redbg:#fdf0ef; --green:#0f8a52; --greenbg:#eef8f2;
+  --blue:#2563c9; --bluebg:#eef3fd; --amber:#a8700a; --amberbg:#fdf6e6;
+  --grey:#8b91a1;
+}
+*{box-sizing:border-box;-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Helvetica Neue",Arial,sans-serif;
+  font-size:16px;line-height:1.75;}
+.wrap{max-width:960px;margin:0 auto;padding:20px 14px 60px;}
+header{background:linear-gradient(135deg,#1f2937,#374151);color:#fff;border-radius:14px;
+  padding:26px 22px;margin-bottom:18px;}
+header h1{margin:0 0 8px;font-size:23px;line-height:1.4;letter-spacing:.3px}
+header p{margin:0;font-size:14px;color:#c7cdd8;line-height:1.7}
+section{background:var(--card);border-radius:14px;padding:20px 18px;margin-bottom:16px;
+  box-shadow:0 1px 3px rgba(16,24,40,.06);}
+h2{font-size:19px;margin:0 0 6px;padding-bottom:10px;border-bottom:2px solid var(--line);
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+h2 .num{display:inline-flex;width:26px;height:26px;border-radius:8px;background:var(--blue);
+  color:#fff;font-size:14px;align-items:center;justify-content:center;flex:0 0 auto;font-weight:700}
+h3{font-size:16px;margin:20px 0 8px;color:var(--ink)}
+p{margin:10px 0}
+.sub{color:var(--ink2);font-size:14px;margin:6px 0 14px}
+table{width:100%;border-collapse:collapse;font-size:13.5px;margin:12px 0;
+  display:block;overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch}
+table.wrapcells{white-space:normal}
+th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:right}
+th{background:#f0f2f6;color:var(--ink2);font-weight:600;font-size:12.5px;
+  position:sticky;top:0;white-space:nowrap}
+th:first-child,td:first-child{text-align:left;font-weight:600;position:sticky;left:0;
+  background:var(--card);z-index:1}
+th:first-child{background:#f0f2f6}
+tbody tr:nth-child(even) td{background:#fafbfc}
+tbody tr:nth-child(even) td:first-child{background:#fafbfc}
+.up{color:var(--red);font-weight:700}
+.down{color:var(--green);font-weight:700}
+.bad{color:var(--green);font-weight:700}
+.good{color:var(--red);font-weight:700}
+.hl{background:#fffbe6 !important}
+.box{border-radius:10px;padding:13px 15px;margin:14px 0;font-size:14.5px;line-height:1.75}
+.box b{font-weight:700}
+.warn{background:var(--amberbg);border-left:4px solid var(--amber);color:#6b4a05}
+.key{background:var(--bluebg);border-left:4px solid var(--blue);color:#173d7a}
+.danger{background:var(--redbg);border-left:4px solid var(--red);color:#8f1f18}
+.ok{background:var(--greenbg);border-left:4px solid var(--green);color:#0a5c38}
+ul,ol{margin:10px 0;padding-left:22px}
+li{margin:6px 0}
+.tag{display:inline-block;font-size:11.5px;padding:2px 8px;border-radius:20px;
+  background:var(--bluebg);color:var(--blue);font-weight:600;vertical-align:middle}
+.tag.r{background:var(--redbg);color:var(--red)}
+.tag.g{background:var(--greenbg);color:var(--green)}
+.tag.a{background:var(--amberbg);color:var(--amber)}
+.big{font-size:20px;font-weight:800;letter-spacing:-.3px}
+footer{color:var(--grey);font-size:12.5px;text-align:center;padding:18px 10px;line-height:1.9}
+hr{border:0;border-top:1px dashed var(--line);margin:20px 0}
+@media(max-width:520px){
+  body{font-size:15px}
+  header h1{font-size:19.5px}
+  h2{font-size:17px}
+  .wrap{padding:12px 9px 40px}
+  section{padding:16px 12px;border-radius:12px}
+  th,td{padding:7px 8px;font-size:12.8px}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>多币种探索：ETH / 市值前十币对，真能「收益更高、更稳定」吗？</h1>
+  <p>同一套策略（5 组 EMA 净方向 · 波动率目标仓位 · 3× 逐仓 · 逐仓爆仓 · 含手续费/滑点/资金费）<br>
+  样本：BTC + 今天市值前十（10 币）+ 2021 年当红/已崩盘/已下架（17 币）<br>
+  数据：币安现货日线，最长 2017-08 → 2026-10（9.1 年）</p>
+</header>
+
+<!-- ======================= 结论先行 ======================= -->
+<section>
+  <h2><span class="num">0</span>结论先行（30 秒版）</h2>
+  <table class="wrapcells">
+    <thead><tr><th>你的问题</th><th>答案</th><th>一句话理由</th></tr></thead>
+    <tbody>
+      <tr><td>换成 ETH 是不是更好？</td><td class="bad">不更好，基本打平</td>
+        <td>9 年 20.9× vs BTC 17.7×，但回撤更大、单笔逆行更深（−38.8% vs −30.9%）</td></tr>
+      <tr><td>跑前十币对，收益更高吗？</td><td class="bad">不可靠</td>
+        <td>只有「2021 年初起跑」这一个窗口赢；换 7 个起始日，<b>BTC 全赢或打平</b></td></tr>
+      <tr><td>跑前十币对，更稳定吗？</td><td class="tag a">一半对一半错</td>
+        <td><b>回撤确实更小</b>（33% vs 39%，8 个窗口都成立）；<br>
+            但<b>爆仓次数多 26 倍</b>（26 次 vs 0 次），且会扎堆</td></tr>
+      <tr><td>那到底该怎么配？</td><td class="good">4 个大币等权</td>
+        <td>BTC+ETH+BNB+SOL：<b>8 个窗口里 8 次收益更高、8 次回撤更低</b>，爆仓仅 0–5 次</td></tr>
+    </tbody>
+  </table>
+  <div class="box key">
+    <b>最反直觉的一点：</b>「今天的前十」是<b>后视镜</b>。把 2021 年当时的前十/当红币拿来跑，
+    只有 <b>2.95×</b>；用今天的前十跑同一段，是 <b>8.78×</b>。差额不是策略赚的，是「事后知道谁活下来了」。
+  </div>
+</section>
+
+<!-- ======================= 1 ETH ======================= -->
+<section>
+  <h2><span class="num">1</span>ETH vs BTC：基本打平，不值得换</h2>
+  <p class="sub">B 档（目标日波动 3%）、3× 逐仓、滚仓。两币数据都从 2017-08-18 开始，区间完全可比。</p>
+  <table>
+    <thead><tr><th>区间</th><th>币种</th><th>期末倍数</th><th>年化</th><th>最大回撤</th><th>Calmar</th><th>夏普</th><th>爆仓</th><th>最差单笔逆行</th></tr></thead>
+    <tbody>
+      <tr><td>全历史 8.9 年</td><td>BTC</td><td>17.74×</td><td>38.3%</td><td class="bad">51.2%</td><td>0.75</td><td>0.97</td><td>1</td><td class="good">−33.0%</td></tr>
+      <tr><td>全历史 8.9 年</td><td>ETH</td><td class="good">20.93×</td><td>40.9%</td><td class="good">50.2%</td><td>0.82</td><td>1.02</td><td>1</td><td class="bad">−38.8%</td></tr>
+      <tr class="hl"><td>近 5.8 年</td><td>BTC</td><td>2.33×</td><td>15.8%</td><td class="good">39.2%</td><td>0.40</td><td>0.58</td><td>0</td><td class="good">−30.9%</td></tr>
+      <tr class="hl"><td>近 5.8 年</td><td>ETH</td><td class="good">2.84×</td><td>19.8%</td><td class="bad">50.2%</td><td>0.40</td><td>0.66</td><td>1</td><td class="bad">−38.8%</td></tr>
+    </tbody>
+  </table>
+  <div class="box warn">
+    <b>怎么读：</b>ETH 收益高约 18%（9 年口径），但代价是<b>回撤更深、单笔逆行深 8 个百分点</b>。
+    近 5.8 年更明显：多赚 22%，回撤却从 39.2% 涨到 50.2%。<br>
+    <b>结论：ETH ≈ BTC，属于同一档，不构成升级理由。</b>为了这点收益差去改代码、改标的、重新验证，不划算。
+  </div>
+</section>
+
+<!-- ======================= 2 全历史 ======================= -->
+<section>
+  <h2><span class="num">2</span>前十币种 · 全历史（<span class="tag r">区间不可比，仅供感受</span>）</h2>
+  <p class="sub">每个币上市时间不同：BTC/ETH 有 8.9 年，SOL/AVAX/DOT 只有 5.8 年。这张表<b>不能直接横比</b>。</p>
+  <table>
+    <thead><tr><th>币种</th><th>起始</th><th>年数</th><th>期末倍数</th><th>年化</th><th>最大回撤</th><th>夏普</th><th>爆仓</th></tr></thead>
+    <tbody>
+      <tr><td>BNB</td><td>2018-02</td><td>8.6</td><td class="up">86.88×</td><td>67.6%</td><td>49.5%</td><td>1.21</td><td>1</td></tr>
+      <tr><td>ADA</td><td>2018-07</td><td>8.2</td><td class="up">55.01×</td><td>63.0%</td><td>43.3%</td><td>1.29</td><td>1</td></tr>
+      <tr><td>DOGE</td><td>2019-10</td><td>7.0</td><td class="up">34.15×</td><td>65.8%</td><td>62.7%</td><td>0.75</td><td>5</td></tr>
+      <tr><td>ETH</td><td>2017-11</td><td>8.9</td><td>20.93×</td><td>40.9%</td><td>50.2%</td><td>1.02</td><td>1</td></tr>
+      <tr><td>BTC</td><td>2017-11</td><td>8.9</td><td>17.74×</td><td>38.3%</td><td>51.2%</td><td>0.97</td><td>1</td></tr>
+      <tr><td>SOL</td><td>2020-11</td><td>5.9</td><td>14.59×</td><td>57.8%</td><td>44.7%</td><td>1.18</td><td>3</td></tr>
+      <tr><td>AVAX</td><td>2020-12</td><td>5.8</td><td>9.67×</td><td>48.2%</td><td>53.9%</td><td>1.02</td><td>4</td></tr>
+      <tr><td>DOT</td><td>2020-11</td><td>5.9</td><td>3.75×</td><td>25.3%</td><td>60.3%</td><td>0.75</td><td>3</td></tr>
+      <tr><td>LINK</td><td>2019-04</td><td>7.4</td><td>3.48×</td><td>18.2%</td><td>71.6%</td><td>0.58</td><td>6</td></tr>
+      <tr><td>LTC</td><td>2018-03</td><td>8.5</td><td>1.58×</td><td>5.5%</td><td>78.1%</td><td>0.34</td><td>4</td></tr>
+      <tr><td>XRP</td><td>2018-08</td><td>8.2</td><td class="down">0.39×</td><td class="down">−10.8%</td><td>81.0%</td><td>−0.03</td><td>11</td></tr>
+    </tbody>
+  </table>
+  <div class="box danger">
+    前十里有 <b>1 个是亏钱的（XRP，9 年 0.39×）</b>，1 个几乎白干（LTC 1.58×），
+    另有 3 个爆仓 ≥4 次。<b>「前十」从来不是「都赚钱」的同义词。</b>
+  </div>
+</section>
+
+<!-- ======================= 3 共同窗口 ======================= -->
+<section>
+  <h2><span class="num">3</span>共同窗口 2021-01-01 起（<span class="tag">这才是可比口径</span>）</h2>
+  <p class="sub">所有 11 个币都存在的区间，5.8 年。指标用全历史预热，只从 2021-01-01 开始算净值。</p>
+  <table>
+    <thead><tr><th>币种</th><th>期末倍数</th><th>年化</th><th>最大回撤</th><th>Calmar</th><th>夏普</th><th>爆仓</th></tr></thead>
+    <tbody>
+      <tr><td>BNB</td><td class="up">26.18×</td><td>76.2%</td><td>49.5%</td><td>1.54</td><td>1.25</td><td>1</td></tr>
+      <tr><td>DOGE</td><td class="up">19.22×</td><td>67.0%</td><td>62.7%</td><td>1.07</td><td>0.86</td><td class="bad">4</td></tr>
+      <tr><td>SOL</td><td class="up">15.12×</td><td>60.2%</td><td>44.7%</td><td>1.35</td><td>1.21</td><td>3</td></tr>
+      <tr><td>AVAX</td><td>10.11×</td><td>49.4%</td><td>53.9%</td><td>0.92</td><td>1.03</td><td class="bad">4</td></tr>
+      <tr><td>ADA</td><td>9.22×</td><td>47.0%</td><td>43.3%</td><td>1.09</td><td>1.11</td><td>1</td></tr>
+      <tr><td>ETH</td><td>2.84×</td><td>19.8%</td><td>50.2%</td><td>0.40</td><td>0.66</td><td>1</td></tr>
+      <tr><td>DOT</td><td>2.57×</td><td>17.8%</td><td>60.3%</td><td>0.30</td><td>0.62</td><td>3</td></tr>
+      <tr class="hl"><td>BTC</td><td>2.33×</td><td>15.8%</td><td class="good">39.2%</td><td>0.40</td><td>0.58</td><td class="good">0</td></tr>
+      <tr><td>LINK</td><td>1.20×</td><td>3.2%</td><td>63.0%</td><td>0.05</td><td>0.28</td><td>1</td></tr>
+      <tr><td>XRP</td><td class="down">0.64×</td><td class="down">−7.4%</td><td>81.0%</td><td>−0.09</td><td>0.04</td><td class="bad">5</td></tr>
+      <tr><td>LTC</td><td class="down">0.46×</td><td class="down">−12.5%</td><td>78.1%</td><td>−0.16</td><td>−0.10</td><td>3</td></tr>
+    </tbody>
+  </table>
+  <div class="box warn">
+    <b>看到 BNB 26× 先别激动。</b>这个窗口里 BNB 币价涨了 2016%、SOL 涨了 7894%、DOGE 涨了 1954%，
+    而 BTC 只涨 198%。<b>是这 5 年山寨跑赢了 BTC，不是策略在山寨上更灵。</b>
+  </div>
+</section>
+
+<!-- ======================= 4 稳健性 ======================= -->
+<section>
+  <h2><span class="num">4</span>★关键检验：换个起始日，结论会不会翻？</h2>
+  <p class="sub">同一套策略，只改「从哪天开始跑」。等权分配资金，各币独立跑、不调仓。</p>
+  <table>
+    <thead><tr><th>起始日</th><th>BTC 单跑</th><th>4 币组合<br>BTC+ETH+BNB+SOL</th><th>11 币组合<br>BTC+今天前十</th><th>谁赢</th></tr></thead>
+    <tbody>
+      <tr class="hl"><td>2021-01-01</td><td>2.34× / dd 39.2%</td><td class="up">11.72× / dd 39.2%</td><td>8.20× / dd 33.2%</td><td class="good">组合大胜</td></tr>
+      <tr><td>2021-07-01</td><td>1.93× / dd 39.2%</td><td class="up">3.22× / dd 34.7%</td><td>2.42× / dd 32.7%</td><td class="good">组合胜</td></tr>
+      <tr><td>2022-01-01</td><td>1.93× / dd 39.2%</td><td class="up">2.59× / dd 36.1%</td><td class="down">1.87× / dd 35.2%</td><td class="bad">BTC 赢 11 币</td></tr>
+      <tr><td>2022-07-01</td><td>1.58× / dd 39.2%</td><td class="up">1.83× / dd 36.8%</td><td class="down">1.52× / dd 36.4%</td><td class="bad">BTC 赢 11 币</td></tr>
+      <tr><td>2023-01-01</td><td class="up">2.24× / dd 39.2%</td><td class="up">2.43× / dd 31.9%</td><td class="down">1.85× / dd 30.1%</td><td class="bad">BTC 赢 11 币</td></tr>
+      <tr><td>2023-07-01</td><td>2.22× / dd 39.2%</td><td class="up">2.82× / dd 31.8%</td><td class="down">2.17× / dd 30.6%</td><td class="bad">BTC 赢 11 币</td></tr>
+      <tr><td>2024-01-01</td><td>1.45× / dd 39.2%</td><td class="up">1.79× / dd 32.6%</td><td>1.49× / dd 31.8%</td><td>打平</td></tr>
+      <tr><td>2024-07-01</td><td>1.20× / dd 39.2%</td><td class="up">1.44× / dd 23.6%</td><td>1.28× / dd 33.2%</td><td>打平</td></tr>
+    </tbody>
+  </table>
+  <div class="box danger">
+    <b>这是整份报告最重要的一张表。</b><br>
+    · <b>11 币组合（BTC+今天前十）在 5/8 个窗口里输给 BTC 单跑</b>，那个 8.20× 完全是「2021 年初起跑」的运气。<br>
+    · <b>4 币组合（BTC+ETH+BNB+SOL）在 8/8 个窗口里都赢</b>，而且回撤每次都更低（23.6%–39.2% vs 恒定 39.2%）。<br>
+    · 结论：<b>分散到「少数几个大币」是真有效；分散到「前十全买」是假有效。</b>
+  </div>
+</section>
+
+<!-- ======================= 5 组合 ======================= -->
+<section>
+  <h2><span class="num">5</span>组合层面：分散化的真实效果（2021-01-01 起 5.8 年）</h2>
+  <table>
+    <thead><tr><th>组合</th><th>币数</th><th>期末倍数</th><th>年化</th><th>组合最大回撤</th><th>总爆仓次数</th></tr></thead>
+    <tbody>
+      <tr><td>BTC 单跑</td><td>1</td><td>2.34×</td><td>15.9%</td><td>39.2%</td><td class="good">0</td></tr>
+      <tr><td>ETH 单跑</td><td>1</td><td>2.85×</td><td>19.9%</td><td>50.2%</td><td>1</td></tr>
+      <tr><td>BTC + ETH</td><td>2</td><td>2.59×</td><td>18.0%</td><td>43.5%</td><td>1</td></tr>
+      <tr class="hl"><td>BTC+ETH+BNB+SOL</td><td>4</td><td class="up">11.72×</td><td>53.3%</td><td>39.2%</td><td>5</td></tr>
+      <tr><td>BTC + 今天前十</td><td>11</td><td class="up">8.20×</td><td>44.1%</td><td class="good">33.2%</td><td class="bad">26</td></tr>
+      <tr><td>今天前十（不含 BTC）</td><td>10</td><td class="up">8.78×</td><td>45.8%</td><td class="good">33.6%</td><td class="bad">26</td></tr>
+    </tbody>
+  </table>
+  <div class="box ok">
+    <b>分散化确实降低了回撤</b>：11 币组合回撤 33.2%，比 BTC 单跑的 39.2% 低 6 个百分点，<b>且 8 个窗口全部成立</b>。
+    原因在下一节的相关性：各币策略日收益只有 0.2–0.55 的相关性，不是 0.99。<br>
+    <b>但代价是爆仓次数暴涨</b>：BTC 0 次 → 26 次。11 个币就是 11 个独立的 3× 逐仓仓位。
+  </div>
+</section>
+
+<!-- ======================= 6 幸存者偏差 ======================= -->
+<section>
+  <h2><span class="num">6</span>幸存者偏差检验：<span class="tag r">最容易被忽略的坑</span></h2>
+  <p class="sub">拉 17 个「2021 年前后当红、但今天已跌出前十 / 已崩盘 / 已下架」的币，跑同一策略同一窗口。</p>
+  <table>
+    <thead><tr><th>币种</th><th>期末倍数</th><th>年化</th><th>最大回撤</th><th>爆仓</th><th>窗口内币价</th><th>备注</th></tr></thead>
+    <tbody>
+      <tr><td>MATIC</td><td>11.42×</td><td>93.4%</td><td>45.5%</td><td>1</td><td class="up">+2058%</td><td>2024-09 已下架</td></tr>
+      <tr><td>VET</td><td>6.24×</td><td>37.4%</td><td>58.7%</td><td>4</td><td class="down">−53.5%</td><td></td></tr>
+      <tr><td>UNI</td><td>4.30×</td><td>28.8%</td><td>40.3%</td><td>5</td><td class="up">+75.0%</td><td></td></tr>
+      <tr><td>NEAR</td><td>4.09×</td><td>28.0%</td><td>68.1%</td><td>4</td><td class="up">+262%</td><td></td></tr>
+      <tr><td>THETA</td><td>3.89×</td><td>26.6%</td><td>52.7%</td><td>2</td><td class="down">−87.7%</td><td>币价崩了，策略反而赚</td></tr>
+      <tr><td>SHIB</td><td>2.87×</td><td>22.8%</td><td>49.1%</td><td>2</td><td class="down">−57.9%</td><td></td></tr>
+      <tr><td>FTT</td><td>2.60×</td><td>21.5%</td><td>68.6%</td><td class="bad">12</td><td class="down">−95.5%</td><td>FTX 暴雷，已下架</td></tr>
+      <tr><td>ETC</td><td>2.33×</td><td>15.8%</td><td>66.1%</td><td>2</td><td class="up">+58.7%</td><td></td></tr>
+      <tr><td>SRM</td><td>2.15×</td><td>49.5%</td><td>29.8%</td><td>3</td><td class="down">−76.6%</td><td>2022-11 已下架</td></tr>
+      <tr><td>ATOM</td><td>1.93×</td><td>12.1%</td><td>56.8%</td><td>3</td><td class="down">−72.7%</td><td></td></tr>
+      <tr><td>FIL</td><td>1.69×</td><td>9.6%</td><td>61.1%</td><td class="bad">6</td><td class="down">−95.5%</td><td></td></tr>
+      <tr><td>TRX</td><td>1.64×</td><td>9.0%</td><td>63.0%</td><td>3</td><td class="up">+1157%</td><td></td></tr>
+      <tr><td>LUNC</td><td>1.55×</td><td>12.2%</td><td>65.3%</td><td>2</td><td class="down">−89.7%</td><td>Terra 崩盘</td></tr>
+      <tr><td>ICP</td><td>1.13×</td><td>2.3%</td><td>78.1%</td><td>3</td><td class="down">−98.6%</td><td></td></tr>
+      <tr><td>XLM</td><td class="down">0.80×</td><td class="down">−3.7%</td><td>76.8%</td><td class="bad">6</td><td class="up">+73.3%</td><td></td></tr>
+      <tr><td>EOS</td><td class="down">0.77×</td><td class="down">−5.8%</td><td>53.7%</td><td>2</td><td class="down">−69.9%</td><td>2025-05 已下架</td></tr>
+      <tr><td>BCH</td><td class="down">0.71×</td><td class="down">−5.9%</td><td>67.8%</td><td>3</td><td class="down">−7.6%</td><td></td></tr>
+    </tbody>
+  </table>
+  <table class="wrapcells">
+    <thead><tr><th>等权对比</th><th>期末倍数</th></tr></thead>
+    <tbody>
+      <tr><td>2021 年当红 / 已下架 17 币等权</td><td class="down">2.95×</td></tr>
+      <tr class="hl"><td>今天前十 10 币等权</td><td class="up">8.78×</td></tr>
+    </tbody>
+  </table>
+  <div class="box warn">
+    <b>两个必须知道的事实：</b><br>
+    ① <b>差 3 倍。</b>「今天的前十」和「2021 年的前十」跑同一段行情，结果 8.78× vs 2.95×。
+    多出来的 3 倍，是<b>事后才知道谁活下来</b>带来的，不是策略能力。<br>
+    ② <b>但趋势跟踪策略抗崩盘。</b>FTT 币价 −95.5%，策略还赚 2.60×；THETA 币价 −87.7%，策略 3.89×；
+    FIL 币价 −95.5%，策略 1.69×。<b>因为策略会反手做空，币价归零它也能赚。</b>
+    真正亏钱的只有 3 个（XLM / EOS / BCH），都是「阴跌 + 反复假突破」的行情——这恰好是趋势策略最怕的。
+  </div>
+</section>
+
+<!-- ======================= 7 爆仓 & 相关性 ======================= -->
+<section>
+  <h2><span class="num">7</span>爆仓扎堆 &amp; 相关性：分散化的真实风险</h2>
+
+  <h3>7.1 各币爆仓日期（B 档，2021-01-01 起）</h3>
+  <table>
+    <thead><tr><th>币种</th><th>次数</th><th>爆仓日期</th></tr></thead>
+    <tbody>
+      <tr><td>BTC</td><td class="good">0</td><td>—</td></tr>
+      <tr><td>ETH</td><td>1</td><td>2021-05-26</td></tr>
+      <tr><td>BNB</td><td>1</td><td>2021-05-19</td></tr>
+      <tr><td>ADA</td><td>1</td><td>2025-03-02</td></tr>
+      <tr><td>LINK</td><td>1</td><td>2021-05-24</td></tr>
+      <tr><td>SOL</td><td>3</td><td>2021-05-23, 2021-06-03, 2022-11-08</td></tr>
+      <tr><td>DOT</td><td>3</td><td>2021-05-05, 2021-05-19, 2025-10-10</td></tr>
+      <tr><td>LTC</td><td>3</td><td>2023-06-30, 2025-02-03, 2025-10-10</td></tr>
+      <tr><td>DOGE</td><td>4</td><td>2021-06-02, 2021-09-07, 2022-11-27, 2025-10-10</td></tr>
+      <tr><td>AVAX</td><td>4</td><td>2021-04-28, 2021-05-19, 2022-11-09, 2025-10-10</td></tr>
+      <tr><td>XRP</td><td class="bad">5</td><td>2021-01-07, 2021-05-25, 2022-11-08, 2023-07-13, 2025-03-02</td></tr>
+    </tbody>
+  </table>
+  <div class="box danger">
+    <b>爆仓会扎堆（26 次里有 11 次集中在 4 天）：</b><br>
+    · 2021-05-19　<b>3 个币同时爆</b>（BNB / AVAX / DOT）<br>
+    · 2022-11-08　<b>2 个币同时爆</b>（SOL / XRP）—— FTX 暴雷<br>
+    · 2025-03-02　<b>2 个币同时爆</b>（XRP / ADA）<br>
+    · 2025-10-10　<b>4 个币同时爆</b>（DOGE / AVAX / DOT / LTC）<br>
+    <b>含义：</b>平时各币不同步（相关性 0.2–0.4），但<b>崩盘那天会一起爆</b>。
+    跑 11 个币不是「风险摊薄 11 份」，而是「极端日一次性亏 4 份保证金」。
+  </div>
+
+  <h3>7.2 相关性：策略层面只有 0.2–0.55，不是 0.99</h3>
+  <table>
+    <thead><tr><th>vs BTC</th><th>全期相关性</th><th>BTC 最差 5% 天<br>的相关性</th><th>全期日均</th><th>BTC 最差 5% 天<br>的日均</th></tr></thead>
+    <tbody>
+      <tr><td>ETH</td><td>0.55</td><td>0.23</td><td>0.07%</td><td class="down">−3.02%</td></tr>
+      <tr><td>BNB</td><td>0.38</td><td>0.23</td><td>0.20%</td><td class="down">−2.75%</td></tr>
+      <tr><td>SOL</td><td>0.37</td><td>0.17</td><td>0.16%</td><td class="down">−1.93%</td></tr>
+      <tr><td>XRP</td><td>0.26</td><td>0.20</td><td>0.00%</td><td class="down">−2.18%</td></tr>
+      <tr><td>ADA</td><td>0.36</td><td>0.06</td><td>0.13%</td><td class="down">−2.17%</td></tr>
+      <tr><td>DOGE</td><td>0.21</td><td>0.39</td><td>0.24%</td><td class="down">−2.83%</td></tr>
+      <tr><td>AVAX</td><td>0.29</td><td>0.32</td><td>0.14%</td><td class="down">−2.36%</td></tr>
+      <tr><td>LINK</td><td>0.36</td><td>0.00</td><td>0.03%</td><td class="down">−2.16%</td></tr>
+      <tr><td>DOT</td><td>0.40</td><td>0.38</td><td>0.06%</td><td class="down">−2.57%</td></tr>
+      <tr><td>LTC</td><td>0.39</td><td>0.39</td><td>−0.01%</td><td class="down">−2.95%</td></tr>
+      <tr class="hl"><td>BTC（参照）</td><td>1.00</td><td>1.00</td><td>0.06%</td><td class="down">−4.52%</td></tr>
+    </tbody>
+  </table>
+  <div class="box ok">
+    <b>好消息：</b>BTC 最差的那 5% 日子里，其他币<b>平均只跌 1.9%–3.0%，而 BTC 跌 4.52%</b>。
+    这就是为什么组合回撤（33%）能低于 BTC 单跑（39%）——<b>分散化在真实的坏日子里起了作用</b>。<br>
+    <b>坏消息：</b>币价相关性接近 0.9，但<b>策略层面只有 0.2–0.55</b>，因为各币趋势状态不同步。
+    好处是分散有效，坏处是「崩盘时一起爆」的尾部风险仍然存在（见 7.1）。
+  </div>
+</section>
+
+<!-- ======================= 8 建议 ======================= -->
+<section>
+  <h2><span class="num">8</span>最终建议</h2>
+
+  <h3>❌ 不要做的两件事</h3>
+  <ol>
+    <li><b>不要为了 ETH 换掉 BTC。</b>9 年口径 20.9× vs 17.7×，但回撤和单笔逆行都更深，属于同一档。
+      换标的要改代码、改精度、改 <code>max_order_notional</code>、重新验证——收益不够覆盖这些麻烦。</li>
+    <li><b>不要跑「今天的前十」。</b>那是后视镜（8.78× vs 当时前十 2.95×），
+      而且 5/8 个窗口输给 BTC，爆仓 26 次，还有 2 个币是亏钱的。</li>
+  </ol>
+
+  <h3>✅ 如果要分散，这样做</h3>
+  <table class="wrapcells">
+    <thead><tr><th>方案</th><th>8 个窗口表现</th><th>评价</th></tr></thead>
+    <tbody>
+      <tr><td><b>只跑 BTC</b>（现状）</td><td>回撤恒定 39.2%，爆仓 0 次</td><td>最省事、最稳</td></tr>
+      <tr class="hl"><td><b>BTC+ETH+BNB+SOL 四币等权</b></td>
+        <td class="good">8/8 窗口收益更高、8/8 回撤更低<br>（23.6%–39.2%）</td>
+        <td class="good">唯一在全部窗口都成立的改进方案</td></tr>
+      <tr><td>BTC+今天前十（11 币）</td><td>5/8 窗口输给 BTC，回撤更低但爆仓 26 次</td>
+        <td class="bad">不推荐</td></tr>
+    </tbody>
+  </table>
+
+  <h3>四币方案的具体参数</h3>
+  <ul>
+    <li><b>资金分配</b>：1000 U 分 4 份，每份 250 U，各自独立跑 B 档（目标日波动 3%）。</li>
+    <li><b>每币保证金</b>：按 <code>名义 ÷ 3</code>，B 档历史中位数约占该份资金的 1/3，
+      即单币约 80 U，四币合计约 320 U。</li>
+    <li><b>杠杆</b>：统一 3× 逐仓（<code>ISOLATED</code>），单向持仓。</li>
+    <li><b>需要改的代码</b>：现有系统是单标的（<code>BTCUSDT</code>）。
+      要跑四币需要：① 4 个独立配置（symbol / 资金 / <code>max_order_notional</code> 按 250 U 本金设 ≈ 750 U）；
+      ② 4 个定时任务或 1 个任务循环 4 个标的；③ 每个标的独立幂等键（当前是 <code>symbol|bar_dt|side</code>，天然支持）。</li>
+    <li><b>预期爆仓</b>：四币历史 5.8 年共 5 次（BNB 1 / ETH 1 / SOL 3 / BTC 0），
+      单次只亏该份保证金（约 80 U，占总资金 8%）。</li>
+  </ul>
+
+  <div class="box key">
+    <b>一句话总结：</b>你原来的判断「跑前十是不是更好」——
+    <b>「收益更高」不成立</b>（换个起点就没了），
+    <b>「更稳定」要分两面看</b>（回撤确实更低，但爆仓次数暴增且会扎堆）。
+    <b>真正经得起检验的改进是：从 1 个币扩到 4 个大币，而不是扩到前十。</b>
+  </div>
+</section>
+
+<footer>
+  回测口径：5 组 EMA 净方向（8/24、10/30、12/36、15/45、20/60）· 波动率目标仓位
+  <code>expo = min(3.0, vol_target / (ATR14/price))</code> · 3× 逐仓 ·
+  手续费 0.04% + 滑点 0.05% 单边 · 资金费 0.03%/日 · 维持保证金率 0.5% ·
+  信号收盘确认、次日开盘成交 · 调仓触发 = 5 组方向组合变化 · 滚仓（按权益）<br>
+  数据源：币安现货日线（data-api.binance.vision）· 生成于 2026-10-05<br>
+  <b>回测是乐观上界，实盘只会更差。历史表现不代表未来。</b>
+</footer>
+
+</div>
+</body>
+</html>

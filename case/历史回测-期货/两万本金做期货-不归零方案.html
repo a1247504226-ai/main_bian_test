@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>两万本金做期货：赚钱与不归零的完整推演</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0;
+    background: #f4f5f7;
+    color: #1f2328;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    line-height: 1.75;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 20px 80px; }
+  header {
+    background: #ffffff;
+    border-bottom: 1px solid #e4e7eb;
+    padding: 44px 20px 36px;
+    margin-bottom: 28px;
+  }
+  header .inner { max-width: 1080px; margin: 0 auto; padding: 0 20px; }
+  .kicker { font-size: 13px; letter-spacing: 2px; color: #1a56db; font-weight: 600; margin-bottom: 12px; }
+  h1 { font-size: 32px; margin: 0 0 14px; letter-spacing: -0.5px; line-height: 1.35; }
+  .sub { font-size: 15px; color: #656d76; margin: 0; }
+  h2 {
+    font-size: 22px; margin: 46px 0 8px; padding-left: 14px;
+    border-left: 4px solid #1a56db; line-height: 1.4;
+  }
+  h2 .num { color: #1a56db; font-weight: 700; margin-right: 8px; }
+  h3 { font-size: 16px; margin: 26px 0 10px; color: #1f2328; }
+  p { font-size: 15px; margin: 12px 0; }
+  .lead { font-size: 15.5px; color: #3d444d; }
+  .card {
+    background: #ffffff; border: 1px solid #e4e7eb; border-radius: 10px;
+    padding: 22px 24px; margin: 18px 0;
+  }
+  .grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin: 22px 0; }
+  .stat {
+    background: #ffffff; border: 1px solid #e4e7eb; border-radius: 10px;
+    padding: 18px 18px 16px; border-top: 3px solid #1a56db;
+  }
+  .stat.danger { border-top-color: #d1242f; }
+  .stat.safe { border-top-color: #1a7f37; }
+  .stat .v { font-size: 27px; font-weight: 700; letter-spacing: -0.5px; line-height: 1.2; }
+  .stat.danger .v { color: #d1242f; }
+  .stat.safe .v { color: #1a7f37; }
+  .stat .k { font-size: 13px; color: #656d76; margin-top: 6px; line-height: 1.5; }
+  .chart { width: 100%; height: 400px; margin: 6px 0 4px; }
+  .chart.tall { height: 460px; }
+  .cap { font-size: 12.5px; color: #8b949e; margin: 2px 0 22px; line-height: 1.6; }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; margin: 14px 0; }
+  th, td { padding: 9px 10px; text-align: right; border-bottom: 1px solid #eceff2; }
+  th { background: #f6f8fa; color: #4a5259; font-weight: 600; text-align: right; font-size: 13px; }
+  th:first-child, td:first-child { text-align: left; }
+  tbody tr:hover { background: #fafbfc; }
+  .hi { color: #d1242f; font-weight: 600; }
+  .ok { color: #1a7f37; font-weight: 600; }
+  .callout {
+    border-radius: 10px; padding: 18px 22px; margin: 20px 0; font-size: 15px;
+    background: #fff8f8; border: 1px solid #ffd7d5; border-left: 4px solid #d1242f;
+  }
+  .callout.blue { background: #f3f7ff; border-color: #cfe0ff; border-left-color: #1a56db; }
+  .callout.green { background: #f2fbf4; border-color: #cbe9d3; border-left-color: #1a7f37; }
+  .callout b { color: #1f2328; }
+  .formula {
+    background: #f6f8fa; border: 1px solid #e4e7eb; border-radius: 8px;
+    padding: 14px 18px; font-family: "SFMono-Regular", Consolas, monospace;
+    font-size: 13.5px; color: #24292f; margin: 14px 0; overflow-x: auto; line-height: 1.9;
+  }
+  ul, ol { font-size: 15px; padding-left: 22px; }
+  li { margin: 7px 0; }
+  .rule { display: flex; gap: 14px; align-items: flex-start; padding: 14px 0; border-bottom: 1px solid #eceff2; }
+  .rule:last-child { border-bottom: none; }
+  .rule .idx {
+    flex: 0 0 30px; height: 30px; border-radius: 50%; background: #1a56db; color: #fff;
+    display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700;
+  }
+  .rule .txt { font-size: 14.5px; }
+  .rule .txt b { display: block; margin-bottom: 3px; }
+  .disclaimer {
+    margin-top: 48px; padding: 20px 24px; background: #fff8f8;
+    border: 1px solid #ffd7d5; border-radius: 10px; font-size: 13.5px; color: #57606a; line-height: 1.85;
+  }
+  .src { font-size: 12.5px; color: #8b949e; margin-top: 10px; line-height: 1.7; }
+  .tag {
+    display: inline-block; font-size: 12px; padding: 2px 9px; border-radius: 20px;
+    background: #eef2f7; color: #4a5259; margin-right: 6px;
+  }
+  .tag.red { background: #ffebe9; color: #d1242f; }
+  .tag.green { background: #e8f6ec; color: #1a7f37; }
+  @media (max-width: 760px) {
+    .grid4 { grid-template-columns: repeat(2, 1fr); }
+    h1 { font-size: 24px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="inner">
+    <div class="kicker">期货 · 小资金风险管理推演</div>
+    <h1>两万本金做期货：怎么赚钱，怎么不归零</h1>
+    <p class="sub">用 20,000 次蒙特卡洛模拟，把"归零"变成一个可以量化的概率问题 · 数据截至 2026-10-12</p>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <p class="lead">先说结论，再说为什么。这个问题其实是两问：<b>「怎么不归零」是风控题，「怎么赚钱」是概率题</b>。这两件事的答案完全不同，而且第一件的优先级远高于第二件——因为不归零，你才有资格谈赚钱。</p>
+
+  <div class="grid4">
+    <div class="stat danger">
+      <div class="v">100%</div>
+      <div class="k">不设止损、扛单，200 笔内归零概率<br>（无论仓位多小）</div>
+    </div>
+    <div class="stat safe">
+      <div class="v">≈0%</div>
+      <div class="k">有硬止损 + 单笔风险≤2%<br>200 笔内归零概率</div>
+    </div>
+    <div class="stat danger">
+      <div class="v">26%</div>
+      <div class="k">即使有正期望，单笔押 20%<br>归零概率仍高达 26%</div>
+    </div>
+    <div class="stat">
+      <div class="v">+0.35R</div>
+      <div class="k">唯一能赚钱的形态：胜率 45%<br>盈亏比 2:1 的每笔期望</div>
+    </div>
+  </div>
+
+  <div class="callout">
+    <b>一句话总结：</b>两万本金做期货，"不归零"靠的不是看得准，而是<b>单笔风险压到 1%–2%（200–400 元）+ 每笔必带硬止损</b>；"赚钱"靠的不是重仓，而是<b>一个正期望的系统反复执行</b>。重仓和扛单是同一件事的两面——它们都会让你在 200 笔之内出局。
+  </div>
+
+  <h2><span class="num">01</span>先把杠杆摆上桌：两万是怎么被放大的</h2>
+
+  <p>期货的杀伤力来自保证金制度。以玉米为例：一手 10 吨，现价约 2161 元/吨，合约名义价值约 2.16 万元，而期货公司只收你约 10% 的保证金（约 2161 元）。<b>你用 2161 元，撬动了 21,610 元的头寸，杠杆约 10 倍。</b></p>
+
+  <div class="formula">
+一手玉米 = 10 吨 × 2,161 元/吨 = 名义价值 21,610 元<br>
+占用保证金 ≈ 21,610 × 10% ≈ 2,161 元　→　杠杆 ≈ 10 倍<br>
+<br>
+价格反向波动 10%　→　亏损 2,161 元　→　<b>这一手的保证金全部亏光</b><br>
+若把 2 万满仓（约 9 手），价格反向 10%　→　亏损 ≈ 19,449 元　→　<b>账户归零</b>
+  </div>
+
+  <p>而玉米的涨跌停板是 6%。<b>也就是说，满仓状态下，连续两个跌停板就足以清空账户。</b>这不是极端假设——2020 年原油、2021 年动力煤、2024 年碳酸锂都出现过连续单边板。小资金做期货，第一个要消灭的念头就是"满仓"。</p>
+
+  <h3>两万块能开哪些品种？</h3>
+  <p>下表按"单手保证金"从低到高排列，用 2026-10-12 前后的主力合约价格测算。注意区分两个口径：<b>交易所保证金是下限，期货公司实际收取通常加收 3–5 个百分点</b>，实际占用以开户公司为准。</p>
+
+  <div class="card">
+    <table>
+      <thead>
+        <tr>
+          <th>品种（代码）</th><th>主力合约</th><th>现价(元/吨)</th><th>交易单位</th>
+          <th>交易所保证金</th><th>公司口径(约)</th><th>每跳盈亏</th><th>两万可开</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>玉米淀粉 (CS)</td><td>CS2611</td><td>2,406</td><td>10 吨</td><td>1,444</td><td class="ok">≈2,165</td><td>10 元</td><td>≤2 手</td></tr>
+        <tr><td>玉米 (C)</td><td>C2611</td><td>2,161</td><td>10 吨</td><td>1,507</td><td class="ok">≈2,161</td><td>10 元</td><td>≤2 手</td></tr>
+        <tr><td>菜粕 (RM)</td><td>RM611</td><td>≈2,300</td><td>10 吨</td><td>≈1,400</td><td class="ok">≈2,760</td><td>10 元</td><td>≤2 手</td></tr>
+        <tr><td>玻璃 (FG)</td><td>FG701</td><td>878</td><td>20 吨</td><td>1,405</td><td>≈2,458</td><td>20 元</td><td>1–2 手</td></tr>
+        <tr><td>纯碱 (SA)</td><td>SA701</td><td>1,011</td><td>20 吨</td><td>1,415</td><td>≈2,629</td><td>20 元</td><td>1–2 手</td></tr>
+        <tr><td>PVC (V)</td><td>V2701</td><td>≈5,000</td><td>5 吨</td><td>≈1,500</td><td>≈3,000</td><td>5 元</td><td>1–2 手</td></tr>
+        <tr><td>PTA (TA)</td><td>TA701</td><td>6,704</td><td>5 吨</td><td>2,011</td><td>≈4,358</td><td>5 元</td><td>1 手</td></tr>
+        <tr><td>螺纹钢 (RB)</td><td>RB2701</td><td>3,080</td><td>10 吨</td><td>2,156</td><td>≈4,004</td><td>10 元</td><td>1 手</td></tr>
+        <tr><td>豆粕 (M)</td><td>M2701</td><td>3,389</td><td>10 吨</td><td>2,372</td><td>≈3,389</td><td>10 元</td><td>1 手</td></tr>
+        <tr><td>甲醇 (MA)</td><td>MA611</td><td>3,819</td><td>10 吨</td><td>2,291</td><td>≈4,965</td><td>10 元</td><td>1 手</td></tr>
+        <tr><td class="hi">原油 (SC)</td><td>—</td><td>—</td><td>1,000 桶</td><td>—</td><td class="hi">≈120,000</td><td>100 元</td><td class="hi">开不起</td></tr>
+        <tr><td class="hi">黄金 (AU)</td><td>—</td><td>—</td><td>1,000 克</td><td>—</td><td class="hi">≈150,000</td><td>20 元</td><td class="hi">开不起</td></tr>
+        <tr><td class="hi">沪深300 (IF)</td><td>—</td><td>—</td><td>300 元/点</td><td>—</td><td class="hi">≈160,000</td><td>60 元</td><td class="hi">开不起</td></tr>
+      </tbody>
+    </table>
+    <div class="src">数据来源：各交易所保证金通知、期货公司保证金公示（兴证期货 2026-10-08、中信期货 2026-10-09、广州期货 2026-10-12、迈科期货 2026-10-12 等）、宽源量化合约列表（价格截至 2026-10-09 14:59）。"公司口径"为按典型加收比例估算，实际以开户公司为准。</div>
+  </div>
+
+  <div class="chart" id="chartMargin"></div>
+  <p class="cap">交易所保证金是理论下限，期货公司实际收取会更高。上图的差距就是"两万到底能开几手"的真实约束。</p>
+
+  <div class="callout blue">
+    <b>选品种的三条硬标准：</b>① 单手保证金 ≤ 3,000 元（两万才留得住安全垫）；② 日均波动温和、极少连续涨跌停（玉米、玉米淀粉、菜粕属于此类）；③ 成交量大、滑点小。<b>反过来，原油、黄金、股指、碳酸锂这四类，两万进去基本等于送钱。</b>
+  </div>
+
+  <h2><span class="num">02</span>归零概率：一个可以算出来的数</h2>
+
+  <p>下面这组模拟回答"到底多大概率会归零"。设定：本金 20,000 元，跑 200 笔交易，<b>归零定义为资金跌破 4,000 元</b>（剩 20%，实盘意义上已无法翻身）。每种形态跑 20,000 条路径。</p>
+
+  <div class="chart tall" id="chartRuin"></div>
+  <p class="cap">纵轴＝200 笔内跌破 4,000 元的路径占比。横轴＝单笔风险占账户的比例（即每笔最多亏账户的百分之几）。</p>
+
+  <div class="card">
+    <table>
+      <thead>
+        <tr><th>策略形态</th><th>每笔期望(R)</th><th>单笔押 1%</th><th>单笔押 2%</th><th>单笔押 5%</th><th>单笔押 20%</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>有止损 · 强优势（胜率45% / 盈亏比2:1）</td><td class="ok">+0.35</td><td class="ok">0.0%</td><td class="ok">0.0%</td><td class="ok">0.0%</td><td class="hi">26.0%</td></tr>
+        <tr><td>有止损 · 弱优势（38% / 2:1）</td><td class="ok">+0.14</td><td class="ok">0.0%</td><td class="ok">0.0%</td><td class="ok">1.7%</td><td class="hi">80.5%</td></tr>
+        <tr><td>有止损 · 零优势（40% / 1.5:1）</td><td>0.00</td><td class="ok">0.0%</td><td class="ok">0.0%</td><td class="hi">13.8%</td><td class="hi">96.2%</td></tr>
+        <tr><td>零优势 + 手续费拖累</td><td>−0.05</td><td class="ok">0.0%</td><td class="ok">0.0%</td><td class="hi">20.4%</td><td class="hi">96.7%</td></tr>
+        <tr><td class="hi">无止损 / 扛单（单笔亏损 1R–8R）</td><td class="hi">−0.97</td><td class="hi">100%</td><td class="hi">100%</td><td class="hi">100%</td><td class="hi">100%</td></tr>
+      </tbody>
+    </table>
+    <div class="src">模型：固定分数风险法（fixed fractional）。每笔风险 R = 当前资金 × f；赢 +2R、输 −1R；无止损情形下单笔亏损在 1R–8R 间均匀分布（均值 3.4R），模拟扛单直到被强平。每格 20,000 条路径，随机种子固定。</div>
+  </div>
+
+  <p><b>这张表有三个非直觉的结论：</b></p>
+  <ol>
+    <li><b>只要每笔风险压到 1%–2%，有没有优势都几乎不会归零。</b>1%、2% 两列全是 0.0%。仓位小到极致时，你输的是时间，不是本金。</li>
+    <li><b>仓位的破坏力在 5% 之后突然爆发。</b>从 2% 到 5%，零优势形态的归零概率从 0% 跳到 13.8%；到 20%，直接 96%。<b>杠杆的伤害不是线性的，是阶跃的。</b></li>
+    <li><b>「不设止损」是唯一一个把归零概率锁死在 100% 的行为。</b>无论你用 1% 还是 20% 的仓位，只要扛单，200 笔之内必然出局——因为期望值变成了 −0.97R，每交易一次就是给市场送钱。</li>
+  </ol>
+
+  <div class="callout">
+    <b>最容易被忽略的一点：</b>大多数散户以为自己是在"判断方向"，其实是在<b>决定自己多久出局</b>。方向判断只决定你输得多快，仓位和止损决定你能不能活到下一次机会。
+  </div>
+
+  <h2><span class="num">03</span>存活曲线：同样是两万，200 笔之后差多少</h2>
+
+  <p>把每条路径的中位数画出来，看资金怎么走。注意"2% 风险 · 无止损"这条线——它在<b>第 47 笔左右就归零</b>，是所有曲线里死得最快的。</p>
+
+  <div class="chart tall" id="chartSurvive"></div>
+  <p class="cap">纵轴为对数刻度（资金跨越两个数量级）。取每条路径的中位数，4,000 条路径。所有曲线都使用相同的正期望（胜率45% / 盈亏比2:1），唯一变量是单笔风险与是否止损。</p>
+
+  <div class="card">
+    <table>
+      <thead><tr><th>形态</th><th>第 0 笔</th><th>第 50 笔</th><th>第 100 笔</th><th>第 200 笔</th><th>结果</th></tr></thead>
+      <tbody>
+        <tr><td>单笔 1% 风险</td><td>20,000</td><td>23,336</td><td>28,053</td><td>39,348</td><td class="ok">约 +97%</td></tr>
+        <tr><td>单笔 2% 风险</td><td>20,000</td><td>26,921</td><td>38,456</td><td>73,943</td><td class="ok">约 +270%</td></tr>
+        <tr><td>单笔 5% 风险</td><td>20,000</td><td>38,720</td><td>86,796</td><td>376,676</td><td>高收益 · 高波动</td></tr>
+        <tr><td>单笔 20% 风险</td><td>20,000</td><td>63,440</td><td>352,161</td><td>3,543,347</td><td class="hi">中位数暴涨，但 26% 概率归零</td></tr>
+        <tr><td class="hi">单笔 2% · 无止损</td><td>20,000</td><td class="hi">0</td><td class="hi">0</td><td class="hi">0</td><td class="hi">第 47 笔出局</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p><b>这就是最反直觉的地方：</b>20% 仓位的"中位数"最高（354 万），但它有 26% 的概率归零。<b>中位数好看不代表你能拿到那个数——你是随机落在其中一条路径上。</b>对小资金来说，1%–2% 的意义不是"赚得少"，而是"活下来的概率接近 100%"，让你有机会把正期望兑现成复利。</p>
+
+  <h2><span class="num">04</span>赚钱的唯一来源：正期望</h2>
+
+  <p>风控只能保证你不死，赚钱必须靠期望值为正。每笔交易的期望值由两个变量决定：</p>
+
+  <div class="formula">每笔期望(R) = 胜率 × 盈亏比 − (1 − 胜率) × 1</div>
+
+  <p>把这两个变量铺开，就是下面这张热力图。<b>绿色区域是能赚钱的，红色区域是必然亏钱的。</b>注意 50% 胜率 + 1:1 盈亏比正好是 0——这就是"扣掉手续费后必然亏"的位置，而大多数频繁交易的散户就在这个点上。</p>
+
+  <div class="chart tall" id="chartHeat"></div>
+  <p class="cap">数值为每笔交易的期望收益，单位 R（R = 单笔风险金额）。0 为盈亏平衡线。</p>
+
+  <p><b>关键推论：</b></p>
+  <ul>
+    <li><b>胜率 30% 也能赚钱</b>——只要盈亏比做到 3:1（期望 +0.20R）。趋势跟随系统就是这条路：赢的次数少，但赢得大。</li>
+    <li><b>胜率 60% 也可能亏钱</b>——如果盈亏比只有 1:1（期望 +0.20R，但扣掉手续费后接近 0）。<b>高胜率是最危险的幻觉</b>，因为它让人误以为可以扛单（"我大部分时候都是对的"），而一次不设止损的亏损就能吞掉十次盈利。</li>
+    <li><b>两万本金的现实目标</b>：胜率 40–45%、盈亏比 2:1 以上。这不是靠预测能力，而是靠"错了就砍、对了就拿住"的纪律自动形成的。</li>
+  </ul>
+
+  <div class="callout green">
+    <b>把这两件事连起来看：</b>单笔风险 2%（400 元）× 期望 +0.35R（140 元/笔）× 每月 8 笔 ≈ <b>每月 +1,120 元，约本金的 5.6%</b>。这是"做得好"的水平，不是"入门"的水平——但它是可重复、可持续、且几乎不会归零的。想一个月翻倍？那对应的归零概率是 26% 以上。
+  </div>
+
+  <h2><span class="num">05</span>隐形成本：手续费是给小资金的慢性毒药</h2>
+
+  <p>很多人算收益时忘了手续费。两万本金的体量下，手续费占本金的比例被放大得很厉害。按每手开平合计成本计算：</p>
+
+  <div class="card">
+    <table>
+      <thead><tr><th>品种（每手开平成本）</th><th>每日 2 笔</th><th>每日 5 笔</th><th>每日 10 笔</th></tr></thead>
+      <tbody>
+        <tr><td>玉米（2.4 元）</td><td>0.50% / 月</td><td>1.26% / 月</td><td class="hi">2.52% / 月（年化 30%）</td></tr>
+        <tr><td>豆粕（3.0 元）</td><td>0.63% / 月</td><td>1.57% / 月</td><td class="hi">3.15% / 月（年化 38%）</td></tr>
+        <tr><td>螺纹钢（3.5 元）</td><td>0.73% / 月</td><td>1.84% / 月</td><td class="hi">3.67% / 月（年化 44%）</td></tr>
+      </tbody>
+    </table>
+    <div class="src">按每月 21 个交易日、每手 1 笔开平计算。期货公司默认费率常为交易所标准的 3–5 倍，开户前可协商下调；若按默认费率，上表数字还要再翻数倍。</div>
+  </div>
+
+  <p><b>每天做 10 笔，一年光手续费就要吃掉本金的 30%–44%。</b>而上一节的模拟显示，零优势 + 手续费的形态在 5% 仓位下归零概率会从 13.8% 升到 20.4%。<b>频繁交易对小资金是双重惩罚：既降低期望值，又放大波动。</b></p>
+
+  <h2><span class="num">06</span>可执行方案：给两万本金的一份纪律清单</h2>
+
+  <p>把前面的推演落成可执行的规则。前提假设：本金 20,000 元、可承受 30% 以内回撤、目标是先跑通流程再谈收益。</p>
+
+  <div class="card">
+    <div class="rule">
+      <div class="idx">1</div>
+      <div class="txt"><b>只做 1 个品种，从玉米 / 玉米淀粉 / 菜粕里选</b>单手保证金 1,400–2,800 元、手续费极低、波动温和、逻辑简单（看供需与季节）。先把这个品种的节奏摸透，再谈第二个。</div>
+    </div>
+    <div class="rule">
+      <div class="idx">2</div>
+      <div class="txt"><b>每次只开 1 手，总占用保证金不超过 6,000 元（30%）</b>剩下的 14,000 元是安全垫，不是"待用资金"。永远不要因为"账户里还有钱"就加到 3 手、4 手。</div>
+    </div>
+    <div class="rule">
+      <div class="idx">3</div>
+      <div class="txt"><b>每笔风险 = 200–400 元（1%–2%），开仓同时挂硬止损</b>用条件单，不要靠"我盯着"。止损距离由技术位决定，然后用<b>风险金额 ÷ 止损距离</b>反推手数——止损越远，手数越少，而不是止损放宽。</div>
+    </div>
+    <div class="rule">
+      <div class="idx">4</div>
+      <div class="txt"><b>盈亏比至少 2:1 才进场</b>即潜在盈利空间至少是止损距离的 2 倍。做不到就不做——"感觉会涨"不是进场理由。</div>
+    </div>
+    <div class="rule">
+      <div class="idx">5</div>
+      <div class="txt"><b>连续亏 3 笔（约 −900 元）立即停手一周</b>连续亏损通常意味着市场状态变了（震荡替代趋势），继续交易是在用旧方法打新市场。停手是风控的一部分，不是认输。</div>
+    </div>
+    <div class="rule">
+      <div class="idx">6</div>
+      <div class="txt"><b>账户回撤到 −20%（剩 16,000 元）全面停手复盘</b>这是本金的"熔断线"。到线就停，重新检查系统是否失效，而不是加大仓位"赚回来"——那正是 20% 仓位那 26% 归零概率的来源。</div>
+    </div>
+    <div class="rule">
+      <div class="idx">7</div>
+      <div class="txt"><b>每天不超过 2 笔，只做主力合约，不做临近交割月</b>手续费是慢性毒药；主力合约流动性最好、滑点最小；交割月保证金和流动性会突变，新手容易被动。</div>
+    </div>
+  </div>
+
+  <h3>对照检查：你踩了哪几条？</h3>
+  <table>
+    <thead><tr><th>行为</th><th>后果</th><th>对应概率</th></tr></thead>
+    <tbody>
+      <tr><td>满仓 / 用尽保证金</td><td>两个涨跌停板出局</td><td class="hi">归零概率 &gt;26%</td></tr>
+      <tr><td>不设止损、扛单等回本</td><td>单笔亏损失控</td><td class="hi">归零概率 100%</td></tr>
+      <tr><td>亏损后加倍开仓摊平</td><td>把 5% 仓位变成 20%</td><td class="hi">归零概率 96%</td></tr>
+      <tr><td>每天刷单 10 笔以上</td><td>年化吃掉 30%–44% 本金</td><td class="hi">期望转负</td></tr>
+      <tr><td>单笔风险 1%–2% + 硬止损 + 盈亏比 2:1</td><td>长期存活并复利</td><td class="ok">归零概率 ≈0%</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout blue">
+    <b>最后一句实话：</b>两万块做期货，最好的结果是"用一年的时间，把一套能重复执行的规则跑通，同时本金基本没亏"。<b>把这两万当成学费而不是本金</b>——如果你能在不归零的前提下活过 200 笔交易，你获得的交易能力远比两万块值钱；如果你一开始就想着用它翻倍，那这份模拟里 26%–100% 的归零概率就是为你准备的。
+  </div>
+
+  <div class="disclaimer">
+    <b>风险提示与免责声明：</b>本文/本对话内容仅为基于公开信息的分析讨论，不构成任何投资建议、理财建议或交易邀约。市场有风险，投资需谨慎。文中所涉标的、价位、策略均仅供研究参考，不保证分析准确性或完整性，不代表对任何投资结果的承诺。投资者应根据自身风险承受能力、投资目标和财务状况独立做出决策并承担相应风险。过往业绩不预示未来表现。<br><br>
+    <b>数据说明：</b>品种价格与保证金数据来源于各期货交易所通知及期货公司公示（2026-10-08 至 2026-10-12），价格截至 2026-10-09 收盘；蒙特卡洛模拟为模型推演，假设条件见各图表下方注释，实际结果会因市场环境、执行偏差和费率差异而显著不同。期货公司实际收取的保证金和手续费以开户公司为准。
+  </div>
+
+</div>
+
+<script>
+(function () {
+  var axisStyle = { axisLine: { lineStyle: { color: '#d0d7de' } }, axisLabel: { color: '#57606a' } };
+  var splitStyle = { lineStyle: { color: '#eef1f4' } };
+
+  /* ---------- 图1：品种保证金对比 ---------- */
+  echarts.init(document.getElementById('chartMargin')).setOption({
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, valueFormatter: function (v) { return v + ' 元'; } },
+    legend: { data: ['交易所保证金', '期货公司口径(约)'], top: 0, textStyle: { color: '#4a5259' } },
+    grid: { left: 70, right: 24, top: 46, bottom: 62 },
+    xAxis: {
+      type: 'category',
+      data: ['玉米淀粉', '菜粕', '玻璃', '纯碱', '玉米', 'PVC', 'PTA', '螺纹钢', '甲醇', '豆粕'],
+      axisLabel: { color: '#57606a', interval: 0, rotate: 30, fontSize: 12 },
+      axisLine: { lineStyle: { color: '#d0d7de' } }
+    },
+    yAxis: { type: 'value', name: '单手保证金(元)', nameTextStyle: { color: '#8b949e' }, axisLabel: { color: '#57606a' }, splitLine: splitStyle },
+    series: [
+      { name: '交易所保证金', type: 'bar', barGap: '10%', itemStyle: { color: '#a8c0f0', borderRadius: [3, 3, 0, 0] },
+        data: [1444, 1400, 1405, 1415, 1507, 1500, 2011, 2156, 2291, 2372] },
+      { name: '期货公司口径(约)', type: 'bar', itemStyle: { color: '#1a56db', borderRadius: [3, 3, 0, 0] },
+        data: [2165, 2760, 2458, 2629, 2161, 3000, 4358, 4004, 4965, 3389] }
+    ]
+  });
+
+  /* ---------- 图2：归零概率 ---------- */
+  echarts.init(document.getElementById('chartRuin')).setOption({
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, valueFormatter: function (v) { return v + '%'; } },
+    legend: { top: 0, textStyle: { color: '#4a5259', fontSize: 12 } },
+    grid: { left: 60, right: 24, top: 66, bottom: 40 },
+    xAxis: { type: 'category', data: ['单笔押 1%', '单笔押 2%', '单笔押 5%', '单笔押 20%'],
+      axisLabel: { color: '#57606a', fontSize: 13 }, axisLine: { lineStyle: { color: '#d0d7de' } } },
+    yAxis: { type: 'value', name: '归零概率(%)', max: 100, nameTextStyle: { color: '#8b949e' },
+      axisLabel: { color: '#57606a' }, splitLine: splitStyle },
+    series: [
+      { name: '有止损·强优势', type: 'bar', itemStyle: { color: '#1a7f37', borderRadius: [3, 3, 0, 0] }, data: [0, 0, 0, 26.0] },
+      { name: '有止损·弱优势', type: 'bar', itemStyle: { color: '#7bbf8f', borderRadius: [3, 3, 0, 0] }, data: [0, 0, 1.7, 80.5] },
+      { name: '有止损·零优势', type: 'bar', itemStyle: { color: '#f0b429', borderRadius: [3, 3, 0, 0] }, data: [0, 0, 13.8, 96.2] },
+      { name: '零优势+手续费', type: 'bar', itemStyle: { color: '#e8833a', borderRadius: [3, 3, 0, 0] }, data: [0, 0, 20.4, 96.7] },
+      { name: '无止损/扛单', type: 'bar', itemStyle: { color: '#d1242f', borderRadius: [3, 3, 0, 0] }, data: [100, 100, 100, 100] }
+    ]
+  });
+
+  /* ---------- 图3：存活曲线 ---------- */
+  var c1 = [20000,19800,20196,19994,20393.9,20190,20593.8,20387.8,20795.6,20587.6,20381.8,20789.4,20581.5,20993.1,20783.2,21198.9,20986.9,21406.6,21192.6,21616.4,21400.2,21186.2,21610,21393.9,21821.7,21603.5,22035.6,21815.2,22251.5,22029,22469.6,22244.9,22022.5,22462.9,22238.3,22683,22456.2,22905.3,22676.3,23129.8,22898.5,22669.5,23122.9,22891.7,23349.5,23116,23578.4,23342.6,23809.4,23571.3,23335.6,23802.3,23564.3,24035.6,23795.2,24271.1,24028.4,24509,24263.9,24749.2,24501.7,24256.7,24741.8,24494.4,24984.3,24734.4,25229.1,24976.8,25476.4,25221.6,25726,25468.8,25214.1,25718.4,25461.2,25970.4,25710.7,26224.9,25962.7,26481.9,26217.1,26741.4,26474,26209.3,26733.5,26466.1,26995.5,26725.5,27260,26987.4,27527.2,27251.9,27796.9,27519,27243.8,27788.7,27510.8,28061,27780.4,28336,28052.6,27772.1,28327.5,28044.3,28605.1,28319.1,28885.5,28596.6,29168.6,28876.9,29454.4,29159.9,28868.3,29445.6,29151.2,29734.2,29436.9,30025.6,29725.3,30319.8,30016.6,30617,30310.8,30007.7,30607.9,30301.8,30907.8,30598.7,31210.7,30898.6,30589.6,31201.4,30889.4,31507.2,31192.1,31815.9,31497.8,32127.7,31806.5,32442.6,32118.2,31797,32432.9,32108.6,32750.8,32423.3,33071.7,32741,33395.8,33061.9,33723.1,33385.9,33052,33713.1,33375.9,34043.4,33703,34377.1,34033.3,34714,34366.8,35054.2,34703.6,34356.6,35043.7,34693.3,35387.1,35033.3,35733.9,35376.6,36084.1,35723.3,35366.1,36073.4,35712.6,36426.9,36062.6,36783.9,36416,37144.4,36772.9,36405.2,37133.3,36762,37497.2,37122.2,37864.7,37486,38235.8,37853.4,38610.5,38224.4,37842.1,38599,38213,38977.2,38587.5,39359.2,38965.6,39744.9,39347.5];
+  var c2 = [20000,19600,20384,19976.3,20775.4,20359.9,21174.3,20750.8,21580.8,21149.2,20726.2,21555.3,21124.1,21969.1,21529.7,22390.9,21943.1,22820.8,22364.4,23259,22793.8,22337.9,23231.4,22766.8,23677.5,23203.9,24132.1,23649.5,24595.4,24103.5,25067.7,24566.3,24075,25038,24537.2,25518.7,25008.3,26008.7,25488.5,26508,25977.9,25458.3,26476.7,25947.1,26985,26445.3,27503.1,26953.1,28031.2,27470.6,26921.1,27998,27438,28535.6,27964.8,29083.4,28501.8,29641.8,29049,30211,29606.7,29014.6,30175.2,29571.7,30754.6,30139.5,31345,30718.1,31946.9,31307.9,32560.2,31909,31270.9,32521.7,31871.3,33146.1,32483.2,33782.5,33106.9,34431.1,33742.5,35092.2,34390.4,33702.6,35050.7,34349.7,35723.6,35009.2,36409.5,35681.3,37108.6,36366.4,37821.1,37064.7,36323.4,37776.3,37020.8,38501.6,37731.6,39240.8,38456,37686.9,39194.4,38410.5,39946.9,39148,40713.9,39899.6,41495.6,40665.7,42292.3,41446.5,40617.5,42242.2,41397.4,43053.3,42192.2,43879.9,43002.3,44722.4,43828,45581.1,44669.5,43776.1,45527.1,44616.6,46401.2,45473.2,47292.1,46346.3,45419.4,47236.1,46291.4,48143.1,47180.2,49067.4,48086.1,50009.5,49009.3,50969.7,49950.3,48951.3,50909.4,49891.2,51886.8,50849.1,52883,51825.4,53898.4,52820.4,54933.2,53834.6,52757.9,54868.2,53770.8,55921.7,54803.2,56995.4,55855.5,58089.7,56927.9,59205,58020.9,56860.5,59134.9,57952.2,60270.3,59064.9,61427.5,60198.9,62606.9,61354.8,60127.7,62532.8,61282.1,63733.4,62458.7,64957.1,63657.9,66204.3,64880.2,63582.6,66125.9,64803.4,67395.5,66047.6,68689.5,67315.7,70008.3,68608.1,71352.5,69925.4,68526.9,71268,69842.6,72636.3,71183.6,74031,72550.3,75452.4,73943.3];
+  var c3 = [20000,19000,20900,19855,21840.5,20748.5,22823.3,21682.2,23850.4,22657.9,21525,23677.5,22493.6,24742.9,23505.8,25856.4,24563.6,27019.9,25668.9,28235.8,26824,25482.8,28031.1,26629.5,29292.5,27827.9,30610.7,29080.1,31988.1,30388.7,33427.6,31756.2,30168.4,33185.3,31526,34678.6,32944.7,36239.1,34427.2,37869.9,35976.4,34177.6,37595.3,35715.6,39287.1,37322.8,41055,39002.3,42902.5,40757.4,38719.5,42591.5,40461.9,44508.1,42282.7,46511,44185.4,48604,46173.8,50791.1,48251.6,45839,50422.9,47901.7,52691.9,50057.3,55063.1,52309.9,57540.9,54663.9,60130.2,57123.7,54267.5,59694.3,56709.6,62380.5,59261.5,65187.7,61928.3,68121.1,64715.1,71186.6,67627.2,64245.9,70670.5,67136.9,73850.6,70158.1,77173.9,73315.2,80646.7,76614.4,84275.8,80062,76058.9,83664.8,79481.6,87429.7,83058.3,91364.1,86795.9,82456.1,90701.7,86166.6,94783.3,90044.1,99048.5,94096.1,103505.7,98330.4,108163.5,102755.3,97617.5,107379.3,102010.3,112211.3,106600.8,117260.9,111397.8,122537.6,116410.7,128051.8,121649.2,115566.7,127123.4,120767.2,132844,126201.8,138821.9,131880.8,125286.8,137815.5,130924.7,144017.2,136816.3,150497.9,142973.1,157270.4,149406.8,164347.5,156130.1,148323.6,163156,154998.2,170498,161973.1,178170.4,169261.9,186188.1,176878.7,194566.6,184838.2,175596.3,193156,183498.2,201848,191755.6,210931.1,200384.6,220423,209401.9,230342.1,218825,207883.7,228672.1,217238.5,238962.3,227014.2,249715.6,237229.9,260952.9,247905.2,235509.9,259060.9,246107.9,270718.7,257182.8,282901,268756,295631.6,280850,266807.5,293488.2,278813.8,306695.2,291360.5,320496.5,304471.7,334918.8,318172.9,349990.2,332490.7,315866.1,347452.8,330080.1,363088.1,344933.7,379427.1,360455.7,396501.3,376676.3];
+  var c4 = [20000,16000,22400,17920,25088,20070.4,28098.6,22478.8,31470.4,25176.3,35246.8,28197.5,22558,31581.2,25264.9,35370.9,28296.7,39615.4,31692.3,44369.3,35495.4,28396.3,39754.9,31803.9,44525.4,35620.4,49868.5,39894.8,55852.7,44682.2,62555,50044,40035.2,56049.3,44839.5,62775.2,50220.2,70308.3,56246.6,78745.2,62996.2,50397,70555.7,56444.6,79022.4,63217.9,88505.1,70804.1,99125.7,79300.6,63440.5,88816.7,71053.3,99474.7,79579.7,111411.6,89129.3,124781,99824.8,79859.9,111803.8,89443,125220.2,100176.2,140246.7,112197.3,157076.3,125661,100528.8,140740.3,112592.3,157629.2,126103.3,176544.7,141235.7,197730,158184,126547.2,177166.1,141732.9,198426.1,158740.8,222237.2,177789.7,248905.6,199124.5,159299.6,223019.5,178415.6,249781.8,199825.4,279755.6,223804.5,313326.3,250661,200528.8,280740.4,224592.3,314429.2,251543.4,352160.7,281728.6,394420,315536,252428.8,353400.3,282720.2,395808.3,316646.7,443305.3,354644.3,283715.4,397201.6,317761.3,444865.8,355892.6,498249.7,398599.7,318879.8,446431.7,357145.4,500003.5,400002.8,560003.9,448003.1,627204.4,501763.5,401410.8,561975.1,449580.1,629412.2,503529.7,704941.6,563953.3,789534.6,631627.7,505302.2,707423,565938.4,792313.8,633851,887391.4,709913.1,567930.5,795102.7,636082.2,890515,712412,997376.9,797901.5,1117062.1,893649.7,1251109.5,1000887.6,1401242.7,1120994.1,896795.3,1255513.4,1004410.7,1406175,1124940,1574916,1259932.8,1007946.3,1411124.8,1128899.8,1580459.7,1264367.8,1770114.9,1416091.9,1982528.7,1586023,2220432.2,1776345.7,1421076.6,1989507.2,1591605.8,2228248.1,1782598.5,2495637.8,1996510.3,2795114.4,2236091.5,1788873.2,2504422.5,2003538,2804953.2,2243962.5,3141547.6,2513238.1,3518533.3,2814826.6,2251861.3,3152605.8,2522084.7,3530918.5,2824734.8,3954628.7,3163703,4429184.2,3543347.3];
+  var c0 = [20000,19332,18710.6,18272.9,17567.6,16972,16366.4,15790.6,15254.8,14718.5,14223.4,13757.8,13300,12810.6,12411.8,11995.4,11617.1,11168.1,10791.6,10422.2,10035.4,9634.2,9313.3,9041.2,8668.8,8380.2,8105.9,7820.8,7554.7,7295.6,7034.5,6862.9,6569.9,6376,6183.5,5939.9,5755.8,5560.6,5347.3,5163.1,4972.1,4832.5,4658.8,4459.8,4302.5,4052.6,3662.9];
+  var xAxisIdx = [];
+  for (var i = 0; i <= 200; i++) { xAxisIdx.push(i); }
+
+  echarts.init(document.getElementById('chartSurvive')).setOption({
+    tooltip: { trigger: 'axis', valueFormatter: function (v) { return v === null || v === undefined ? '已出局' : Math.round(v) + ' 元'; } },
+    legend: { top: 0, textStyle: { color: '#4a5259', fontSize: 12 } },
+    grid: { left: 74, right: 30, top: 56, bottom: 44 },
+    xAxis: { type: 'category', data: xAxisIdx, name: '交易笔数', nameLocation: 'end',
+      nameTextStyle: { color: '#8b949e' }, axisLabel: { color: '#57606a' }, axisLine: { lineStyle: { color: '#d0d7de' } } },
+    yAxis: { type: 'log', min: 1000, max: 4000000, name: '账户资金(元)',
+      nameTextStyle: { color: '#8b949e' }, axisLabel: { color: '#57606a' }, splitLine: splitStyle },
+    series: [
+      { name: '1% 风险', type: 'line', showSymbol: false, smooth: true, lineStyle: { width: 2, color: '#1a7f37' }, itemStyle: { color: '#1a7f37' }, data: c1 },
+      { name: '2% 风险', type: 'line', showSymbol: false, smooth: true, lineStyle: { width: 2.5, color: '#1a56db' }, itemStyle: { color: '#1a56db' }, data: c2 },
+      { name: '5% 风险', type: 'line', showSymbol: false, smooth: true, lineStyle: { width: 2, color: '#e8833a' }, itemStyle: { color: '#e8833a' }, data: c3 },
+      { name: '20% 风险', type: 'line', showSymbol: false, smooth: true, lineStyle: { width: 2, color: '#8b5cf6' }, itemStyle: { color: '#8b5cf6' }, data: c4 },
+      { name: '2% 风险 · 无止损', type: 'line', showSymbol: false, lineStyle: { width: 2.5, color: '#d1242f', type: 'dashed' }, itemStyle: { color: '#d1242f' }, data: c0 }
+    ]
+  });
+
+  /* ---------- 图4：期望值热力图 ---------- */
+  var pList = ['30%', '35%', '40%', '45%', '50%', '55%', '60%'];
+  var rrList = ['1:1', '1.5:1', '2:1', '2.5:1', '3:1'];
+  var heatData = [];
+  var pv = [0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60];
+  var rv = [1.0, 1.5, 2.0, 2.5, 3.0];
+  for (var a = 0; a < pv.length; a++) {
+    for (var b = 0; b < rv.length; b++) {
+      heatData.push([b, a, Math.round((pv[a] * rv[b] - (1 - pv[a])) * 100) / 100]);
+    }
+  }
+
+  echarts.init(document.getElementById('chartHeat')).setOption({
+    tooltip: {
+      position: 'top',
+      formatter: function (p) { return '胜率 ' + pList[p.value[1]] + ' × 盈亏比 ' + rrList[p.value[0]] + '<br/>每笔期望 ' + p.value[2] + ' R'; }
+    },
+    grid: { left: 76, right: 90, top: 26, bottom: 62 },
+    xAxis: { type: 'category', data: rrList, name: '盈亏比', nameLocation: 'middle', nameGap: 34,
+      nameTextStyle: { color: '#8b949e' }, axisLabel: { color: '#57606a', fontSize: 13 }, splitArea: { show: true } },
+    yAxis: { type: 'category', data: pList, name: '胜率', nameTextStyle: { color: '#8b949e' },
+      axisLabel: { color: '#57606a', fontSize: 13 }, splitArea: { show: true } },
+    visualMap: {
+      min: -0.5, max: 1.4, calculable: true, orient: 'vertical', right: 8, top: 'center',
+      textStyle: { color: '#57606a', fontSize: 12 },
+      inRange: { color: ['#c0392b', '#e8833a', '#f5e08a', '#a8d5a2', '#1a7f37'] }
+    },
+    series: [{
+      type: 'heatmap',
+      data: heatData,
+      label: { show: true, color: '#1f2328', fontSize: 12, fontWeight: 'bold' },
+      emphasis: { itemStyle: { shadowBlur: 8, shadowColor: 'rgba(0,0,0,0.2)' } },
+      itemStyle: { borderColor: '#ffffff', borderWidth: 2 }
+    }]
+  });
+})();
+</script>
+
+</body>
+</html>
