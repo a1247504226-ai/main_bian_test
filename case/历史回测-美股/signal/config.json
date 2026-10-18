@@ -1,0 +1,29 @@
+{
+  "mail": {
+    "from": "a1247504226@163.com",
+    "to": "1247504226@qq.com",
+    "password": "XKCINXNMOMMDCAFI",
+    "server": "smtp.163.com",
+    "port": 465,
+    "max_retries": 3
+  },
+  "strategy": {
+    "symbols": [
+      "AAPL",
+      "MSFT",
+      "NVDA",
+      "AMZN",
+      "NFLX"
+    ],
+    "ma": 200,
+    "capital": 1000,
+    "atr_n": 14
+  },
+  "schedule": {
+    "send_window": [
+      "05:00",
+      "09:30"
+    ],
+    "skip_us_holiday": true
+  }
+}

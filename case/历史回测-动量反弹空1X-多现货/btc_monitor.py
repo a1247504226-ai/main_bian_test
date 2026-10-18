@@ -46,9 +46,9 @@ BTC 日线趋势策略 · 每日检测（邮件推送 + 可选币安下单）
   账户现值 = 本金 + 当前浮盈。历史回测的已平仓盈亏**不计入**（那是回测数据，不是实盘）。
   仓位也按 base 算：名义 = base × 敞口。
 · 同时给一行【回测全程参考】：若从 2017-08 就用 base 一路跟着做，
-  固定本金（每笔按 base 开仓）终值约 9,847 U（9.8 倍），
-  滚仓（每笔按当时权益开仓、利润滚入下一笔）终值约 144,260 U（144.3 倍）。
-· 两者收益率完全相同，滚仓只是把绝对金额放大约 14.65 倍。不要混用。
+  固定本金（每笔按 base 开仓）终值约 9,836 U（9.8 倍），
+  滚仓（每笔按当时权益开仓、利润滚入下一笔）终值约 142,941 U（142.9 倍）。
+· 两者收益率完全相同，滚仓只是把绝对金额放大约 14.5 倍。不要混用。
 
 安全设计
 --------
@@ -67,7 +67,9 @@ import json
 import os
 import smtplib
 import ssl
+import subprocess
 import sys
+import tempfile
 import time
 import traceback
 import urllib.error
@@ -992,6 +994,7 @@ def send_mail(cfg, subject, html):
 
     last_err = None
     for attempt in range(1, int(em["max_retries"]) + 1):
+        delivered = False
         try:
             ctx = ssl.create_default_context()
             if em["use_ssl"]:
@@ -1004,14 +1007,194 @@ def send_mail(cfg, subject, html):
                 s.starttls(context=ctx)
             s.login(em["sender"], em["password"])
             s.sendmail(em["sender"], em["to"], msg.as_string())
-            s.quit()
+            delivered = True
+            try:
+                s.quit()
+            except Exception:
+                # 信已经交出去了，收尾断开失败不能算失败，更不能触发重发
+                pass
             return True, "已发送至 " + ", ".join(em["to"])
         except Exception as e:
+            if delivered:
+                # sendmail 成功之后才出错（多半是服务器断连）→ 只补一句提示，绝不重发
+                return True, "已发送至 " + ", ".join(em["to"]) + "（收尾断连，不影响收信）"
             last_err = "%s: %s" % (type(e).__name__, e)
             log("  邮件第 %d 次尝试失败：%s" % (attempt, last_err))
             if attempt < int(em["max_retries"]):
                 time.sleep(3 * attempt)
     return False, "发送失败（已重试 %d 次）：%s" % (em["max_retries"], last_err)
+
+
+def lock_dir():
+    """本机公用的发信锁目录：同一台机器上所有策略副本都往这里写锁。"""
+    base = (os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+            or tempfile.gettempdir())
+    d = os.path.join(base, "BTC_Strategy")
+    try:
+        os.makedirs(d, exist_ok=True)
+        return d
+    except Exception:
+        return tempfile.gettempdir()
+
+
+def claim_mail_slot(bar_date):
+    """抢同一根日线的发信权（原子创建锁文件）。
+
+    返回 (True, 锁文件路径, "") 表示抢到了，可以发。
+    返回 (False, 路径, 占用者说明) 表示本机已经有一份策略副本发过这封邮件 ——
+    这是「同一台机器上两份文件夹 / 两个计划任务同时跑」造成重复邮件的兜底。
+    """
+    path = os.path.join(lock_dir(), "sent_%s.lock" % bar_date)
+    payload = "%s | %s | pid=%d" % (fdt(), os.path.abspath(__file__), os.getpid())
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                owner = f.read().strip()
+        except Exception:
+            owner = "（锁文件无法读取）"
+        return False, path, owner
+    except Exception:
+        return True, None, ""          # 锁不可用时不阻断发信
+    try:
+        os.write(fd, payload.encode("utf-8"))
+    finally:
+        os.close(fd)
+    # 顺手清掉 30 天前的旧锁，别让目录越堆越多
+    try:
+        cut = time.time() - 30 * 86400
+        for fn in os.listdir(lock_dir()):
+            fp = os.path.join(lock_dir(), fn)
+            if fn.startswith("sent_") and os.path.getmtime(fp) < cut:
+                os.remove(fp)
+    except Exception:
+        pass
+    return True, path, ""
+
+
+def release_mail_slot(path):
+    """发信失败时把锁还回去，让下一次运行还能补发。"""
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except Exception:
+        pass
+
+
+def _ps(script):
+    """跑一段 PowerShell，按 UTF-8 取回输出（避免中文乱码）。"""
+    cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+           "[Console]::OutputEncoding=[Text.Encoding]::UTF8; " + script]
+    try:
+        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           timeout=300)
+        return p.stdout.decode("utf-8", "replace")
+    except Exception as e:
+        return "[PowerShell 调用失败] %s: %s" % (type(e).__name__, e)
+
+
+def doctor():
+    """诊断「一次运行却收到两封邮件」：查计划任务、查策略副本、查发信锁。"""
+    log("=" * 100)
+    log(" 重复邮件诊断")
+    log(" 时间：%s" % fdt())
+    log(" 机器：%s    用户：%s" % (os.environ.get("COMPUTERNAME", "?"),
+                                   os.environ.get("USERNAME", "?")))
+    log(" 本目录：%s" % HERE)
+    log("=" * 100)
+
+    cfg = load_config()
+    em = cfg["email"]
+    st = cfg["strategy"]
+    log("")
+    log("【0】当前配置")
+    log("      收件人：%s" % ", ".join(em["to"]))
+    log("      always_mail=%s · mail_only_on_change=%s · 重试次数=%s"
+        % (st.get("always_mail"), st.get("mail_only_on_change"), em.get("max_retries")))
+
+    # ---------------------------------------------------------------- 计划任务
+    log("")
+    log("【1】本机计划任务（只看跑本策略的）")
+    out = _ps(
+        "$rows=@();"
+        "Get-ScheduledTask | ForEach-Object {"
+        "  $t=$_; $a=@(); foreach($x in $t.Actions){ $a += ($x.Execute + ' ' + $x.Arguments) };"
+        "  $line=($a -join ' | ');"
+        "  if($line -match '(?i)btc|silent'){"
+        "    $i=Get-ScheduledTaskInfo -TaskName $t.TaskName -TaskPath $t.TaskPath;"
+        "    $rows += ('  * {0}{1}   状态={2}   上次运行={3}   返回码=0x{4:X}' -f $t.TaskPath,$t.TaskName,$t.State,$i.LastRunTime,$i.LastTaskResult);"
+        "    $rows += ('      命令：' + $line)"
+        "  }"
+        "};"
+        "if($rows.Count -eq 0){'  （没找到相关计划任务）'} else {$rows}"
+    )
+    for line in out.splitlines():
+        log(line)
+    n_task = sum(1 for ln in out.splitlines() if ln.strip().startswith("* "))
+
+    # ---------------------------------------------------------------- 策略副本
+    log("")
+    log("【2】本机上的策略副本（找 btc_monitor.py）")
+    out2 = _ps(
+        "$roots=@($env:USERPROFILE,'D:\\','E:\\');"
+        "foreach($r in $roots){ if(Test-Path $r){"
+        "  Get-ChildItem -LiteralPath $r -Filter 'btc_monitor.py' -Recurse -File -Depth 8 -ErrorAction SilentlyContinue | ForEach-Object {"
+        "    $d=$_.DirectoryName; $lg=Join-Path $d 'monitor_log.txt'; $last='(无日志)';"
+        "    if(Test-Path $lg){"
+        "      $m=Select-String -LiteralPath $lg -Pattern '20\\d\\d-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d' -AllMatches -ErrorAction SilentlyContinue | Select-Object -Last 1;"
+        "      if($m){$last=$m.Matches[0].Value}"
+        "    };"
+        "    '  * ' + $d + '    最近一次运行=' + $last"
+        "  }"
+        "}}"
+    )
+    copies = []
+    for line in out2.splitlines():
+        if line.strip().startswith("* "):
+            copies.append(line)
+            log(line)
+    if not copies:
+        log("  （在用户目录下没找到其他副本；本目录之外的路径请手动确认）")
+    n_copy = len(copies)
+
+    # ---------------------------------------------------------------- 发信锁
+    log("")
+    log("【3】本机发信锁（%s）" % lock_dir())
+    try:
+        locks = sorted(fn for fn in os.listdir(lock_dir()) if fn.startswith("sent_"))
+    except Exception:
+        locks = []
+    if not locks:
+        log("      （还没有锁记录）")
+    for fn in locks[-7:]:
+        try:
+            with open(os.path.join(lock_dir(), fn), "r", encoding="utf-8",
+                      errors="replace") as f:
+                body = f.read().strip()
+        except Exception:
+            body = "（读不到）"
+        log("      %s  ←  %s" % (fn, body))
+
+    # ---------------------------------------------------------------- 结论
+    log("")
+    log("【4】结论")
+    if n_task > 1:
+        log("      ✘ 本机有 %d 个计划任务在跑本策略 —— 每个任务都会发一封邮件，这就是重复的来源。" % n_task)
+        log("        只留一个：任务计划程序里删掉多余的，或用「卸载定时任务.bat」删完再重新装一次。")
+    elif n_task == 1:
+        log("      · 本机只有 1 个计划任务，看起来正常。")
+    if n_copy > 1:
+        log("      ✘ 本机有 %d 份策略副本 —— 如果它们各自都装了计划任务，就会各发一封。" % n_copy)
+        log("        留一份最新的，其余删掉（或至少删掉它们的计划任务）。")
+    if n_task <= 1 and n_copy <= 1:
+        log("      · 本机只有一份副本、一个任务。若仍然收到两封，第二封来自另一台机器")
+        log("        （那台机器上的计划任务也要卸掉），或者来自邮箱侧的自动转发/分类。")
+    log("")
+    log("      已加机器级发信锁：同一根日线在这台机器上只允许发一封，")
+    log("      即使两份副本同时跑也不会重复。锁目录见【3】。")
+    log("=" * 100)
 
 
 # ==============================================================================
@@ -1210,7 +1393,10 @@ def main():
             f.write(mail_html)
         log("      邮件正文已另存：%s" % html_out)
 
-    # 同一根已收盘日线只发一封：防止「计划任务 + 手动双击 + 批处理重试」叠加出重复邮件
+    # 同一根已收盘日线只发一封，两道闸：
+    #   ① 本文件夹的 monitor_state.json（last_mailed_bar）
+    #   ② 本机共用的锁文件 %LOCALAPPDATA%\BTC_Strategy\sent_<日期>.lock
+    #      同一台机器上就算有两份策略副本、两个计划任务同时跑，也只有一份能发出去
     mailed_bar = state.get("last_mailed_bar")
     dup = (mailed_bar == res["bar_date"]) and not force_mail
 
@@ -1224,12 +1410,24 @@ def main():
         log(("  ✔ " if ok else "  ✘ ") + info)
         log("  上次发信时间：%s" % (state.get("last_mail_at") or "—"))
     else:
-        log("正在发送邮件 ...")
-        ok, info = send_mail(cfg, subject, mail_html)
-        log(("  ✔ " if ok else "  ✘ ") + info)
-        if ok:
-            state["last_mailed_bar"] = res["bar_date"]
-            state["last_mail_at"] = fdt()
+        got, lock_path, owner = (True, None, "")
+        if not force_mail:
+            got, lock_path, owner = claim_mail_slot(res["bar_date"])
+        if not got:
+            ok, info = False, ("已跳过（%s 这根日线本机已有一份策略副本发过信）"
+                               % res["bar_date"])
+            log("  ✘ " + info)
+            log("  占用者：%s" % owner)
+            log("  想只留一份：删掉多余的文件夹，或删掉多余的计划任务。")
+        else:
+            log("正在发送邮件 ...")
+            ok, info = send_mail(cfg, subject, mail_html)
+            log(("  ✔ " if ok else "  ✘ ") + info)
+            if ok:
+                state["last_mailed_bar"] = res["bar_date"]
+                state["last_mail_at"] = fdt()
+            else:
+                release_mail_slot(lock_path)
 
     # ---- 状态落盘 ----
     state["position"] = {"sig": pos["dir"], "entry_date": pos["entry_date"],
@@ -1265,6 +1463,21 @@ def main():
 
 
 if __name__ == "__main__":
+    if "--doctor" in sys.argv[1:]:
+        # 重复邮件诊断：只读，不发信、不改状态
+        try:
+            doctor()
+        except Exception:
+            log(traceback.format_exc())
+        try:
+            with open(LOG_PATH, "a", encoding="utf-8") as f:
+                f.write("\n" + "=" * 100 + "\n")
+                f.write("诊断运行时间：%s\n" % fdt())
+                f.write("\n".join(LOG_BUF) + "\n")
+        except Exception:
+            pass
+        sys.exit(0)
+
     try:
         sys.exit(main())
     except Exception:

@@ -6,7 +6,7 @@ cd /d "%~dp0"
 rem ============================================================================
 rem  BTC Strategy - Daily Check  (double-click to run)
 rem
-rem  Runs btc_monitor.py: checks the two schemes, prints a position report
+rem  Runs btc_monitor.py: checks the single scheme, prints a position report
 rem  (entry price / current price / floating PnL) and sends the report email.
 rem
 rem  Optional arguments (pass through to python):

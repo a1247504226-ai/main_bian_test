@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>熊市检验 · 趋势策略在崩盘里到底怎样</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#f6f7f9;font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+color:#15171a;line-height:1.7;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1140px;margin:0 auto;padding:44px 26px 80px}
+h1{font-size:31px;margin:0 0 8px;letter-spacing:-.6px;font-weight:750}
+h2{font-size:19px;margin:44px 0 14px;padding-left:11px;border-left:3px solid #c0392b;font-weight:700}
+h3{font-size:15px;margin:22px 0 8px;color:#374151}
+.sub{color:#6b7280;font-size:14px;margin-bottom:26px}
+.card{background:#fff;border:1px solid #e8eaed;border-radius:10px;padding:22px 24px;margin:14px 0}
+.lead{background:#fff;border-left:4px solid #c0392b;border-radius:8px;padding:20px 24px;margin:18px 0 8px}
+.lead b{color:#c0392b}
+p{margin:10px 0;font-size:14.5px}
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+th{text-align:left;font-weight:600;color:#6b7280;font-size:12px;padding:9px 10px;border-bottom:1px solid #e8eaed;background:#fafbfc}
+td{padding:9px 10px;border-bottom:1px solid #f0f2f5;vertical-align:middle}
+tr:last-child td{border-bottom:none}
+.n{text-align:right;font-variant-numeric:tabular-nums}
+.pos{color:#c0392b}
+.neg{color:#1e8449}
+.note{font-size:12.5px;color:#6b7280;margin-top:10px}
+.warn{background:#fffbeb;border-radius:8px;padding:14px 18px;font-size:13.5px;color:#92400e;margin:12px 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:820px){.grid2{grid-template-columns:1fr}}
+.kpi{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:16px 0}
+.k{background:#fff;border:1px solid #e8eaed;border-radius:9px;padding:14px 16px}
+.k .v{font-size:22px;font-weight:700;letter-spacing:-.4px}
+.k .l{font-size:12px;color:#6b7280;margin-top:2px}
+svg{max-width:100%;height:auto;display:block}
+</style></head><body><div class="wrap">
+
+<h1>熊市检验：这套策略在崩盘里到底怎样</h1>
+<div class="sub">数据：东财后复权日线，1990-2026 · 组合：AAPL / MSFT / NVDA / AMZN 等权 · 规则：收盘站上 MA200 则次日开盘持有，跌破则清空</div>
+
+<div class="lead">
+<b>会亏，但亏得少很多，而且长期反而赚得更多。</b><br>
+从 2000-01 科网顶入场，26.7 年后：趋势过滤 <b>1,265 倍</b>，等权买入 <b>612 倍</b>。<br>
+更关键的是过程 —— 趋势策略的最低点只比本金低 <b>16.3%</b>，买入持有最低跌到 <b>-66%</b>。
+</div>
+
+<div class="kpi">
+  <div class="k"><div class="v" style="color:#c0392b">1,265x</div><div class="l">趋势过滤终值</div></div>
+  <div class="k"><div class="v" style="color:#6b7280">612x</div><div class="l">买入持有终值</div></div>
+  <div class="k"><div class="v" style="color:#c0392b">-40.2%</div><div class="l">趋势最大回撤</div></div>
+  <div class="k"><div class="v" style="color:#6b7280">-81.0%</div><div class="l">买入最大回撤</div></div>
+</div>
+
+<div class="card"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 430" font-family="-apple-system,Segoe UI,Microsoft YaHei,sans-serif"><rect width="1080" height="430" fill="#ffffff"/><text x="64" y="24" font-size="15" font-weight="700" fill="#15171a">2000-01 科网顶入场，1 万本金 26.7 年后（对数轴，纵轴为倍数）</text><line x1="64" y1="367.0" x2="930" y2="367.0" stroke="#eceef1" stroke-width="1"/><text x="56" y="371.0" font-size="11" fill="#6b7280" text-anchor="end">5,000</text><line x1="64" y1="340.4" x2="930" y2="340.4" stroke="#eceef1" stroke-width="1"/><text x="56" y="344.4" font-size="11" fill="#6b7280" text-anchor="end">10,000</text><line x1="64" y1="313.8" x2="930" y2="313.8" stroke="#eceef1" stroke-width="1"/><text x="56" y="317.8" font-size="11" fill="#6b7280" text-anchor="end">20,000</text><line x1="64" y1="278.6" x2="930" y2="278.6" stroke="#eceef1" stroke-width="1"/><text x="56" y="282.6" font-size="11" fill="#6b7280" text-anchor="end">50,000</text><line x1="64" y1="251.9" x2="930" y2="251.9" stroke="#eceef1" stroke-width="1"/><text x="56" y="255.9" font-size="11" fill="#6b7280" text-anchor="end">100,000</text><line x1="64" y1="225.3" x2="930" y2="225.3" stroke="#eceef1" stroke-width="1"/><text x="56" y="229.3" font-size="11" fill="#6b7280" text-anchor="end">200,000</text><line x1="64" y1="190.1" x2="930" y2="190.1" stroke="#eceef1" stroke-width="1"/><text x="56" y="194.1" font-size="11" fill="#6b7280" text-anchor="end">500,000</text><line x1="64" y1="163.5" x2="930" y2="163.5" stroke="#eceef1" stroke-width="1"/><text x="56" y="167.5" font-size="11" fill="#6b7280" text-anchor="end">1,000,000</text><line x1="64" y1="136.9" x2="930" y2="136.9" stroke="#eceef1" stroke-width="1"/><text x="56" y="140.9" font-size="11" fill="#6b7280" text-anchor="end">2,000,000</text><line x1="64" y1="101.7" x2="930" y2="101.7" stroke="#eceef1" stroke-width="1"/><text x="56" y="105.7" font-size="11" fill="#6b7280" text-anchor="end">5,000,000</text><line x1="64" y1="75.0" x2="930" y2="75.0" stroke="#eceef1" stroke-width="1"/><text x="56" y="79.0" font-size="11" fill="#6b7280" text-anchor="end">10,000,000</text><line x1="64" y1="48.4" x2="930" y2="48.4" stroke="#eceef1" stroke-width="1"/><text x="56" y="52.4" font-size="11" fill="#6b7280" text-anchor="end">20,000,000</text><line x1="64" y1="46" x2="64" y2="388" stroke="#d0d4da"/><line x1="64" y1="388" x2="930" y2="388" stroke="#d0d4da"/><text x="64" y="406" font-size="10" fill="#6b7280" text-anchor="middle">2000-01</text><text x="138" y="406" font-size="10" fill="#6b7280" text-anchor="middle">2002-04</text><text x="212" y="406" font-size="10" fill="#6b7280" text-anchor="middle">2004-08</text><text x="286" y="406" font-size="10" fill="#6b7280" text-anchor="middle">2006-11</text><text x="360" y="406" font-size="10" fill="#6b7280" text-anchor="middle">2009-03</text><text x="434" y="406" font-size="10" fill="#6b7280" text-anchor="middle">2011-06</text><text x="508" y="406" font-size="10" fill="#6b7280" text-anchor="middle">2013-09</text><text x="582" y="406" font-size="10" fill="#6b7280" text-anchor="middle">2016-01</text><text x="656" y="406" font-size="10" fill="#6b7280" text-anchor="middle">2018-04</text><text x="730" y="406" font-size="10" fill="#6b7280" text-anchor="middle">2020-08</text><text x="804" y="406" font-size="10" fill="#6b7280" text-anchor="middle">2022-11</text><text x="878" y="406" font-size="10" fill="#6b7280" text-anchor="middle">2025-03</text><clipPath id="clip52363"><rect x="64" y="46" width="866" height="342"/></clipPath><g clip-path="url(#clip52363)"><polyline points="64.0,340.4 68.4,341.5 72.7,334.6 77.1,336.9 81.4,329.1 85.8,327.1 90.1,331.3 94.5,336.4 98.8,336.4 103.2,336.3 107.5,328.9 111.9,329.8 116.2,330.8 120.6,336.6 124.9,330.0 129.3,324.7 133.6,325.3 138.0,331.1 142.3,331.1 146.7,332.3 151.0,332.1 155.4,331.5 159.7,331.5 164.1,332.0 168.4,333.4 172.8,322.8 177.1,315.3 181.5,324.0 185.8,323.6 190.2,322.8 194.6,318.6 198.9,323.2 203.3,324.1 207.6,324.3 212.0,324.9 216.3,323.7 220.7,319.3 225.0,313.9 229.4,308.1 233.7,310.6 238.1,308.8 242.4,308.6 246.8,304.3 251.1,301.4 255.5,293.1 259.8,290.0 264.2,289.5 268.5,284.0 272.9,295.6 277.2,295.4 281.6,289.2 285.9,283.5 290.3,283.8 294.6,285.0 299.0,288.0 303.3,279.7 307.7,271.8 312.1,270.8 316.4,264.4 320.8,263.1 325.1,274.0 329.5,274.0 333.8,271.4 338.2,273.1 342.5,273.4 346.9,276.1 351.2,276.1 355.6,276.1 359.9,276.3 364.3,275.9 368.6,274.6 373.0,269.7 377.3,264.6 381.7,264.8 386.0,260.6 390.4,261.4 394.7,256.7 399.1,257.1 403.4,257.9 407.8,257.7 412.1,253.5 416.5,251.7 420.8,242.9 425.2,243.7 429.5,245.6 433.9,248.3 438.3,244.6 442.6,244.0 447.0,244.0 451.3,245.0 455.7,239.0 460.0,234.0 464.4,238.4 468.7,234.0 473.1,231.2 477.4,233.4 481.8,235.6 486.1,235.7 490.5,235.7 494.8,235.9 499.2,235.2 503.5,235.2 507.9,235.4 512.2,232.8 516.6,230.2 520.9,230.7 525.3,230.8 529.6,226.0 534.0,224.1 538.3,222.7 542.7,222.4 547.0,218.8 551.4,218.5 555.7,214.1 560.1,215.0 564.5,214.3 568.8,216.6 573.2,216.6 577.5,216.2 581.9,216.0 586.2,216.2 590.6,214.8 594.9,213.1 599.3,211.8 603.6,209.4 608.0,205.6 612.3,202.5 616.7,196.7 621.0,195.8 625.4,191.3 629.7,190.3 634.1,186.8 638.4,185.1 642.8,179.7 647.1,178.6 651.5,178.5 655.8,180.1 660.2,176.0 664.5,176.7 668.9,172.2 673.2,175.7 677.6,179.5 681.9,179.5 686.3,179.8 690.7,180.1 695.0,179.3 699.4,181.0 703.7,176.6 708.1,171.7 712.4,166.2 716.8,166.8 721.1,166.6 725.5,158.3 729.8,150.2 734.2,147.1 738.5,142.8 742.9,143.9 747.2,141.0 751.6,144.1 755.9,141.8 760.3,134.0 764.6,130.7 769.0,131.1 773.3,121.9 777.7,130.3 782.0,134.8 786.4,135.6 790.7,135.9 795.1,135.3 799.4,136.3 803.8,136.3 808.2,138.7 812.5,129.8 816.9,126.3 821.2,113.6 825.6,109.8 829.9,109.4 834.3,112.4 838.6,107.2 843.0,97.2 847.3,85.4 851.7,87.0 856.0,75.2 860.4,73.5 864.7,74.2 869.1,69.2 873.4,72.9 877.8,81.7 882.1,82.0 886.5,79.6 890.8,71.9 895.2,72.1 899.5,67.5 903.9,69.2 908.2,69.8 912.6,71.8 916.9,64.7 921.3,67.1 925.6,65.7 930.0,66.0" fill="none" stroke="#c0392b" stroke-width="2" stroke-linejoin="round"/><polyline points="64.0,340.4 68.4,340.6 72.7,332.7 77.1,339.6 81.4,329.6 85.8,327.5 90.1,338.1 94.5,349.6 98.8,349.2 103.2,345.6 107.5,331.4 111.9,332.8 116.2,334.7 120.6,344.9 124.9,330.8 129.3,322.8 133.6,324.7 138.0,339.9 142.3,344.4 146.7,366.5 151.0,375.6 155.4,366.0 159.7,368.0 164.1,374.5 168.4,367.7 172.8,355.9 177.1,348.3 181.5,355.0 185.8,353.6 190.2,349.9 194.6,345.4 198.9,351.3 203.3,349.4 207.6,350.5 212.0,358.6 216.3,358.2 220.7,352.1 225.0,345.0 229.4,341.0 233.7,343.9 238.1,340.7 242.4,339.9 246.8,336.5 251.1,334.5 255.5,328.0 259.8,324.1 264.2,322.1 268.5,316.5 272.9,328.1 277.2,324.2 281.6,316.5 285.9,310.1 290.3,310.5 294.6,312.7 299.0,314.2 303.3,307.2 307.7,299.0 312.1,296.4 316.4,292.7 320.8,291.6 325.1,302.4 329.5,308.8 333.8,303.3 338.2,307.5 342.5,313.6 346.9,329.1 351.2,342.7 355.6,334.0 359.9,335.0 364.3,322.9 368.6,319.9 373.0,315.3 377.3,310.2 381.7,310.4 386.0,305.5 390.4,306.8 394.7,302.4 399.1,305.3 403.4,310.0 407.8,309.1 412.1,303.8 416.5,299.1 420.8,289.8 425.2,291.4 429.5,293.0 433.9,295.4 438.3,293.1 442.6,291.0 447.0,292.1 451.3,294.5 455.7,287.8 460.0,283.2 464.4,287.8 468.7,283.3 473.1,280.1 477.4,282.6 481.8,284.5 486.1,286.8 490.5,289.9 494.8,289.3 499.2,288.2 503.5,286.1 507.9,284.2 512.2,281.5 516.6,278.7 520.9,279.3 525.3,279.6 529.6,276.6 534.0,274.2 538.3,273.3 542.7,273.6 547.0,270.4 551.4,270.7 555.7,265.6 560.1,265.7 564.5,265.1 568.8,264.9 573.2,265.8 577.5,260.9 581.9,262.8 586.2,264.4 590.6,259.4 594.9,257.1 599.3,254.9 603.6,251.2 608.0,247.4 612.3,243.8 616.7,237.6 621.0,237.9 625.4,232.9 629.7,230.5 634.1,227.6 638.4,225.1 642.8,219.3 647.1,217.7 651.5,215.4 655.8,216.5 660.2,211.5 664.5,211.9 668.9,207.9 673.2,214.1 677.6,227.6 681.9,224.6 686.3,218.2 690.7,221.6 695.0,219.4 699.4,219.2 703.7,215.7 708.1,211.2 712.4,206.4 716.8,206.5 721.1,203.2 725.5,195.5 729.8,187.7 734.2,185.0 738.5,180.9 742.9,182.2 747.2,179.4 751.6,180.8 755.9,178.6 760.3,171.0 764.6,168.1 769.0,168.4 773.3,159.8 777.7,168.5 782.0,167.9 786.4,172.2 790.7,178.6 795.1,172.9 799.4,182.8 803.8,178.1 808.2,182.6 812.5,168.7 816.9,164.6 821.2,152.1 825.6,148.4 829.9,147.9 834.3,151.0 838.6,145.5 843.0,135.7 847.3,124.4 851.7,125.7 856.0,114.2 860.4,112.7 864.7,113.3 869.1,108.4 873.4,111.9 877.8,115.8 882.1,120.9 886.5,109.6 890.8,101.7 895.2,101.7 899.5,97.2 903.9,98.9 908.2,99.6 912.6,101.5 916.9,93.4 921.3,95.9 925.6,93.5 930.0,93.9" fill="none" stroke="#9ca3af" stroke-width="2" stroke-linejoin="round"/></g><rect x="946" y="46" width="12" height="3" rx="1.5" fill="#c0392b"/><text x="964" y="51" font-size="11" fill="#374151">趋势过滤</text><rect x="946" y="68" width="12" height="3" rx="1.5" fill="#9ca3af"/><text x="964" y="73" font-size="11" fill="#374151">等权买入</text></svg></div>
+
+<h2>一、如果现在就是顶，接下来会怎样</h2>
+<p>我把历史上三个大顶当天作为起点，分别跑 1 / 2 / 3 年。这是最直接回答「现在入场会怎样」的实验。</p>
+
+<div class="card">
+<table>
+<thead><tr><th>顶部</th><th class="n">持有</th><th class="n">趋势收益</th><th class="n">趋势最深</th>
+<th class="n">买入收益</th><th class="n">买入最深</th><th class="n">差</th></tr></thead>
+<tbody><tr><td rowspan=3><b>2000-03-24 科网顶</b></td><td class="n">1 年</td><td class="n"><b>-11.4%</b></td><td class="n" style="color:#6b7280">-19.9%</td><td class="n">-43.2%</td><td class="n" style="color:#6b7280">-66.3%</td><td class="n pos">+31.8pp</td></tr><tr><td class="n">2 年</td><td class="n"><b>-4.4%</b></td><td class="n" style="color:#6b7280">-21.7%</td><td class="n">-24.1%</td><td class="n" style="color:#6b7280">-66.3%</td><td class="n pos">+19.7pp</td></tr><tr><td class="n">3 年</td><td class="n"><b>-3.6%</b></td><td class="n" style="color:#6b7280">-22.9%</td><td class="n">-61.8%</td><td class="n" style="color:#6b7280">-73.7%</td><td class="n pos">+58.2pp</td></tr><tr><td rowspan=3><b>2007-10-09 危机前顶</b></td><td class="n">1 年</td><td class="n"><b>-24.7%</b></td><td class="n" style="color:#6b7280">-30.6%</td><td class="n">-45.4%</td><td class="n" style="color:#6b7280">-50.2%</td><td class="n pos">+20.7pp</td></tr><tr><td class="n">2 年</td><td class="n"><b>-2.6%</b></td><td class="n" style="color:#6b7280">-34.0%</td><td class="n">-14.9%</td><td class="n" style="color:#6b7280">-61.6%</td><td class="n pos">+12.3pp</td></tr><tr><td class="n">3 年</td><td class="n"><b>+23.4%</b></td><td class="n" style="color:#6b7280">-34.0%</td><td class="n">+13.9%</td><td class="n" style="color:#6b7280">-61.6%</td><td class="n pos">+9.5pp</td></tr><tr><td rowspan=3><b>2021-11-19 放水顶</b></td><td class="n">1 年</td><td class="n"><b>-22.9%</b></td><td class="n" style="color:#6b7280">-23.0%</td><td class="n">-33.5%</td><td class="n" style="color:#6b7280">-39.5%</td><td class="n pos">+10.6pp</td></tr><tr><td class="n">2 年</td><td class="n"><b>+17.4%</b></td><td class="n" style="color:#6b7280">-24.3%</td><td class="n">+13.9%</td><td class="n" style="color:#6b7280">-41.1%</td><td class="n pos">+3.5pp</td></tr><tr><td class="n">3 年</td><td class="n"><b>+96.8%</b></td><td class="n" style="color:#6b7280">-24.3%</td><td class="n">+99.5%</td><td class="n" style="color:#6b7280">-41.1%</td><td class="n pos">-2.6pp</td></tr></tbody>
+</table>
+<div class="note">「最深」是这 1/2/3 年内的最大回撤，不是最终收益。</div>
+</div>
+
+<div class="warn">
+<b>要接受的现实：</b>顶部入场的第一年，趋势策略照样亏 11%~25%。
+它不是「熊市不亏钱」，是「熊市少亏一半」。真正救命的是第 2、3 年 ——
+2000 顶入场，买入持有 3 年后还亏 62%，趋势只亏 3.6%。
+</div>
+
+<h2>二、按牛熊段切开看</h2>
+<div class="card">
+<table>
+<thead><tr><th>区间</th><th>起止</th><th class="n">趋势</th><th class="n">买入</th>
+<th class="n">差</th><th class="n">趋势MDD</th><th class="n">买入MDD</th></tr></thead>
+<tbody><tr><td><b>科网崩盘</b></td><td style="color:#667085;font-size:12.5px">2000-03-24 ~ 2002-10-09</td><td class="n">+4.8%</td><td class="n">-73.0%</td><td class="n pos">+77.9pp</td><td class="n">-30.4%</td><td class="n">-81.0%</td></tr><tr><td><b>复苏牛</b></td><td style="color:#667085;font-size:12.5px">2002-10-09 ~ 2007-10-09</td><td class="n">+476.8%</td><td class="n">+952.0%</td><td class="n neg">-475.2pp</td><td class="n">-28.4%</td><td class="n">-45.2%</td></tr><tr><td><b>金融危机</b></td><td style="color:#667085;font-size:12.5px">2007-10-09 ~ 2009-03-09</td><td class="n">-25.8%</td><td class="n">-67.0%</td><td class="n pos">+41.2pp</td><td class="n">-31.6%</td><td class="n">-75.3%</td></tr><tr><td><b>长牛</b></td><td style="color:#667085;font-size:12.5px">2009-03-09 ~ 2020-02-19</td><td class="n">+1916.9%</td><td class="n">+3165.8%</td><td class="n neg">-1248.9pp</td><td class="n">-24.4%</td><td class="n">-45.7%</td></tr><tr><td><b>疫情崩</b></td><td style="color:#667085;font-size:12.5px">2020-02-19 ~ 2020-03-23</td><td class="n">-26.9%</td><td class="n">-27.9%</td><td class="n pos">+1.0pp</td><td class="n">-31.2%</td><td class="n">-30.7%</td></tr><tr><td><b>放水牛</b></td><td style="color:#667085;font-size:12.5px">2020-03-23 ~ 2021-11-19</td><td class="n">+301.8%</td><td class="n">+328.2%</td><td class="n neg">-26.4pp</td><td class="n">-19.9%</td><td class="n">-18.8%</td></tr><tr><td><b>加息熊</b></td><td style="color:#667085;font-size:12.5px">2021-11-19 ~ 2022-12-28</td><td class="n">-39.4%</td><td class="n">-50.0%</td><td class="n pos">+10.6pp</td><td class="n">-39.9%</td><td class="n">-53.9%</td></tr><tr><td><b>AI 牛</b></td><td style="color:#667085;font-size:12.5px">2022-12-28 ~ 2026-10-16</td><td class="n">+564.0%</td><td class="n">+939.9%</td><td class="n neg">-375.9pp</td><td class="n">-30.8%</td><td class="n">-35.3%</td></tr></tbody>
+</table>
+</div>
+
+<div class="card"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 300" font-family="-apple-system,Segoe UI,Microsoft YaHei,sans-serif"><rect width="1080" height="300" fill="#ffffff"/><text x="58" y="24" font-size="14" font-weight="700" fill="#15171a">四个熊市段：趋势过滤 vs 买入持有（段内总收益）</text><line x1="58" y1="260.0" x2="1056" y2="260.0" stroke="#eceef1"/><text x="50" y="264.0" font-size="10" fill="#6b7280" text-anchor="end">-80%</text><line x1="58" y1="216.8" x2="1056" y2="216.8" stroke="#eceef1"/><text x="50" y="220.8" font-size="10" fill="#6b7280" text-anchor="end">-60%</text><line x1="58" y1="173.6" x2="1056" y2="173.6" stroke="#eceef1"/><text x="50" y="177.6" font-size="10" fill="#6b7280" text-anchor="end">-40%</text><line x1="58" y1="130.4" x2="1056" y2="130.4" stroke="#eceef1"/><text x="50" y="134.4" font-size="10" fill="#6b7280" text-anchor="end">-20%</text><line x1="58" y1="87.2" x2="1056" y2="87.2" stroke="#eceef1"/><text x="50" y="91.2" font-size="10" fill="#6b7280" text-anchor="end">0%</text><line x1="58" y1="44.0" x2="1056" y2="44.0" stroke="#eceef1"/><text x="50" y="48.0" font-size="10" fill="#6b7280" text-anchor="end">20%</text><text x="183" y="277" font-size="10" fill="#374151" text-anchor="middle">科网崩盘 2000-2002</text><rect x="95.4" y="76.8" width="76.8" height="10.4" fill="#c0392b" rx="1.5"/><rect x="182.8" y="87.2" width="76.8" height="157.8" fill="#9ca3af" rx="1.5"/><text x="432" y="277" font-size="10" fill="#374151" text-anchor="middle">金融危机 2007-2009</text><rect x="344.9" y="87.2" width="76.8" height="55.8" fill="#c0392b" rx="1.5"/><rect x="432.2" y="87.2" width="76.8" height="144.7" fill="#9ca3af" rx="1.5"/><text x="682" y="277" font-size="10" fill="#374151" text-anchor="middle">疫情崩 2020</text><rect x="594.4" y="87.2" width="76.8" height="58.1" fill="#c0392b" rx="1.5"/><rect x="681.8" y="87.2" width="76.8" height="60.2" fill="#9ca3af" rx="1.5"/><text x="931" y="277" font-size="10" fill="#374151" text-anchor="middle">加息熊 2021-2022</text><rect x="843.9" y="87.2" width="76.8" height="85.2" fill="#c0392b" rx="1.5"/><rect x="931.2" y="87.2" width="76.8" height="108.1" fill="#9ca3af" rx="1.5"/><rect x="756" y="16" width="11" height="11" rx="2" fill="#c0392b"/><text x="771" y="25" font-size="11" fill="#374151">趋势过滤</text><rect x="906" y="16" width="11" height="11" rx="2" fill="#9ca3af"/><text x="921" y="25" font-size="11" fill="#374151">等权买入</text></svg></div>
+
+<h3>三个结论</h3>
+<p><b>1. 慢熊里它是真救命。</b>科网崩盘（2000-03 到 2002-10，纳指跌 78%）：趋势 <b>+4.8%</b>，买入 <b>−73.0%</b>。
+这是 26 年里最严酷的一段，也是这套策略唯一一次在熊市里做到正收益。</p>
+<p><b>2. 快崩里它几乎没用。</b>2020 疫情崩（1 个月跌 34%）：趋势 −26.9%，买入 −27.9%，只差 1 个点。
+年线是滞后指标，跌太快根本来不及反应。这是这套规则的结构性缺陷。</p>
+<p><b>3. 牛市里它一定跑输。</b>长牛段（2009-2020）趋势 +1917%，买入 +3166%，差了 1249 个百分点。
+你要的是「少亏」，就必须接受「少赚」。</p>
+
+<h2>三、你现在实际承担的风险</h2>
+<p>下面这张表比任何历史回测都更直接：从今天的价格开始同步下跌，仓位会怎么变。</p>
+
+<div class="grid2">
+<div class="card">
+<h3 style="margin-top:0">距 MA200 的距离</h3>
+<table>
+<thead><tr><th>代码</th><th class="n">收盘</th><th class="n">距均线</th><th class="n">历史分位</th><th class="n">信号</th></tr></thead>
+<tbody><tr><td><b>MSFT</b></td><td class="n">529.05</td><td class="n" style="color:#c0392b;font-weight:600">+20.2%</td><td class="n" style="color:#b45309">87%</td><td class="n" style="color:#c0392b">持有</td></tr><tr><td><b>AAPL</b></td><td class="n">343.46</td><td class="n" style="color:#c0392b;font-weight:600">+17.0%</td><td class="n" style="color:#374151">68%</td><td class="n" style="color:#c0392b">持有</td></tr><tr><td><b>NVDA</b></td><td class="n">214.13</td><td class="n" style="color:#c0392b;font-weight:600">+5.7%</td><td class="n" style="color:#374151">34%</td><td class="n" style="color:#c0392b">持有</td></tr><tr><td><b>AMZN</b></td><td class="n">250.00</td><td class="n" style="color:#c0392b;font-weight:600">+3.0%</td><td class="n" style="color:#374151">37%</td><td class="n" style="color:#c0392b">持有</td></tr><tr><td><b>NFLX</b></td><td class="n">70.53</td><td class="n" style="color:#1e8449;font-weight:600">-14.9%</td><td class="n" style="color:#374151">17%</td><td class="n" style="color:#1e8449">空仓</td></tr></tbody>
+</table>
+<div class="note">「历史分位」= 当前偏离度在该标的历史上的位置。MSFT 处于 87% 分位，属于偏热；NVDA、AMZN 只有 34~37%，已经不热了。</div>
+</div>
+
+<div class="card">
+<h3 style="margin-top:0">下跌时的翻空阶梯</h3>
+<table>
+<thead><tr><th class="n">组合跌幅</th><th class="n">剩余持仓</th><th class="n">仓位</th><th>已离场</th></tr></thead>
+<tbody><tr><td class="n">持平</td><td class="n"><b>4/5</b></td><td class="n">80%</td><td style="color:#1e8449;font-size:12.5px">—</td></tr><tr><td class="n">−3%</td><td class="n"><b>3/5</b></td><td class="n">60%</td><td style="color:#1e8449;font-size:12.5px">AMZN</td></tr><tr><td class="n">−6%</td><td class="n"><b>2/5</b></td><td class="n">40%</td><td style="color:#1e8449;font-size:12.5px">AMZN, NVDA</td></tr><tr><td class="n">−10%</td><td class="n"><b>2/5</b></td><td class="n">40%</td><td style="color:#1e8449;font-size:12.5px">AMZN, NVDA</td></tr><tr><td class="n">−15%</td><td class="n"><b>2/5</b></td><td class="n">40%</td><td style="color:#1e8449;font-size:12.5px">AMZN, NVDA</td></tr><tr><td class="n">−18%</td><td class="n"><b>1/5</b></td><td class="n">20%</td><td style="color:#1e8449;font-size:12.5px">AMZN, NVDA, AAPL</td></tr><tr><td class="n">−21%</td><td class="n"><b>0/5</b></td><td class="n">0%</td><td style="color:#1e8449;font-size:12.5px">AMZN, NVDA, AAPL, MSFT</td></tr></tbody>
+</table>
+<div class="note">假设各标的同步下跌、MA200 短期不动。实际 MA200 也会下移，翻空会稍慢一点。</div>
+</div>
+</div>
+
+<div class="warn">
+<b>这张表说明了一件不舒服的事：</b>前 6% 的跌幅几乎没有保护 —— AMZN 只高出年线 3.0%、NVDA 高出 5.7%，
+一有风吹草动就翻空，但 AAPL 要跌 17%、MSFT 要跌 21% 才出。
+也就是说组合要跌掉 21%，仓位才会清零。这不是「见顶就跑」，是「跌破才跑」。
+</div>
+
+<h2>四、这套策略什么时候会失效</h2>
+<p>诚实说，有三种情况它会让你难受：</p>
+<p><b>① 闪崩。</b>2020 年 3 月那种 4 周跌 34% 的行情，年线来不及反应，趋势策略跟买入持有几乎一样惨。
+如果你担心的是「某天突然崩」，这套规则给不了保护。</p>
+<p><b>② 假突破反复打脸。</b>震荡市里价格在年线上下反复穿，每次翻仓都要付滑点。
+全池测试里，随机挑一只标的，这套择时的预测力等同于抛硬币（相位检验中位分位 47%）。</p>
+<p><b>③ 你只有 5 只科技股。</b>它们同涨同跌，2022 年有 4 只同时跌破年线。
+分散化在这个组合里是假的 —— 真正的分散需要跨资产（比如加 JNK、GLD、TLT），
+而全池测试里趋势过滤效果最好的恰恰是信用债（JNK +0.50、HYG +0.33）。</p>
+
+<h2>五、那到底该不该现在上</h2>
+<p>这个问题我没法替你回答，但可以把账算清楚：</p>
+<p><b>如果现在是顶</b>：第一年大概率亏 11%~25%，比你自己死扛少亏 20~30 个百分点。
+第二、三年开始分化 —— 2000 那种慢熊，三年后你只亏 3.6%，死扛的人亏 62%。</p>
+<p><b>如果现在不是顶</b>：你会跑输，2021 顶入场后 3 年趋势 +96.8% vs 买入 +99.5%，只差 2.6 个点；
+但如果是 2009-2020 那种长牛，你会少赚一半以上。</p>
+<p><b>这套规则买的是保险，不是彩票。</b>它用「牛市少赚」换「熊市少亏」。
+如果你现在心里已经在担心牛顶，那说明你需要的正是这个 —— 因为它替你做了「跌破就走」这个你自己大概率做不到的决定。</p>
+
+<div class="note" style="margin-top:34px;padding-top:18px;border-top:1px solid #e8eaed">
+数据源：东方财富后复权日线（复权接缝已按比例修正，非截断）· 交易成本：单边滑点 0.05%，无手续费<br>
+回测不构成投资建议。历史表现不代表未来。
+</div>
+
+</div></body></html>

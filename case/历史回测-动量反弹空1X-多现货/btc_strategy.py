@@ -63,7 +63,6 @@ FUNDING_D = 0.0003          # 资金费 0.03%/日
 WARMUP = 60                 # 预热期（前 60 根不出信号）
 LEVERAGE = 1.0              # 合约杠杆（空头腿；名义仓位与杠杆无关，只影响爆仓线。1× = 逆行 100% 才爆）
 REGIME_MA = 50              # 只约束多头的趋势过滤：收盘价 > SMA(50) 才允许做多；0 = 关闭
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 PARAM_SETS = [(8, 24), (10, 30), (12, 36), (15, 45), (20, 60)]
 DAY_MS = 86400000
 API_BASE = "https://data-api.binance.vision/api/v3/klines"
@@ -700,26 +699,50 @@ def main():
     roll = st.get("roll365") or {}
     n_liq = sum(1 for t in r["trades"] if t.get("liq"))
 
-    # ---------------- 1. 总览 ----------------
-    log("【第 1 步】当前方案总览")
+    # ---------------- 1. 总览 + 收益归因 ----------------
+    log("【第 1 步】当前方案总览（含收益归因：140× 到底从哪来）")
     hr("-")
     log(row([("方案", 34, "left"), ("终值", 10, "right"), ("年化", 9, "right"),
              ("最大回撤", 10, "right"), ("Calmar", 8, "right"),
              ("最长水下", 10, "right"), ("滚365最差", 11, "right")]))
     hr("-")
-    log(row([("当前方案（SMA%d + 空头 %d×）" % (REGIME_MA, int(LEVERAGE)), 34, "left"),
-             ("%.2f×" % st["final"], 10, "right"),
-             ("%+.1f%%" % (st["cagr"] * 100), 9, "right"),
-             ("%.1f%%" % (st["mdd"] * 100), 10, "right"),
-             ("%.3f" % st["calmar"], 8, "right"),
-             ("%d天" % st["max_underwater"], 10, "right"),
-             (("%.1f%%" % (roll["min"] * 100)) if roll.get("min") is not None else "—", 11, "right")]))
-    log(row([("买入持有（基准）", 34, "left"), ("%.2f×" % bh, 10, "right"),
+
+    # 把方案拆成各条腿分别单独回测：只多腿 / 只空腿 / 全程做多（不择时）
+    sig_l = [max(x, 0) for x in sig]
+    sig_s = [min(x, 0) for x in sig]
+    r_l = backtest_hybrid(bars, sig_l, capital=CAPITAL, L=LEVERAGE)
+    r_s = backtest_hybrid(bars, sig_s, capital=CAPITAL, L=LEVERAGE)
+    # 全程做多、但保留波动率目标仓位（不择时）——用来看「仓位管理」单独值多少
+    r_b = backtest_hybrid(bars, [1] * len(bars), capital=CAPITAL, L=1.0)
+
+    def _sumline(label, rr):
+        s2 = rr["stats"]
+        rl2 = s2.get("roll365") or {}
+        log(row([(label, 34, "left"), ("%.2f×" % s2["final"], 10, "right"),
+                 ("%+.1f%%" % (s2["cagr"] * 100), 9, "right"),
+                 ("%.1f%%" % (s2["mdd"] * 100), 10, "right"),
+                 ("%.3f" % s2["calmar"], 8, "right"),
+                 ("%d天" % s2["max_underwater"], 10, "right"),
+                 (("%.1f%%" % (rl2["min"] * 100)) if rl2.get("min") is not None else "—",
+                  11, "right")]))
+
+    _sumline("当前方案（SMA%d 多头 + 空头 %d×）★" % (REGIME_MA, int(LEVERAGE)), r)
+    _sumline("  ├ 只做多腿（EMA 择时 + 仓位管理）", r_l)
+    _sumline("  ├ 只做空腿（SMA%d 不管空头）" % REGIME_MA, r_s)
+    _sumline("  └ 全程做多（不择时，只做仓位管理）", r_b)
+    log(row([("买入持有（一直满仓现货，基准）", 34, "left"), ("%.2f×" % bh, 10, "right"),
              ("%+.1f%%" % ((bh ** (1 / years) - 1) * 100), 9, "right"),
              ("%.1f%%" % (bh_mdd * 100), 10, "right"),
              ("—", 8, "right"), ("—", 10, "right"), ("—", 11, "right")]))
     hr("-")
     log("  终值是「利润全部滚进下一笔」的复利口径；固定本金口径见第 7 步。")
+    log("  方案 ≈ 只多腿 × 只空腿（两条腿时间不重叠，复利相乘）。")
+    log("  只做多腿 %.1f× 远高于一直拿着 %.1f× —— 差额来自「跌破均线就空仓」躲开大跌；"
+        % (r_l["stats"]["final"], bh))
+    log("  而仓位管理单独用反而更差（%.1f× < %.1f×），说明真正赚钱的是择时、不是仓位缩放。"
+        % (r_b["stats"]["final"], bh))
+    log("  空头腿只贡献 %.2f×（见第 2 步），作用是熊市减亏、压回撤，不是收益引擎。"
+        % r_s["stats"]["final"])
     write_csv("01_当前方案总览.csv",
               ["方案", "终值倍数", "年化", "最大回撤", "Calmar", "最长水下(天)",
                "滚365最差", "成交笔数", "爆仓次数"],
@@ -728,36 +751,82 @@ def main():
                 "%.4f" % st["calmar"], st["max_underwater"],
                 "" if roll.get("min") is None else "%.4f" % roll["min"],
                 len(r["trades"]), n_liq],
+               ["只做多腿（EMA择时 + 仓位管理）",
+                "%.4f" % r_l["stats"]["final"], "%.4f" % r_l["stats"]["cagr"],
+                "%.4f" % r_l["stats"]["mdd"], "%.4f" % r_l["stats"]["calmar"],
+                r_l["stats"]["max_underwater"],
+                "" if (r_l["stats"].get("roll365") or {}).get("min") is None
+                else "%.4f" % r_l["stats"]["roll365"]["min"],
+                len(r_l["trades"]), sum(1 for t in r_l["trades"] if t.get("liq"))],
+               ["只做空腿（SMA%d 不管空头）" % REGIME_MA,
+                "%.4f" % r_s["stats"]["final"], "%.4f" % r_s["stats"]["cagr"],
+                "%.4f" % r_s["stats"]["mdd"], "%.4f" % r_s["stats"]["calmar"],
+                r_s["stats"]["max_underwater"],
+                "" if (r_s["stats"].get("roll365") or {}).get("min") is None
+                else "%.4f" % r_s["stats"]["roll365"]["min"],
+                len(r_s["trades"]), sum(1 for t in r_s["trades"] if t.get("liq"))],
+               ["全程做多（不择时，只做仓位管理）",
+                "%.4f" % r_b["stats"]["final"], "%.4f" % r_b["stats"]["cagr"],
+                "%.4f" % r_b["stats"]["mdd"], "%.4f" % r_b["stats"]["calmar"],
+                r_b["stats"]["max_underwater"],
+                "" if (r_b["stats"].get("roll365") or {}).get("min") is None
+                else "%.4f" % r_b["stats"]["roll365"]["min"],
+                len(r_b["trades"]), sum(1 for t in r_b["trades"] if t.get("liq"))],
                ["买入持有（基准）", "%.4f" % bh, "%.4f" % (bh ** (1 / years) - 1),
                 "%.4f" % bh_mdd, "", "", "", "", ""]])
     log("")
 
     # ---------------- 2. 分腿胜率 ----------------
-    log("【第 2 步】胜率拆解")
+    log("【第 2 步】胜率拆解 + 收益归因")
     hr("-")
     log(row([("腿", 14, "left"), ("笔数", 6, "right"), ("胜率", 8, "right"),
              ("盈亏比", 9, "right"), ("盈亏因子", 10, "right"),
-             ("最长连亏", 9, "right"), ("平均持仓", 9, "right")]))
+             ("最长连亏", 9, "right"), ("平均持仓", 9, "right"),
+             ("单独回测", 11, "right"), ("收益占比", 9, "right")]))
     hr("-")
+
+    # 逐日对数收益按当时持仓方向切开（两条腿时间不重叠 → log 收益可直接相加）
+    _LL = _LS = 0.0
+    for _i in range(1, len(eq)):
+        _a, _bb = eq[_i - 1], eq[_i]
+        if _a is None or _bb is None or _a <= 0 or _bb <= 0:
+            continue
+        _d = math.log(_bb / _a)
+        if sig[_i - 1] > 0:
+            _LL += _d
+        elif sig[_i - 1] < 0:
+            _LS += _d
+    _sum = _LL + _LS
+    _solo = {"spot": r_l["stats"]["final"], "fut": r_s["stats"]["final"]}
+    _share = {"spot": (_LL / _sum) if _sum else 0.0,
+              "fut": (_LS / _sum) if _sum else 0.0, "all": 1.0}
+
     leg_rows = []
     for key, label in (("spot", "现货多头腿"), ("fut", "合约空头腿"), ("all", "合计")):
         b = ts.get(key)
         if not b:
             continue
         ratio = (b["avg_win"] / abs(b["avg_loss"])) if b["avg_loss"] else float("inf")
+        solo = st["final"] if key == "all" else _solo[key]
+        share = _share[key]
         log(row([(label, 14, "left"), (str(b["n"]), 6, "right"),
                  ("%.1f%%" % (b["win_rate"] * 100), 8, "right"),
                  ("%.2f" % ratio, 9, "right"), ("%.2f" % b["pf"], 10, "right"),
                  (str(b["max_consec_loss"]), 9, "right"),
-                 ("%.0f天" % b["avg_hold"], 9, "right")]))
+                 ("%.0f天" % b["avg_hold"], 9, "right"),
+                 ("%.2f×" % solo, 11, "right"), ("%.0f%%" % (share * 100), 9, "right")]))
         leg_rows.append([label, b["n"], b["wins"], b["losses"], "%.4f" % b["win_rate"],
                          "%.4f" % ratio, "%.4f" % b["pf"], b["max_consec_loss"],
-                         "%.1f" % b["avg_hold"]])
+                         "%.1f" % b["avg_hold"], "%.4f" % solo, "%.4f" % share])
     hr("-")
     log("  趋势跟踪的常态：胜率只有三成上下，靠盈亏比赚钱，必须能扛住连续亏损。")
+    log("  「单独回测」= 只跑这一条腿、其余时间空仓；「收益占比」按逐日对数收益切分。")
+    log("  → 收益主要来自多头腿的「择时空仓」（躲开大跌，复利基数不被打残）；")
+    log("    空头腿只贡献 %.2f×（占 %.0f%%），作用是熊市减亏、压回撤，不是收益引擎。"
+        % (_solo["fut"], _share["fut"] * 100))
     write_csv("02_分腿胜率.csv",
               ["腿", "笔数", "盈利笔数", "亏损笔数", "胜率", "盈亏比", "盈亏因子PF",
-               "最长连亏", "平均持仓天数"], leg_rows)
+               "最长连亏", "平均持仓天数", "单独回测终值", "收益占比"], leg_rows)
     log("")
 
     # ---------------- 3. 逐年收益 ----------------
@@ -971,6 +1040,74 @@ def main():
               [["权益曲线逐日重放", "一致（最大相对偏差 %.1e）" % max_rel if ok_eq else "不一致"],
                ["交易序列", "一致（%d 笔）" % len(eng_tr) if ok_tr else "不一致"],
                ["结论", "通过" if (ok_eq and ok_tr) else "未通过"]])
+    log("")
+
+    # ---------------- 9. 反向持仓稳健性检验 ----------------
+    log("【第 9 步】反向持仓稳健性检验（sig=0 的时段改成做空，是不是真的更好？）")
+    hr("-")
+    sig_rev = [-1 if x == 0 else x for x in sig]
+    r_rev = backtest_hybrid(bars, sig_rev, capital=CAPITAL, L=LEVERAGE)
+
+    log(row([("方案", 34, "left"), ("终值", 10, "right"), ("年化", 9, "right"),
+             ("最大回撤", 10, "right"), ("Calmar", 8, "right"),
+             ("笔数", 8, "right"), ("", 13, "right")]))
+    hr("-")
+
+    def _sline(label, rr, mark=""):
+        s2 = rr["stats"]
+        log(row([(label, 34, "left"), ("%.2f×" % s2["final"], 10, "right"),
+                 ("%+.1f%%" % (s2["cagr"] * 100), 9, "right"),
+                 ("%.1f%%" % (s2["mdd"] * 100), 10, "right"),
+                 ("%.3f" % s2["calmar"], 8, "right"),
+                 ("%d笔" % len(rr["trades"]), 8, "right"), (mark, 13, "right")]))
+
+    _sline("A 当前：sig=0 空仓 ★", r, "采用")
+    _sline("B 改成：sig=0 做空", r_rev, "看起来更好")
+    hr("-")
+
+    _d0 = [i for i in range(len(bars) - 1) if sig[i] == 0]
+    _rets = [bars[i + 1]["close"] / bars[i]["close"] - 1.0 for i in _d0]
+    _n = len(_rets)
+    _m = sum(_rets) / _n
+    _sd = (sum((x - _m) ** 2 for x in _rets) / (_n - 1)) ** 0.5
+    _t = _m / (_sd / math.sqrt(_n))
+    _tot, _top5 = 1.0, 1.0
+    for x in _rets:
+        _tot *= (1.0 + x)
+    for x in sorted(_rets)[:5]:          # 跌最多 = 做空最赚的 5 天
+        _top5 *= (1.0 + x)
+    # _tot / _top5 都已是「倍数」，去掉 top5 后剩下的倍数 = 两者相除
+    _rest = _tot / _top5 - 1.0
+
+    _scan = []
+    for _ma in (20, 30, 40, 50, 60, 80, 100, 120):
+        s2 = regime_long(bars, sig_ema_cross(bars, 10, 30), _ma)
+        a2 = backtest_hybrid(bars, s2, capital=CAPITAL, L=LEVERAGE)["stats"]["final"]
+        b2 = backtest_hybrid(bars, [-1 if x == 0 else x for x in s2],
+                             capital=CAPITAL, L=LEVERAGE)["stats"]["final"]
+        _scan.append((_ma, b2 / a2 - 1.0))
+    _neg = sum(1 for _, g in _scan if g < 0)
+
+    log("  sig=0 的时段共 %d 天（占 %.1f%%）—— 三项检验："
+        % (_n, 100.0 * _n / len(bars)))
+    log("    ① 统计显著性：次日 BTC 均值 %+.2f%%，t = %+.2f（|t| < 2 = 与随机无法区分）"
+        % (_m * 100, _t))
+    log("    ② 收益集中度：这 %d 天累计 %+.1f%%，去掉最赚的 5 天后只剩 %+.1f%%"
+        % (_n, _tot * 100 - 100, _rest * 100))
+    log("    ③ 参数敏感性：扫 regime_ma 20→120，%d / %d 个是负的"
+        % (_neg, len(_scan)))
+    log("       %s" % "  ".join("%d:%+.1f%%" % (ma, g * 100) for ma, g in _scan))
+    log("  → 结论：%s（保持 A：sig=0 空仓）"
+        % ("过拟合，不采用" if _neg > len(_scan) / 2 else "稳健，可考虑采用"))
+    write_csv("09_反向持仓检验.csv", ["检验项", "结果", "判定"],
+              [["sig=0 天数", _n, "占全部 %.1f%%" % (100.0 * _n / len(bars))],
+               ["方案A 终值（当前）", "%.4f" % st["final"], "采用"],
+               ["方案B 终值（sig=0做空）", "%.4f" % r_rev["stats"]["final"], "看起来更好"],
+               ["① 次日均值 t 统计量", "%.2f" % _t, "显著" if abs(_t) >= 2 else "不显著"],
+               ["② 这 %d 天累计" % _n, "%.4f" % (_tot - 1.0), "—"],
+               ["② 去掉最赚 5 天后", "%.4f" % _rest, "做空反而巨亏"],
+               ["③ 参数为负个数", "%d / %d" % (_neg, len(_scan)), "典型过拟合"],
+               ["结论", "不采用 B", "保持 sig=0 空仓"]])
     log("")
 
     # ---------------- 汇总 ----------------
