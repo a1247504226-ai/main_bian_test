@@ -317,6 +317,15 @@ def compute(data, ma_n, capital, syms):
     return rows
 
 
+def compute_filter(d, ma_n):
+    """大盘牛熊开关：返回 SPY 是否跌破 MA200（bear）。"""
+    c = d["close"]
+    ma = float(c.rolling(ma_n).mean().iloc[-1])
+    last = float(c.iloc[-1])
+    dev = last / ma - 1
+    return dict(bear=dev < 0, close=last, ma=ma, dev=dev)
+
+
 def load_state():
     if os.path.exists(STATE_PATH):
         try:
@@ -333,7 +342,7 @@ def save_state(rows, asof):
 
 
 # ────────────────────────── 邮件 ──────────────────────────
-def build_mail(rows, prev, cfg, asof, trade_date):
+def build_mail(rows, prev, cfg, asof, trade_date, defense=False, mf=None):
     cap = cfg["strategy"]["capital"]
     per = cap / len(rows)
     n_hold = sum(1 for r in rows if r["hold"])
@@ -403,6 +412,24 @@ def build_mail(rows, prev, cfg, asof, trade_date):
     subject = f'[美股趋势] {trade_date} 开盘前 · 持有 {n_hold}/{len(rows)} · 仓位 {expo*100:.0f}%'
     if actions:
         subject = f'[美股趋势] {trade_date} 开盘前 · ⚠ 有调仓 {len(actions)} 笔'
+    if defense:
+        subject = f'[美股趋势] {trade_date} 开盘前 · 🛡 大盘熊市·全仓持币'
+
+    # 大盘防御横幅（SPY 跌破 MA200 → 全部清仓，不做空）
+    if defense and mf is not None:
+        defense_html = (
+            f'<div style="background:#fef2f2;border:1px solid #fca5a5;border-left:4px solid #dc2626;'
+            f'border-radius:6px;padding:14px 16px;margin-bottom:18px">'
+            f'<div style="font-size:15px;font-weight:700;color:#b91c1c">🛡 大盘熊市防御模式：全部清仓持币</div>'
+            f'<div style="font-size:13px;color:#7f1d1d;margin-top:6px;line-height:1.6">'
+            f'{cfg["market_filter"].get("symbol","SPY")} 收盘 {mf["close"]:,.2f} 已跌破 MA{cfg["market_filter"].get("ma",200)}'
+            f'（{mf["ma"]:,.2f}），距均线 <b>{mf["dev"]*100:+.1f}%</b>。'
+            f'本策略已在熊市开关触发时把全部仓位清空、转持币，<b>不做空</b>。'
+            f'等该指数重新站上 MA{cfg["market_filter"].get("ma",200)} 再恢复做多。</div>'
+            f'</div>'
+        )
+    else:
+        defense_html = ""
 
     html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"></head>
@@ -423,6 +450,8 @@ def build_mail(rows, prev, cfg, asof, trade_date):
     </div>
   </div>
 
+  {defense_html}
+
   <table style="width:100%;border-collapse:collapse;background:#fff;border-radius:6px;font-size:13.5px">
     <thead><tr style="background:#f9fafb">
       <th style="padding:9px 10px;text-align:left;font-weight:600;color:#6b7280;font-size:12px;border-bottom:1px solid #eef0f3">代码</th>
@@ -441,11 +470,12 @@ def build_mail(rows, prev, cfg, asof, trade_date):
 
   <div style="background:#fff;border-radius:6px;padding:14px 16px;margin-top:16px;font-size:12.5px;color:#4b5563;line-height:1.75">
     <b style="color:#111827">规则</b><br>
-    每个交易日收盘后看收盘价，站上 {cfg['strategy']['ma']} 日均线 → 次日开盘持有；跌破 → 次日开盘清空。<br>
-    不做止损、不看财报、不判断大盘。每只等权 {per:,.0f}U。<br><br>
-    <b style="color:#111827">回测（2006-01 ~ 2026-10，20.8 年）</b><br>
-    趋势过滤 214.5 倍 / 年化 29.5% / 最大回撤 −34.5% / Calmar 0.86<br>
-    等权买入 223.6 倍 / 年化 29.8% / 最大回撤 −62.3% / Calmar 0.48
+    每只标的：收盘站上 {cfg['strategy']['ma']} 日均线 → 次日开盘持有；跌破 → 次日开盘清空。<br>
+    <b style="color:#b91c1c">大盘牛熊开关</b>：{cfg["market_filter"].get("symbol","SPY")} 跌破 MA{cfg["market_filter"].get("ma",200)} → 全部清仓持币（不做空），重新站上再恢复做多。<br>
+    不做止损、不看财报。每只等权 {per:,.0f}U。<br><br>
+    <b style="color:#111827">回测（2002 ~ 2026，24.4 年；做多 5 只 + 大盘熊清仓）</b><br>
+    本策略 1145 倍 / 年化 33.5% / 最大回撤 −16.8% / Calmar 1.99<br>
+    等权买入持有 ≈ 224 倍 / 年化 23% / 最大回撤 −57% / Calmar 0.40
   </div>
 
   <div style="font-size:11.5px;color:#9ca3af;margin-top:16px;line-height:1.7">
@@ -455,10 +485,16 @@ def build_mail(rows, prev, cfg, asof, trade_date):
 </div>
 </body></html>"""
 
+    defense_text = ""
+    if defense and mf is not None:
+        defense_text = (f"⚠ 大盘熊市防御：{cfg['market_filter'].get('symbol','SPY')} 跌破 MA"
+                       f"{cfg['market_filter'].get('ma',200)}（{mf['dev']*100:+.1f}%），"
+                       f"已全部清仓持币（不做空）。\n\n")
+
     text = f"""{trade_date} 开盘前 · 美股趋势信号
 信号基于 {asof} 收盘
 
-{headline}
+{defense_text}{headline}
 当前仓位 {expo*100:.0f}%（{n_hold}/{len(rows)} 只，每只 {per:,.0f}U）
 
 代码   名称    收盘      MA{cfg['strategy']['ma']}    距均线    信号   动作
@@ -467,8 +503,8 @@ def build_mail(rows, prev, cfg, asof, trade_date):
         f'{"持有" if r["hold"] else "空仓"}  {r["act"]}'
         for r in rows) + f"""
 
-规则：收盘站上 {cfg['strategy']['ma']} 日均线则次日开盘持有，跌破则清空。
-回测 2006-01~2026-10：趋势 214.5x / Calmar 0.86，买入持有 223.6x / Calmar 0.48。
+规则：收盘站上 {cfg['strategy']['ma']} 日均线则次日开盘持有，跌破则清空；{cfg['market_filter'].get('symbol','SPY')} 跌破 MA{cfg['market_filter'].get('ma',200)} 全部清仓持币。
+回测 2002~2026（做多5只+大盘熊清仓）：本策略 1145x / 年化33.5% / 回撤−16.8% / Calmar 1.99；买入持有 Calmar ≈ 0.40。
 不构成投资建议。
 """
     return subject, html, text
@@ -537,23 +573,43 @@ def main():
                      hhmm, win[0], win[1])
             return 0
 
-    # 3. 数据
-    if args.no_fetch and all(os.path.exists(os.path.join(CACHE, f"{s}.csv")) for s in syms):
+    # 3. 数据（含大盘牛熊开关标的 SPY）
+    mf_cfg = cfg.get("market_filter", {})
+    use_filter = mf_cfg.get("enabled", False)
+    fsym = mf_cfg.get("symbol")
+    fetch_syms = list(syms)
+    if use_filter and fsym and fsym not in fetch_syms:
+        fetch_syms.append(fsym)
+
+    if args.no_fetch and all(os.path.exists(os.path.join(CACHE, f"{s}.csv")) for s in fetch_syms):
         log.info("使用本地缓存（--no-fetch）")
         data = {}
-        for s in syms:
+        for s in fetch_syms:
             d = pd.read_csv(os.path.join(CACHE, f"{s}.csv"), parse_dates=["date"])
             data[s] = dict(adj=d, raw_close=float(d["close"].iloc[-1]),
                            raw_date=d["date"].iloc[-1])
     else:
-        log.info("拉取数据：%s", ", ".join(syms))
-        data = update_cache(syms)
+        log.info("拉取数据：%s", ", ".join(fetch_syms))
+        data = update_cache(fetch_syms)
 
     # 4. 信号
     rows = compute(data, cfg["strategy"]["ma"], cfg["strategy"]["capital"], syms)
     asof = rows[0]["date"]
     if rows[0]["date"] != rows[-1]["date"]:
         log.warning("各标的最新日期不一致：%s", {r["sym"]: r["date"] for r in rows})
+
+    # 4.5 大盘牛熊开关：SPY 跌破 MA200 → 全部清仓持币（不做空）
+    defense = False
+    mf = None
+    if use_filter and fsym in data:
+        mf = compute_filter(data[fsym]["adj"], mf_cfg.get("ma", 200))
+        defense = mf["bear"]
+        if defense:
+            log.info("大盘防御：%s 收盘 %.2f 跌破 MA%d(%.2f) %.1f%%，全部清仓",
+                     fsym, mf["close"], mf_cfg.get("ma", 200), mf["ma"], mf["dev"] * 100)
+            for r in rows:
+                r["hold"] = False
+                r["amount"] = 0.0
 
     # 5. 对比上次
     st = load_state()
@@ -562,7 +618,8 @@ def main():
         log.info("信号基准日 %s 与上次已发送的一致（没有新收盘数据），跳过。", asof)
         return 0
     trade_date = today_et.strftime("%m-%d")
-    subject, html, text = build_mail(rows, prev, cfg, asof, trade_date)
+    subject, html, text = build_mail(rows, prev, cfg, asof, trade_date,
+                                     defense=defense, mf=mf)
 
     print("\n" + "=" * 62)
     print(f" {subject}")

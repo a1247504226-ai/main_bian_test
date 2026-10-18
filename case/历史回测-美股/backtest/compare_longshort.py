@@ -65,10 +65,12 @@ def equity(sr):
     return eq
 
 
-def signal(close, below_mode):
+def signal(close, mode):
+    """mode='LO' 上方+1/下方0(现金)；mode='LS' 上方+1/下方-1(做空)。"""
     ma = close.rolling(MA).mean().values
     above = (close.values > ma)
-    sig = np.where(np.isnan(ma), 0, np.where(above, 1, 1 if below_mode == "long" else -1))
+    below = 0.0 if mode == "LO" else -1.0
+    sig = np.where(np.isnan(ma), 0.0, np.where(above, 1.0, below))
     return sig.astype(float)
 
 
@@ -90,11 +92,11 @@ for sym in SYMS:
     ret = close.pct_change().fillna(0).values
     dates = d["date"]
     res = {}
-    for mode, below in [("LO", "cash"), ("LS", "short")]:
-        sig = signal(close, below)
+    for mode in ["LO", "LS"]:
+        sig = signal(close, mode)
         sr = strat_returns(ret, sig, borrow_annual=0.0)
         res[mode] = equity(sr)
-    sig = signal(close, "short")
+    sig = signal(close, "LS")
     sr_b = strat_returns(ret, sig, borrow_annual=0.01)
     res["LSb"] = equity(sr_b)
     sr = strat_returns(ret, np.ones(len(ret)))
@@ -143,8 +145,8 @@ for name, a, b in segs:
     print(f"  {name:<26}{(lo*100):>9.1f}%{(ls*100):>11.1f}%{(bh*100):>11.1f}%")
 
 # 在场时间 / 空头暴露
-sigLO = signal(load(SYMS[0])["close"], "cash")
-sigLS = signal(load(SYMS[0])["close"], "short")
+sigLO = signal(load(SYMS[0])["close"], "LO")
+sigLS = signal(load(SYMS[0])["close"], "LS")
 print("\n持仓结构（以 AAPL 信号为例）：")
 print(f"  做多LO：在场(多头) {np.mean(sigLO>0)*100:.1f}%  空仓 {np.mean(sigLO==0)*100:.1f}%")
 print(f"  做空LS：多头 {np.mean(sigLS>0)*100:.1f}%  空头 {np.mean(sigLS<0)*100:.1f}%")

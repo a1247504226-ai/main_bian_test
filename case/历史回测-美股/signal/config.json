@@ -19,6 +19,12 @@
     "capital": 1000,
     "atr_n": 14
   },
+  "market_filter": {
+    "enabled": true,
+    "symbol": "SPY",
+    "ma": 200,
+    "note": "大盘牛熊开关：SPY 跌破 MA200 → 全部清仓持币（不做空），重新站上再恢复做多"
+  },
   "schedule": {
     "send_window": [
       "05:00",

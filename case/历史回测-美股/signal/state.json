@@ -1,11 +1,1 @@
-{
- "asof": "2026-10-16",
- "hold": {
-  "AAPL": true,
-  "MSFT": true,
-  "NVDA": true,
-  "AMZN": true,
-  "NFLX": false
- },
- "saved_at": "reset"
-}
+{}

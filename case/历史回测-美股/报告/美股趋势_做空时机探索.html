@@ -1,0 +1,24 @@
+<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8"><title>做空时机探索</title>
+<style>body{font-family:Segoe UI,Microsoft YaHei,sans-serif;margin:24px;color:#222}
+.card{max-width:900px;margin:auto;background:#fff;padding:20px 28px;border:1px solid #e3e3e3;border-radius:10px}
+h1{font-size:20px} table{border-collapse:collapse;width:100%;margin:14px 0;font-size:14px}
+th,td{border:1px solid #ddd;padding:6px 10px;text-align:right} th{background:#f5f5f5}
+td:first-child,th:first-child{text-align:left} .g{color:#1f9d55;font-weight:700}</style></head>
+<body><div class="card">
+<h1>做多主策略 + 选择性做空：8 种做空时机对比</h1>
+<p>做多腿（站上 MA200 持有）不变；跌破 MA200 时，仅当「做空时机条件」成立才开空 −1，否则继续空仓 0。
+做空计 1%/年借息。5 只等权（AAPL/MSFT/NVDA/AMZN/NFLX），东财后复权全历史。</p>
+<h3>各时机 Calmar（越高越好，绿=纯多基线）</h3>
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="320" viewBox="0 0 760 320" font-family="Segoe UI,Microsoft YaHei,sans-serif"><rect width="760" height="320" fill="#fff"/><rect x="120" y="36.0" width="600.0" height="20" fill="#1f9d55"/><text x="726.0" y="51.0" font-size="12" fill="#333">0.83</text><text x="112" y="51.0" text-anchor="end" font-size="12" fill="#333">纯多(基线)</text><rect x="120" y="68.5" width="202.2" height="20" fill="#d62728"/><text x="328.2" y="83.5" font-size="12" fill="#333">0.28</text><text x="112" y="83.5" text-anchor="end" font-size="12" fill="#333">跌破就空</text><rect x="120" y="101.0" width="220.2" height="20" fill="#d62728"/><text x="346.2" y="116.0" font-size="12" fill="#333">0.30</text><text x="112" y="116.0" text-anchor="end" font-size="12" fill="#333">跌破+MA200下行</text><rect x="120" y="133.5" width="227.8" height="20" fill="#d62728"/><text x="353.8" y="148.5" font-size="12" fill="#333">0.31</text><text x="112" y="148.5" text-anchor="end" font-size="12" fill="#333">跌破+死叉</text><rect x="120" y="166.0" width="259.6" height="20" fill="#d62728"/><text x="385.6" y="181.0" font-size="12" fill="#333">0.36</text><text x="112" y="181.0" text-anchor="end" font-size="12" fill="#333">跌破+低均线5%+</text><rect x="120" y="198.5" width="347.8" height="20" fill="#ff7f0e"/><text x="473.8" y="213.5" font-size="12" fill="#333">0.48</text><text x="112" y="213.5" text-anchor="end" font-size="12" fill="#333">跌破+低均线10%+</text><rect x="120" y="231.0" width="278.7" height="20" fill="#d62728"/><text x="404.7" y="246.0" font-size="12" fill="#333">0.38</text><text x="112" y="246.0" text-anchor="end" font-size="12" fill="#333">跌破+低均线15%+</text><rect x="120" y="263.5" width="232.9" height="20" fill="#d62728"/><text x="358.9" y="278.5" font-size="12" fill="#333">0.32</text><text x="112" y="278.5" text-anchor="end" font-size="12" fill="#333">跌破+SPY共振</text></svg>
+<table>
+<tr><th>做空时机</th><th>总倍数</th><th>年化</th><th>最大回撤</th><th>Calmar</th><th>空头占用</th></tr>
+<tr style="background:#eafaf0;font-weight:700"><td>纯多(基线)</td><td>286.5x</td><td>26.1%</td><td>-31.6%</td><td>0.83</td><td>0.0%</td></tr><tr><td>跌破就空</td><td>41.2x</td><td>16.5%</td><td>-59.1%</td><td>0.28</td><td>29.9%</td></tr><tr><td>跌破+MA200下行</td><td>33.2x</td><td>15.5%</td><td>-50.9%</td><td>0.30</td><td>21.4%</td></tr><tr><td>跌破+死叉</td><td>36.9x</td><td>16.0%</td><td>-50.8%</td><td>0.31</td><td>24.5%</td></tr><tr><td>跌破+低均线5%+</td><td>77.3x</td><td>19.5%</td><td>-54.6%</td><td>0.36</td><td>23.4%</td></tr><tr><td>跌破+低均线10%+</td><td>101.1x</td><td>20.9%</td><td>-43.5%</td><td>0.48</td><td>17.6%</td></tr><tr><td>跌破+低均线15%+</td><td>53.0x</td><td>17.7%</td><td>-46.0%</td><td>0.38</td><td>12.8%</td></tr><tr><td>跌破+SPY共振</td><td>97.6x</td><td>20.7%</td><td>-64.4%</td><td>0.32</td><td>9.0%</td></tr>
+</table>
+<p><b>结论：没有任何一种做空时机能打败「纯多+跌破空仓」。</b>纯多基线 Calmar 0.83；
+最好的过滤（跌破且低于均线 10%+，deep10）也只到 0.48，仍差一大截。原因：这些龙头跌破均线后
+常先震荡、再 V 形反转，开空会被反复打脸+逼空磨损；而现金在「躲下跌」的同时也躲开了「反弹的来回抽耳光」。
+连 2008 那种大崩盘，deep10 的危机收益（−22%）也比纯多现金（−20%）略差——因为空单在崩盘后反弹里被轧。
+<b>所以对这个成长龙头篮子，趋势过滤的价值 100% 来自「空仓躲回撤」，不在「靠跌赚钱」。</b></p>
+<p style="color:#999;font-size:12px">若真想参与下跌，正确做法是另开一条<b>大盘择时腿</b>（SPY/QQQ 跌破 MA200 就切空头 ETF SH/SQQQ），
+与这 5 只成长股是两套逻辑，不要拿龙头裸空。本表不含交易滑点/费（相对结论稳健）。</p>
+</div></body></html>
