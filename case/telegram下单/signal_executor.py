@@ -160,7 +160,11 @@ def load_config() -> Dict[str, Any]:
     if env not in ("MAIN", "TEST"):
         env = "MAIN"
 
-    base_url = (
+    # 币安 U 本位合约 REST 域名：
+    #   实盘 MAIN = https://fapi.binance.com
+    #   测试网 TEST = https://testnet.binancefuture.com（API Key 需单独注册，与实盘不通用）
+    # 如有自建代理/反代，可用 BINANCE_BASE_URL 覆盖。
+    base_url = os.getenv("BINANCE_BASE_URL", "").strip() or (
         "https://testnet.binancefuture.com"
         if env == "TEST"
         else "https://fapi.binance.com"
@@ -640,6 +644,10 @@ class MockBinance:
             self.algo_orders[symbol] = {}
             return {"code": 200, "msg": "done"}
 
+        if endpoint == "/fapi/v2/balance":
+            return [{"asset": "USDT", "balance": "1000", "availableBalance": "1000",
+                     "crossWalletBalance": "1000"}]
+
         if endpoint == "/fapi/v2/positionRisk":
             if symbol:
                 amt = self.positions.get(symbol, Decimal("0"))
@@ -664,6 +672,19 @@ MOCK: Optional[MockBinance] = MockBinance() if CONFIG["mock"] else None
 # ==========================================================================
 # 6. 交易所基础能力
 # ==========================================================================
+def get_balance() -> Dict[str, Any]:
+    """查询 U 本位合约账户的 USDT 余额，用于自检确认 Key 与环境是否匹配。"""
+    try:
+        data = _request("GET", "/fapi/v2/balance")
+    except Exception as exc:
+        logger.error("查询账户余额失败: %s", exc)
+        return {}
+    for item in data or []:
+        if item.get("asset") == "USDT":
+            return item
+    return {}
+
+
 def is_dual_side() -> bool:
     """双向持仓模式（Hedge Mode）下 positionSide 必须填 LONG/SHORT，且不能用 reduceOnly。"""
     global _dual_side
@@ -2178,6 +2199,7 @@ def main() -> None:
     logger.info("币安推送信号执行器 v%s", VERSION)
     logger.info("ENV=%s | MOCK=%s | 信号轮询=%ss | 持仓体检=%ss",
                 CONFIG["env"], CONFIG["mock"], CONFIG["signal_poll_seconds"], CONFIG["sync_seconds"])
+    logger.info("接口地址=%s", CONFIG["base_url"])
     logger.info("信号文件=%s", SIGNAL_FILE)
     logger.info("状态文件=%s", STATE_FILE)
     logger.info("=" * 64)
@@ -2190,8 +2212,18 @@ def main() -> None:
     is_dual_side()
 
     if args.check:
-        logger.info("自检：现价 ETHUSDT=%s", get_last_price("ETHUSDT"))
-        logger.info("自检：ETHUSDT 过滤规则=%s", get_symbol_filters("ETHUSDT"))
+        logger.info("-" * 64)
+        logger.info("自检 · 环境: %s    模拟: %s", CONFIG["env"], CONFIG["mock"])
+        logger.info("自检 · 接口地址: %s", CONFIG["base_url"])
+        logger.info("自检 · 持仓模式: %s", "双向" if is_dual_side() else "单向")
+        logger.info("自检 · 现价 ETHUSDT = %s", get_last_price("ETHUSDT"))
+        logger.info("自检 · ETHUSDT 最小变动 = %s", get_symbol_filters("ETHUSDT").get("tick"))
+        bal = get_balance()
+        if bal:
+            logger.info("自检 · 账户余额 USDT = %s（可用 %s）",
+                        bal.get("balance"), bal.get("availableBalance"))
+        else:
+            logger.warning("自检 · 未能读到账户余额，请确认 API Key 与当前环境是否匹配")
         logger.info("自检完成")
         return
 

@@ -1,33 +1,84 @@
-三步：
+========================================
+Telegram 信号自动下单 · 使用说明
+========================================
 
-1. 填 .env —— 我已经从模板生成好 .env，只填 3 处：BINANCE_API_KEY、BINANCE_API_SECRET、收通知的邮箱。执行器现在会自动读这个文件，不用再手动 export 环境变量。
+一、文件分工
+----------------------------------------
+telegram_listener.py   从 Telegram 拉消息 → 解析 → 写 signals.jsonl
+signal_parser.py       消息解析规则（被 listener 调用，不单独跑）
+signal_executor.py     读 signals.jsonl → 币安下单
+.env                   全部配置（两个程序共用）
 
-2. 把 signal_parser.py 接进你的 Telegram 监听程序 —— 替换你原来的解析函数，把结果追加进 signals.jsonl：
-
-python
-
-from signal_parser import SignalParser
-import json
-
-sig = SignalParser.parse_signal(message_text)
-if sig:
-    with open("signals.jsonl", "a", encoding="utf-8") as f:
-        f.write(json.dumps(sig, ensure_ascii=False) + "\n")
-3. 启动执行器：
-
-bash
-
-python signal_executor.py --check    # 先自检连通性，不下单
-python signal_executor.py            # 正式跑
-第一次务必先验证：把 .env 里 BINANCE_ENV 改成 TEST（测试网）或 BINANCE_MOCK=1（完全离线模拟），跑通整条链路确认无误，再切回 MAIN。
-
-signal_parser.py 自带 10 项断言，python signal_parser.py 能先确认解析器本身没问题。
-
-填好 .env 后就能跑了。三个文件的分工：
+数据流：
+  Telegram 频道
+      ↓  telegram_listener.py 拉取
+  SignalParser 解析
+      ↓  追加写入
+  signals.jsonl
+      ↓  signal_executor.py 增量读取
+  币安下单 / 改止盈止损 / 平仓
 
 
-添加到对话
-文件	用途	要不要跑
-signal_executor.py	主执行器，读 signals.jsonl 下单	要跑
-signal_parser.py	解析器，接进你的监听程序	被 import，不单独跑
-.env	配置（密钥、仓位、风控）	填一次
+二、必须先填的 3 处（.env）
+----------------------------------------
+TELEGRAM_BOT_TOKEN=      bot token，形如 123456789:AAH-xxxxxxxx
+TELEGRAM_CHAT_ID=        频道 id，形如 -1001234567890
+TELEGRAM_PROXY=          国内必须填代理，如 http://127.0.0.1:7890
+
+BINANCE_API_KEY / BINANCE_API_SECRET 你已经填好了。
+注意：当前 BINANCE_ENV=TEST，用的是测试网 Key（riuf...），两者是配套的。
+
+
+三、启动顺序（开两个命令行窗口）
+----------------------------------------
+【第 1 步】先确认能收到消息（只看不写，不下单）
+
+    python telegram_listener.py --dump
+
+    看到 "[消息] 频道名 | '原文...'" 就说明通了。
+    收不到就检查：token、chat_id、代理。
+
+【第 2 步】确认能连币安（不下单）
+
+    python signal_executor.py --check
+
+    要看到"账户余额 USDT = xxx"，说明 Key 和环境匹配。
+
+【第 3 步】正式跑（两个窗口都开着）
+
+    窗口1：python telegram_listener.py
+    窗口2：python signal_executor.py
+
+
+四、首次启动的安全设计
+----------------------------------------
+监听器第一次启动时，会跳过积压的历史消息，只从"当前最新"开始。
+这是故意的——否则一启动就会把几小时前的信号全部回放下单。
+
+确实需要回补最近几条：
+
+    python telegram_listener.py --backlog 5
+
+（会触发真实下单，谨慎）
+
+
+五、三个必须注意的坑
+----------------------------------------
+1) BINANCE_ENV=TEST 用的是测试网。
+   测试网只有 BTC/ETH/SOL 这类主流币，你的策略推的是 MUBARAK、CHIP、
+   PONS 这些山寨币，测试网上根本不存在 → 所有信号都会报"未找到交易对"。
+   测试网只能验流程，验不了真实信号。真实验证建议用 BINANCE_MOCK=1 离线跑。
+
+2) EMAIL_ENABLED=1，但 MONITOR_EMAIL_FROM/TO 还是 xxx@ 占位符。
+   启动时会一直报邮件发送失败。要么改成真实邮箱，要么先设 EMAIL_ENABLED=0。
+
+3) .env 顶部的注释块里明文写着你的实盘 API Key 和 Secret。
+   这份文件如果发给别人或传到网上，等于把账户交出去。建议把那段注释删掉。
+
+
+六、排查
+----------------------------------------
+telegram_listener.log   监听器日志（每条收到的消息 + 解析结果）
+logs/                   执行器日志（下单、改单、对账）
+executor_state.json     执行器状态（持仓记录、锚点币对、文件游标）
+telegram_state.json     监听器状态（update_id 游标，删掉会重新跳过积压）
