@@ -1,0 +1,70 @@
+<!DOCTYPE html><html lang="zh"><head><meta charset="utf-8">
+<title>按 9 年尺度看收益</title>
+<style>
+body{font-family:Segoe UI,Microsoft YaHei,sans-serif;margin:24px;color:#222;background:#f7f7f8}
+.card{max-width:1020px;margin:auto;background:#fff;padding:22px 30px 30px;border:1px solid #e5e5e5;border-radius:12px}
+h1{font-size:21px;margin:6px 0 4px} h2{font-size:15.5px;margin:26px 0 8px;color:#111}
+.sub{color:#6b7280;font-size:13px;line-height:1.7}
+table{border-collapse:collapse;width:100%;margin:10px 0 6px;font-size:13.5px}
+th,td{border:1px solid #e3e3e3;padding:7px 10px;text-align:right}
+th{background:#f5f5f5;font-weight:600;font-size:13px}
+td:first-child,th:first-child{text-align:left}
+.hi{background:#fff5f5;color:#b91c1c;font-weight:600}
+.box{background:#f0f7ff;border-left:4px solid #2563eb;border-radius:6px;padding:12px 15px;margin:14px 0;
+font-size:13.5px;line-height:1.8;color:#1e3a8a}
+.warn{background:#fffbeb;border-left:4px solid #d97706;border-radius:6px;padding:12px 15px;margin:14px 0;
+font-size:13.5px;line-height:1.8;color:#78350f}
+.big{display:flex;gap:14px;margin:16px 0;flex-wrap:wrap}
+.kpi{flex:1;min-width:150px;background:#fafafa;border:1px solid #eee;border-radius:9px;padding:12px 14px}
+.kpi .v{font-size:24px;font-weight:700;color:#b91c1c;line-height:1.25}
+.kpi .l{font-size:12px;color:#6b7280;margin-top:3px}
+</style></head><body><div class="card">
+<h1>按「9 年」这个尺度看，这套策略能赚多少倍</h1>
+<p class="sub">回测区间 2002-05-23 ~ 2026-10-16（24.4 年，东财后复权全历史）。
+规则：5 只成长股站上 MA200 持有、跌破清仓；SPY 跌破 MA200 时全部清仓持币。</p>
+
+<div class="big">
+  <div class="kpi"><div class="v">16.0x</div><div class="l">9 年中位（任取起点）</div></div>
+  <div class="kpi"><div class="v">10.9x</div><div class="l">9 年最差窗口</div></div>
+  <div class="kpi"><div class="v">25.6x</div><div class="l">9 年最好窗口</div></div>
+  <div class="kpi"><div class="v">0%</div><div class="l">9 年窗口亏损占比</div></div>
+</div>
+
+<h2>一、固定每 9 年一刀</h2>
+<table><tr><th>区间</th><th>长度</th><th>最终策略</th><th>纯多</th><th>买入持有</th></tr><tr><td>2002-05-23 ~ 2011-05-25</td><td>9.0 年</td><td class="hi">14.89x</td><td>10.15x</td><td>12.38x</td></tr><tr><td>2011-05-25 ~ 2020-06-01</td><td>9.0 年</td><td class="hi">15.27x</td><td>7.71x</td><td>14.30x</td></tr><tr><td>2020-06-01 ~ 2026-10-16</td><td>6.4 年</td><td class="hi">5.04x</td><td>4.13x</td><td>4.79x</td></tr></table>
+<p class="sub">两段完整的 9 年都差不多 <b>15 倍</b>。1145 倍不是靠某一年暴赚，而是
+<b>15 × 15 × 5 ≈ 1145</b> 这样滚出来的——每一段都在 15 倍量级，复利 24 年才显得吓人。</p>
+
+<h2>二、任取起点、持满 9 年（滚动窗口）</h2>
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="400" viewBox="0 0 980 400" font-family="Segoe UI,Microsoft YaHei,sans-serif"><rect width="980" height="400" fill="#fff"/><text x="490.0" y="26" text-anchor="middle" font-size="16" font-weight="bold" fill="#222">任取起点、持满 9 年：最终策略的收益倍数（共 16 个窗口）</text><line x1="66" y1="308.0" x2="956" y2="308.0" stroke="#eee"/><text x="58" y="312.0" text-anchor="end" font-size="11" fill="#999">0x</text><line x1="66" y1="256.9" x2="956" y2="256.9" stroke="#eee"/><text x="58" y="260.9" text-anchor="end" font-size="11" fill="#999">5x</text><line x1="66" y1="205.7" x2="956" y2="205.7" stroke="#eee"/><text x="58" y="209.7" text-anchor="end" font-size="11" fill="#999">10x</text><line x1="66" y1="154.6" x2="956" y2="154.6" stroke="#eee"/><text x="58" y="158.6" text-anchor="end" font-size="11" fill="#999">15x</text><line x1="66" y1="103.4" x2="956" y2="103.4" stroke="#eee"/><text x="58" y="107.4" text-anchor="end" font-size="11" fill="#999">20x</text><line x1="66" y1="52.3" x2="956" y2="52.3" stroke="#eee"/><text x="58" y="56.3" text-anchor="end" font-size="11" fill="#999">25x</text><line x1="66" y1="146.5" x2="956" y2="146.5" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="5,4"/><text x="952" y="139.5" text-anchor="end" font-size="11.5" fill="#b45309">中位 15.8x</text><rect x="76.6" y="155.7" width="34.5" height="152.3" fill="#f3a3a3" rx="2"/><text x="93.8" y="150.7" text-anchor="middle" font-size="10.5" fill="#7f1d1d">15x</text><text x="93.8" y="328" text-anchor="middle" font-size="10.5" fill="#666" transform="rotate(-42 93.8 328)">2002-05</text><rect x="132.2" y="139.8" width="34.5" height="168.2" fill="#d62728" rx="2"/><text x="149.4" y="134.8" text-anchor="middle" font-size="10.5" fill="#7f1d1d">16x</text><text x="149.4" y="328" text-anchor="middle" font-size="10.5" fill="#666" transform="rotate(-42 149.4 328)">2003-01</text><rect x="187.8" y="192.8" width="34.5" height="115.2" fill="#f3a3a3" rx="2"/><text x="205.1" y="187.8" text-anchor="middle" font-size="10.5" fill="#7f1d1d">11x</text><text x="205.1" y="328" text-anchor="middle" font-size="10.5" fill="#666" transform="rotate(-42 205.1 328)">2004-01</text><rect x="243.4" y="144.5" width="34.5" height="163.5" fill="#d62728" rx="2"/><text x="260.7" y="139.5" text-anchor="middle" font-size="10.5" fill="#7f1d1d">16x</text><text x="260.7" y="328" text-anchor="middle" font-size="10.5" fill="#666" transform="rotate(-42 260.7 328)">2005-01</text><rect x="299.1" y="197.6" width="34.5" height="110.4" fill="#f3a3a3" rx="2"/><text x="316.3" y="192.6" text-anchor="middle" font-size="10.5" fill="#7f1d1d">11x</text><text x="316.3" y="328" text-anchor="middle" font-size="10.5" fill="#666" transform="rotate(-42 316.3 328)">2006-01</text><rect x="354.7" y="148.5" width="34.5" height="159.5" fill="#f3a3a3" rx="2"/><text x="371.9" y="143.5" text-anchor="middle" font-size="10.5" fill="#7f1d1d">16x</text><text x="371.9" y="328" text-anchor="middle" font-size="10.5" fill="#666" transform="rotate(-42 371.9 328)">2007-01</text><rect x="410.3" y="181.6" width="34.5" height="126.4" fill="#f3a3a3" rx="2"/><text x="427.6" y="176.6" text-anchor="middle" font-size="10.5" fill="#7f1d1d">12x</text><text x="427.6" y="328" text-anchor="middle" font-size="10.5" fill="#666" transform="rotate(-42 427.6 328)">2008-01</text><rect x="465.9" y="101.3" width="34.5" height="206.7" fill="#d62728" rx="2"/><text x="483.2" y="96.3" text-anchor="middle" font-size="10.5" fill="#7f1d1d">20x</text><text x="483.2" y="328" text-anchor="middle" font-size="10.5" fill="#666" transform="rotate(-42 483.2 328)">2009-01</text><rect x="521.6" y="138.8" width="34.5" height="169.2" fill="#d62728" rx="2"/><text x="538.8" y="133.8" text-anchor="middle" font-size="10.5" fill="#7f1d1d">17x</text><text x="538.8" y="328" text-anchor="middle" font-size="10.5" fill="#666" transform="rotate(-42 538.8 328)">2010-01</text><rect x="577.2" y="156.8" width="34.5" height="151.2" fill="#f3a3a3" rx="2"/><text x="594.4" y="151.8" text-anchor="middle" font-size="10.5" fill="#7f1d1d">15x</text><text x="594.4" y="328" text-anchor="middle" font-size="10.5" fill="#666" transform="rotate(-42 594.4 328)">2011-01</text><rect x="632.8" y="114.7" width="34.5" height="193.3" fill="#d62728" rx="2"/><text x="650.1" y="109.7" text-anchor="middle" font-size="10.5" fill="#7f1d1d">19x</text><text x="650.1" y="328" text-anchor="middle" font-size="10.5" fill="#666" transform="rotate(-42 650.1 328)">2012-01</text><rect x="688.4" y="74.1" width="34.5" height="233.9" fill="#d62728" rx="2"/><text x="705.7" y="69.1" text-anchor="middle" font-size="10.5" fill="#7f1d1d">23x</text><text x="705.7" y="328" text-anchor="middle" font-size="10.5" fill="#666" transform="rotate(-42 705.7 328)">2013-01</text><rect x="744.1" y="163.2" width="34.5" height="144.8" fill="#f3a3a3" rx="2"/><text x="761.3" y="158.2" text-anchor="middle" font-size="10.5" fill="#7f1d1d">14x</text><text x="761.3" y="328" text-anchor="middle" font-size="10.5" fill="#666" transform="rotate(-42 761.3 328)">2014-01</text><rect x="799.7" y="104.8" width="34.5" height="203.2" fill="#d62728" rx="2"/><text x="816.9" y="99.8" text-anchor="middle" font-size="10.5" fill="#7f1d1d">20x</text><text x="816.9" y="328" text-anchor="middle" font-size="10.5" fill="#666" transform="rotate(-42 816.9 328)">2015-01</text><rect x="855.3" y="106.2" width="34.5" height="201.8" fill="#d62728" rx="2"/><text x="872.6" y="101.2" text-anchor="middle" font-size="10.5" fill="#7f1d1d">20x</text><text x="872.6" y="328" text-anchor="middle" font-size="10.5" fill="#666" transform="rotate(-42 872.6 328)">2016-01</text><rect x="910.9" y="155.9" width="34.5" height="152.1" fill="#f3a3a3" rx="2"/><text x="928.2" y="150.9" text-anchor="middle" font-size="10.5" fill="#7f1d1d">15x</text><text x="928.2" y="328" text-anchor="middle" font-size="10.5" fill="#666" transform="rotate(-42 928.2 328)">2017-01</text><text x="511.0" y="392" text-anchor="middle" font-size="11" fill="#888">起点（持满 9 年）</text></svg>
+<table><tr><th>持有期 / 策略</th><th>最差</th><th>25 分位</th><th>中位</th><th>75 分位</th><th>最好</th><th>亏损窗口占比</th></tr><tr><td>9 年 · 最终策略</td><td class="hi">10.92x</td><td class="hi">14.10x</td><td class="hi"><b>16.02x</b></td><td class="hi">18.46x</td><td class="hi">25.60x</td><td>0%</td></tr><tr><td>9 年 · 纯多（不理大盘）</td><td>6.26x</td><td>7.78x</td><td><b>9.19x</b></td><td>10.75x</td><td>17.57x</td><td>0%</td></tr><tr><td>9 年 · 买入持有</td><td>7.24x</td><td>11.04x</td><td><b>13.63x</b></td><td>17.68x</td><td>30.79x</td><td>0%</td></tr><tr><td>5 年 · 最终策略</td><td>2.96x</td><td>3.78x</td><td><b>4.72x</b></td><td>5.47x</td><td>7.63x</td><td>0%</td></tr><tr><td>10 年 · 最终策略</td><td>15.92x</td><td>19.67x</td><td><b>21.96x</b></td><td>24.97x</td><td>31.06x</td><td>0%</td></tr></table>
+<p class="sub">16 个 9 年窗口，从 2002 年一路排到 2017 年入场，<b>没有一个亏钱</b>；
+最差 10.9x，中位 16.0x，最好 25.6x。也就是说：<b>哪怕你运气最差、买在 9 年周期的起点上，9 年后也是 10 倍以上。</b></p>
+
+<h2>三、和比特币的 9 年比</h2>
+<div class="box">
+比特币现在约 <b>$83,000</b>（2026-10）。往前推 9 年：<br>
+· 2017-10 约 $5,000 → 现在 $83,000 ≈ <b>16 倍</b>（和你策略的 9 年中位 16.0x 几乎一样）<br>
+· 2016-10 约 $700 → 现在 $83,000 ≈ <b>118 倍</b>（起点选得早，倍数就夸张）<br>
+· 2013-10 约 $200 → 2022-10 约 $19,000 ≈ <b>95 倍</b><br>
+<b>比特币的 9 年倍数完全取决于你从哪一年算起</b>——从牛市顶算只有十几倍，从熊市底算能上百倍。
+</div>
+<div class="warn">
+但两者有一个本质差别：<b>回撤</b>。比特币 9 年里经历过多次 −70%~−80% 的深熊，
+而这套策略最大回撤只有 <b>−16.8%</b>。同样是 9 年 16 倍，
+一个要你在 −80% 时还敢拿住，一个只要你能忍住 −17%——<b>后者是真能拿得住的。</b>
+</div>
+
+<h2>四、换成你的 1000U</h2>
+<table>
+<tr><th>情形</th><th>9 年后</th><th>年化</th></tr>
+<tr><td>最差窗口（10.9x）</td><td>10,921 U</td><td>30.4%</td></tr>
+<tr><td class="hi">中位（16.0x）</td><td class="hi">16,016 U</td><td class="hi">36.1%</td></tr>
+<tr><td>最好窗口（25.6x）</td><td>25,604 U</td><td>43.4%</td></tr>
+</table>
+<p class="sub">注意：这是满仓复利、不含税、不含滑点的理论值；实盘按 5 只等权、每只 200U 起，
+单笔 200U 的佣金/点差占比会比大资金高一些，实际会打点折扣。</p>
+
+<div class="warn">历史回测不代表未来。9 年 15 倍的前提是这 5 只继续是成长龙头；
+如果未来 9 年它们变成「大盘价值股」（像 2000 年后的思科），倍数会大幅缩水。本页不构成投资建议。</div>
+</div></body></html>

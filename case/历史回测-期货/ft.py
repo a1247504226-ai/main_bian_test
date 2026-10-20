@@ -859,10 +859,11 @@ def cmd_rank(argv):
       样本内 2009-2018 / 样本外 2019-2026 —— 检验稳定性
     参数：carry+趋势，无止损，波动率目标 2%，敞口上限 2x，含 2bp 手续费 + 5bp 滑点。
     """
-    syms = universe()
+    syms = [x.upper() for x in argv if x.strip()] or universe()
     kw = dict(sl_atr=FINAL["sl_atr"], vol_target=FINAL["vol_target"], expo_cap=FINAL["expo_cap"])
-    print("品种数 %d   策略 %s   无止损   波动率目标 %.0f%%\n"
-          % (len(syms), FINAL["name"], FINAL["vol_target"] * 100))
+    print("品种数 %d（%s）  策略 %s   无止损   波动率目标 %.0f%%\n"
+          % (len(syms), "指定" if len(argv) > len(syms) or (argv and len(syms) != len(universe())) else "全池",
+             FINAL["name"], FINAL["vol_target"] * 100))
     rows = []
     for s in syms:
         b = load(s)

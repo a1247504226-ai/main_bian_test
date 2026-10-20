@@ -1,0 +1,19 @@
+{
+ "data_date": "2026-10-19",
+ "positions": {
+  "FG": {
+   "dir": -1,
+   "lots": 1,
+   "entry_px": 1211.0,
+   "entry_date": "2025-08-15"
+  }
+ },
+ "realized": 0.0,
+ "start_equity": 20000.0,
+ "start_date": "2026-10-12",
+ "notified": {
+  "pm": "2026-10-19",
+  "am": "2026-10-14"
+ },
+ "updated": "2026-10-19 20:20:58"
+}
