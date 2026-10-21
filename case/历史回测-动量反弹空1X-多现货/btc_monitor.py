@@ -45,10 +45,11 @@ BTC 日线趋势策略 · 每日检测（邮件推送 + 可选币安下单）
 · 邮件/日志的主口径是【从现在起算】：本金就是 base_capital_usdt（默认 1000 U），
   账户现值 = 本金 + 当前浮盈。历史回测的已平仓盈亏**不计入**（那是回测数据，不是实盘）。
   仓位也按 base 算：名义 = base × 敞口。
-· 同时给一行【回测全程参考】：若从 2017-08 就用 base 一路跟着做，
-  固定本金（每笔按 base 开仓）终值约 9,836 U（9.8 倍），
-  滚仓（每笔按当时权益开仓、利润滚入下一笔）终值约 142,941 U（142.9 倍）。
-· 两者收益率完全相同，滚仓只是把绝对金额放大约 14.5 倍。不要混用。
+· 同时给一行【回测全程参考】：若从数据起点（2017-08）就用 base 一路跟着做，
+  固定本金（每笔按 base 开仓）终值约 9,900 U（约 10 倍），
+  滚仓（每笔按当时权益开仓、利润滚入下一笔）终值约 146,000 U（约 146 倍）。
+  这两个数字每多一根已收盘日线都会小幅变动，**以邮件正文打印的为准**，别拿这里当常数。
+· 两者收益率完全相同，滚仓只是把绝对金额放大约 14.8 倍。不要混用。
 
 安全设计
 --------
@@ -88,6 +89,12 @@ CONFIG_PATH = os.path.join(HERE, "monitor_config.json")
 STATE_PATH = os.path.join(HERE, "monitor_state.json")
 LOG_PATH = os.path.join(HERE, "monitor_log.txt")
 
+# 发信锁超过这个时长还挂着 → 认定为上次异常退出留下的僵尸锁，接管重发
+MAIL_LOCK_STALE_SEC = 600
+
+# 最新已收盘日线距今超过这么多天 → 数据不新鲜（拉取一直失败在读旧缓存），禁止真实下单
+STALE_BAR_DAYS = 3.0
+
 DEFAULT_CFG = {
     "email": {
         "enabled": True,
@@ -97,7 +104,7 @@ DEFAULT_CFG = {
         "strategy_label": "BTC动量策略 · SMA50过滤多头 1×做空",
     },
     "binance": {
-        "enabled": False, "dry_run": True, "use_testnet": True,
+        "enabled": False, "use_testnet": True,
         "api_key": "", "api_secret": "",
         "spot_base": "https://api.binance.com",
         "futures_base": "https://fapi.binance.com",
@@ -452,99 +459,18 @@ def short_risk(bars, sig, cfg):
 # ==============================================================================
 # 3. 币安下单（默认关闭 + 演练）
 # ==============================================================================
-class Binance:
-    """极简币安 REST 客户端（只用标准库，HMAC-SHA256 签名）。"""
-
-    def __init__(self, cfg):
-        b = cfg["binance"]
-        testnet = bool(b["use_testnet"])
-        self.spot = b["testnet_spot_base"] if testnet else b["spot_base"]
-        self.fut = b["testnet_futures_base"] if testnet else b["futures_base"]
-        self.key = (b["api_key"] or "").strip()
-        self.secret = (b["api_secret"] or "").strip()
-        self.testnet = testnet
-        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-
-    def has_keys(self):
-        return bool(self.key and self.secret)
-
-    def _request(self, method, base, path, params=None, signed=False, timeout=20):
-        params = dict(params or {})
-        if signed:
-            params["timestamp"] = int(time.time() * 1000)
-            params["recvWindow"] = 5000
-            qs = urllib.parse.urlencode(params)
-            sig = hmac.new(self.secret.encode(), qs.encode(), hashlib.sha256).hexdigest()
-            qs = qs + "&signature=" + sig
-        else:
-            qs = urllib.parse.urlencode(params)
-        url = base + path + ("?" + qs if qs else "")
-        req = urllib.request.Request(url, method=method)
-        req.add_header("X-MBX-APIKEY", self.key)
-        req.add_header("User-Agent", "btc-monitor/1.0")
-        try:
-            with self.opener.open(req, timeout=timeout) as r:
-                return json.loads(r.read().decode())
-        except urllib.error.HTTPError as e:
-            body = e.read().decode(errors="replace")
-            raise RuntimeError("HTTP %d %s -> %s" % (e.code, path, body))
-
-    # ---- 只读 ----
-    def spot_balance(self, asset="BTC"):
-        acc = self._request("GET", self.spot, "/api/v3/account", signed=True)
-        for b in acc.get("balances", []):
-            if b["asset"] == asset:
-                return float(b["free"]) + float(b["locked"])
-        return 0.0
-
-    def usdt_balance(self):
-        acc = self._request("GET", self.spot, "/api/v3/account", signed=True)
-        for b in acc.get("balances", []):
-            if b["asset"] == "USDT":
-                return float(b["free"])
-        return 0.0
-
-    def futures_position(self, symbol):
-        data = self._request("GET", self.fut, "/fapi/v1/positionRisk",
-                             {"symbol": symbol}, signed=True)
-        for p in data:
-            amt = float(p.get("positionAmt", 0))
-            if abs(amt) > 0:
-                return {"amt": amt, "entry": float(p.get("entryPrice", 0)),
-                        "upnl": float(p.get("unRealizedProfit", 0)),
-                        "lev": p.get("leverage")}
-        return {"amt": 0.0, "entry": 0.0, "upnl": 0.0, "lev": None}
-
-    # ---- 写操作 ----
-    def set_leverage(self, symbol, lev):
-        return self._request("POST", self.fut, "/fapi/v1/leverage",
-                             {"symbol": symbol, "leverage": int(lev)}, signed=True)
-
-    def set_margin_type(self, symbol, mt):
-        try:
-            return self._request("POST", self.fut, "/fapi/v1/marginType",
-                                 {"symbol": symbol, "marginType": mt}, signed=True)
-        except RuntimeError as e:
-            if "-4046" in str(e):        # 已经是逐仓，无需修改
-                return {"msg": "already " + mt}
-            raise
-
-    def spot_market_order(self, symbol, side, qty):
-        return self._request("POST", self.spot, "/api/v3/order",
-                             {"symbol": symbol, "side": side, "type": "MARKET",
-                              "quantity": ("%.6f" % qty).rstrip("0").rstrip(".")},
-                             signed=True)
-
-    def futures_market_order(self, symbol, side, qty, reduce_only=False):
-        p = {"symbol": symbol, "side": side, "type": "MARKET",
-             "quantity": ("%.3f" % qty).rstrip("0").rstrip(".")}
-        if reduce_only:
-            p["reduceOnly"] = "true"
-        return self._request("POST", self.fut, "/fapi/v1/order", p, signed=True)
+# 客户端与下单逻辑的唯一实现在 btc_trade.py —— 这里不重复写第二套。
+# （btc_trade 在运行时 import 本模块复用信号/敞口，所以只能延迟 import，避免循环）
 
 
 def build_order_plan(pos, cfg, binance, price):
-    """根据目标持仓生成「要做什么」的计划（不执行）。"""
+    """
+    根据目标持仓生成「要做什么」的计划（不执行），供邮件和日志展示。
+
+    ⚠ 动作的唯一实现是 btc_trade.build_actions()，这里只把动作翻译成中文短句。
+      以前这里自己算过一遍（equity 漏掉合约账户里的 USDT、不处理现货⇄合约划转、
+      平仓方向写死成买入），会出现「邮件说 A、实际下单做 B」的两套逻辑，已合并。
+    """
     b = cfg["binance"]
     symbol = b["symbol"]
     base = symbol.replace("USDT", "")
@@ -572,102 +498,60 @@ def build_order_plan(pos, cfg, binance, price):
                            % (pos["qty"], pos["notional"], pos["expo"]))
         return actions, notes
 
+    import btc_trade as T
     try:
-        spot_qty = binance.spot_balance(base)
-        usdt = binance.usdt_balance()
-        fut = binance.futures_position(symbol)
+        snap, acts, pnotes = T.preview(cfg, binance, sig, pos["expo"] or 0.0,
+                                       price, sig_text(sig))
     except Exception as e:
         notes.append("读取账户失败：%s → 跳过下单" % e)
         return actions, notes
 
-    equity = usdt + spot_qty * price + fut["upnl"]
-    target_qty = equity * pos["expo"] / price if pos["expo"] else 0.0
-    notes.append("账户权益 ≈ %.2f USDT（USDT %.2f + 现货 %.6f %s ≈ %.2f + 合约浮盈 %+.2f）"
-                 % (equity, usdt, spot_qty, base, spot_qty * price, fut["upnl"]))
-    if pos["expo"]:
-        notes.append("目标名义敞口 %.2f USDT（敞口倍数 %.2f×）" % (equity * pos["expo"], pos["expo"]))
-
-    if fut["amt"] != 0 and sig >= 0:
-        actions.append("平合约空头：市价买入 %.3f %s（reduceOnly）" % (abs(fut["amt"]), symbol))
-    if spot_qty > 0 and sig <= 0:
-        actions.append("卖出现货多头：市价卖出 %.6f %s" % (spot_qty, base))
-
-    if sig > 0:
-        need = target_qty - spot_qty
-        if need * price >= b["min_notional_usdt"]:
-            actions.append("现货买入：市价买入 %.6f %s（≈ %.2f USDT）" % (need, base, need * price))
-        elif need < 0 and -need * price >= b["min_notional_usdt"]:
-            actions.append("现货减仓：市价卖出 %.6f %s" % (-need, base))
-        else:
-            actions.append("现货仓位已接近目标，无需操作")
-    elif sig < 0:
-        sf = short_size_factor(b["leverage"])
-        short_qty = target_qty * sf
-        if fut["amt"] == 0:
-            actions.append("设置 %s 为逐仓 %d×" % (symbol, b["leverage"]))
-            actions.append("开合约空头：市价卖出 %.3f %s（逐仓 %d×）"
-                           % (short_qty, symbol, b["leverage"]))
-            if sf < 1.0:
-                actions.append("（已按 %.1f%% 缩量留保证金缓冲，否则 1× 逐仓会因保证金不足被拒单）"
-                               % (sf * 100))
-        else:
-            actions.append("合约空头已存在（%.3f），无需加仓" % fut["amt"])
-    else:
-        if not actions:
-            actions.append("已是空仓，无需操作")
-
+    notes.append("账户构成：现货 USDT %.2f + 现货 %s %.6f（%.2f USDT）"
+                 "+ 合约账户 %.2f + 浮盈 %+.2f = 权益 %.2f USDT"
+                 % (snap["usdt_total"], base, snap["spot_qty"], snap["spot_val"],
+                    snap["fut_wallet"], snap["fut_upnl"], snap["equity"]))
+    notes.extend(pnotes)
+    actions = [a["text"] for a in acts] or ["已与目标对齐，本轮无需操作"]
     return actions, notes
 
 
-def execute_plan(pos, cfg, binance, price, live):
-    """真正下单。只有 enabled=true 且命令行给了 --live 才会走到这里。"""
+def execute_plan(pos, cfg, binance, price, live, bar_date=None, sig_label=None):
+    """
+    真正下单 —— **唯一实现是 btc_trade.execute()**，本函数只做转调。
+    （这样「每日检测 --live」和「一键下单.bat」走的是同一段代码，不会出现两套逻辑。）
+    """
     b = cfg["binance"]
-    symbol = b["symbol"]
-    base = symbol.replace("USDT", "")
-    sig = pos["dir"]
-    done = []
-
     if not (b["enabled"] and live):
         return ["未启用真实下单（需配置 enabled=true 且命令行加 --live）"]
     if not binance.has_keys():
         return ["缺少 API Key，取消下单"]
 
+    import btc_trade as T                      # 延迟 import，避免循环依赖
+    if bar_date is None:
+        bar_date = fdt()[:10]
+    if sig_label is None:
+        sig_label = sig_text(pos["dir"])
+
     try:
-        spot_qty = binance.spot_balance(base)
-        usdt = binance.usdt_balance()
-        fut = binance.futures_position(symbol)
-        equity = usdt + spot_qty * price + fut["upnl"]
-        target_qty = equity * pos["expo"] / price if pos["expo"] else 0.0
-
-        if fut["amt"] != 0 and sig >= 0:
-            binance.futures_market_order(symbol, "BUY", abs(fut["amt"]), reduce_only=True)
-            done.append("已平合约空头 %.3f" % abs(fut["amt"]))
-            fut = binance.futures_position(symbol)
-
-        if spot_qty > 0 and sig <= 0:
-            binance.spot_market_order(symbol, "SELL", spot_qty)
-            done.append("已卖出现货 %.6f" % spot_qty)
-            spot_qty = 0.0
-
-        if sig > 0:
-            need = target_qty - spot_qty
-            if need * price >= b["min_notional_usdt"]:
-                r = binance.spot_market_order(symbol, "BUY", need)
-                done.append("已现货买入 %.6f（订单 %s）" % (need, r.get("orderId")))
-            elif need < 0 and -need * price >= b["min_notional_usdt"]:
-                r = binance.spot_market_order(symbol, "SELL", -need)
-                done.append("已现货卖出 %.6f（订单 %s）" % (-need, r.get("orderId")))
-        elif sig < 0 and fut["amt"] == 0:
-            binance.set_margin_type(symbol, b["margin_type"])
-            binance.set_leverage(symbol, b["leverage"])
-            r = binance.futures_market_order(symbol, "SELL",
-                                             target_qty * short_size_factor(b["leverage"]))
-            done.append("已开空 %.3f（订单 %s）"
-                        % (target_qty * short_size_factor(b["leverage"]), r.get("orderId")))
+        ok, rounds, snap = T.execute(cfg, binance, pos["dir"], pos["expo"] or 0.0,
+                                     price, bar_date, sig_label, live=True)
+        out = []
+        for rd in rounds:
+            mark = "✘ " if rd.get("failed") else "✔ "
+            for a in rd["actions"]:
+                out.append(mark + a["text"])
+            if rd.get("failed"):
+                out.append("   └ 失败原因：%s" % rd["failed"])
+        if not out:
+            out.append("✔ 已对齐，无需操作")
+        elif not ok:
+            out.append("✘ 未完全对齐（见 trade_log.csv），请检查后重跑")
+        return out
+    except T.TradeLockBusy as e:
+        # 另一个下单进程（多半是手动双击的一键下单）正在跑 —— 绝不并发下单
+        return ["✘ 跳过下单：%s。等它结束后重跑本命令即可。" % e]
     except Exception as e:
-        done.append("下单过程中出错，已停止：%s" % e)
-
-    return done or ["无需操作"]
+        return ["✘ 下单过程中出错，已停止：%s" % e]
 
 
 # ==============================================================================
@@ -927,15 +811,15 @@ table{width:100%%;border-collapse:collapse;table-layout:fixed}
   仓位也按 %(base).0f U 算：名义 = %(base).0f × 敞口 %(expo).2f× = <b>%(notional).2f USDT</b>。<br>
   %(pending_note)s
   · <b>「回测全程参考」</b>（仅供了解这套策略长期跑下来什么水平）：
-  若从 2017-08 就用 %(base).0f U 一路跟着做 ——
+  若从 %(first_month)s 就用 %(base).0f U 一路跟着做 ——
   <b>固定本金</b>（每笔都按 %(base).0f U 开仓）终值 %(fix).0f USDT（%(fix_mult).1f 倍）；
   <b>滚仓</b>（每笔按当时账户权益开仓、利润滚入下一笔）终值 %(cmp).0f USDT（%(cmp_mult).1f 倍）。
   两者收益率完全相同，滚仓只是把绝对金额放大了 %(mult_ratio).1f 倍。<br>
   · <b>往后的滚仓</b>：如果你要滚仓，就每笔按「当时账户权益 × 敞口 %(expo).2f×」下单，
-  赚了自动放大下一笔。滚仓收益高得多，但回撤与爆仓风险同步放大，中途要能扛住 -50%% 回撤才拿得住，
+  赚了自动放大下一笔。滚仓收益高得多，但回撤与爆仓风险同步放大，中途要能扛住 %(mdd_txt)s 回撤才拿得住，
   亏损期也会加速缩水。<b>建议先按固定 %(base).0f U 跑熟再考虑滚仓。</b><br><br>
-  仓位规则：波动率目标 3%%/日，敞口上限 %(expocap).2f×；%(regime_txt)s；不设固定止盈止损，靠信号反转出场。<br>
-  历史参考：2017-08 至今胜率 %(win_rate).0f%%，盈亏比 %(pl_ratio).1f，最大回撤 %(mdd_txt)s，最长水下 %(uw_txt)s。<br>
+  仓位规则：波动率目标 %(vt_pct).1f%%/日，敞口上限 %(expocap).2f×；%(regime_txt)s；不设固定止盈止损，靠信号反转出场。<br>
+  历史参考：%(first_month)s 至今（%(span_years).2f 年）胜率 %(win_rate).0f%%，盈亏比 %(pl_ratio).1f，最大回撤 %(mdd_txt)s，最长水下 %(uw_txt)s。<br>
   空头腿固定 %(lev)d× 逐仓（价格逆行 +%(liqline).1f%% 即爆仓；历史最深逆行 %(adv_txt)s）；多头腿不上杠杆。<br>
   <b>本邮件是回测规则的机械信号，不构成投资建议。</b>加密资产波动极大，请自行判断并控制风险。
 </div>
@@ -950,6 +834,9 @@ table{width:100%%;border-collapse:collapse;table-layout:fixed}
                sig_text(pos["dir"]) if pos["dir"] else "空仓", pos["base"])
             if pending else ""),
         "base": pos["base"],
+        "first_month": fdate(res["bars"][0]["t"])[:7],
+        "span_years": max(
+            (res["bars"][-1]["t"] - res["bars"][0]["t"]) / (365.25 * 86400000.0), 0.0),
         "now": pos["now_equity"],
         "now_mult": pos["now_mult"],
         "notional": pos["notional"],
@@ -960,6 +847,7 @@ table{width:100%%;border-collapse:collapse;table-layout:fixed}
         "mult_ratio": (pos["comp_equity"] / pos["equity"]) if pos["equity"] else 0.0,
         "expo": pos["expo"],
         "expocap": cfg["strategy"]["exposure_cap"],
+        "vt_pct": float(cfg["strategy"]["vt"]) * 100.0,
         "lev": int(float(cfg["binance"]["leverage"])),
         "liqline": 100.0 / float(cfg["binance"]["leverage"]),
         "regime_txt": regime_txt,
@@ -1049,12 +937,33 @@ def claim_mail_slot(bar_date):
     try:
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
+        # 锁可能是「僵尸」：上一次运行抢到锁后、发信前被强制结束（断电 / 任务被 Kill），
+        # 锁文件就留在那儿，这根日线以后永远发不出去。正常发信几十秒就完事，
+        # 所以超过 10 分钟还挂着的一律认定为僵尸，接管重发。
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                owner = f.read().strip()
+            age = time.time() - os.path.getmtime(path)
         except Exception:
-            owner = "（锁文件无法读取）"
-        return False, path, owner
+            age = 0.0
+        if age > MAIL_LOCK_STALE_SEC:
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    owner = f.read().strip()
+            except Exception:
+                owner = "（锁文件无法读取）"
+            log("  ⚠ 发信锁已存在 %.0f 分钟（疑似上次异常退出），接管重发" % (age / 60.0))
+            log("    原占用者：%s" % owner)
+            try:
+                os.remove(path)
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except Exception as e:
+                return False, path, "%s（僵尸锁接管失败：%s）" % (owner, e)
+        else:
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    owner = f.read().strip()
+            except Exception:
+                owner = "（锁文件无法读取）"
+            return False, path, owner
     except Exception:
         return True, None, ""          # 锁不可用时不阻断发信
     try:
@@ -1252,6 +1161,19 @@ def main():
     log("      原始 %d 根，剔除未收盘 %d 根，参与计算 %d 根"
         % (len(raw), len(raw) - len(bars), len(bars)))
     log("      最新已收盘：%s  收盘 %.2f USDT" % (fdate(bars[-1]["t"]), bars[-1]["close"]))
+
+    # 数据新鲜度自检：日线按 UTC 00:00 开盘，正常情况下最新已收盘那根的
+    # 开盘时间距今 1.0~1.7 天。超过 3 天说明连拉取都失败了、一直在读旧缓存 ——
+    # 这时结论不可信，且绝不能据此真实下单。
+    lag_days = (time.time() * 1000.0 - bars[-1]["t"]) / 86400000.0
+    stale = lag_days > STALE_BAR_DAYS
+    if stale:
+        warnings.append(
+            "⚠ 行情不是最新的：最新已收盘日线是 %s，距今 %.1f 天。"
+            "多半是网络拉取一直失败、只能读本地旧缓存 —— 本次结论不可信，已禁止真实下单。"
+            % (fdate(bars[-1]["t"]), lag_days))
+        log("      ⚠ 数据滞后 %.1f 天（阈值 %.1f 天）—— 疑似拉取失败，本次禁止真实下单"
+            % (lag_days, STALE_BAR_DAYS))
     log("")
 
     # ---- 信号 ----
@@ -1350,15 +1272,20 @@ def main():
     log("")
 
     # ---- 下单计划 ----
-    bnc = Binance(cfg)
+    import btc_trade as T
+    bnc = T.Binance(cfg)
     ref_price = bars[-1]["close"]
     orders, notes = build_order_plan(pos, cfg, bnc, ref_price)
-    live_enabled = bool(cfg["binance"]["enabled"] and live)
+    live_enabled = bool(cfg["binance"]["enabled"] and live and not stale)
+    if cfg["binance"]["enabled"] and live and stale:
+        log("[6/6] 数据滞后 %.1f 天，已跳过真实下单（只给计划）" % lag_days)
     if live_enabled:
         log("[6/6] 真实下单已开启，执行中 ...")
-        done = execute_plan(pos, cfg, bnc, ref_price, live)
+        done = execute_plan(pos, cfg, bnc, ref_price, live,
+                            bar_date=fdate(bars[-1]["t"]),
+                            sig_label=sig_text(pos["dir"]))
         for d in done:
-            log("      ✔ " + d)
+            log("      " + d)
         orders = orders + ["执行结果：" + d for d in done]
     else:
         log("[6/6] 执行计划（演练模式，不会真实下单）")

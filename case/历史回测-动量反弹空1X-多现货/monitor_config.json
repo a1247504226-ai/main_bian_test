@@ -15,10 +15,9 @@
   },
 
   "binance": {
-    "_说明": "默认关闭且为演练模式。要真实下单需同时满足三个条件：enabled=true、填好 api_key/api_secret、命令行加 --live。leverage 只影响保证金占用与爆仓线，不影响收益（名义 = 权益 × 敞口）：1× 要价格逆行 +100% 才爆仓，2× 只要 +50%；但 1× 逐仓会占满 100% 保证金，实盘下单会留 1% 缓冲。",
+    "_说明": "默认关闭。要真实下单需同时满足：enabled=true、填好 api_key/api_secret、运行一键下单.bat（等于加 --live）。use_testnet=false 表示连实盘，改成 true 或加 --testnet 参数可连测试网。leverage 只影响保证金占用与爆仓线，不影响收益：1× 要价格逆行 +100% 才爆仓，2× 只要 +50%；1× 逐仓会占满 100% 保证金，所以下单会自动缩量留 1% 缓冲。rebalance_tolerance 是「目标与实际差多少才动手」，0.02 = 名义差 2% 以内不动，避免天天小额调整磨损手续费。fee_buffer 是下单时预留的手续费比例。",
     "enabled": false,
-    "dry_run": true,
-    "use_testnet": true,
+    "use_testnet": false,
     "api_key": "",
     "api_secret": "",
     "spot_base": "https://api.binance.com",
@@ -28,7 +27,9 @@
     "symbol": "BTCUSDT",
     "leverage": 1,
     "margin_type": "ISOLATED",
-    "min_notional_usdt": 20.0
+    "min_notional_usdt": 20.0,
+    "rebalance_tolerance": 0.02,
+    "fee_buffer": 0.002
   },
 
   "strategy": {
