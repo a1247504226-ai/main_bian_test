@@ -1,5 +1,5 @@
 {
- "data_date": "2026-10-19",
+ "data_date": "2026-10-21",
  "positions": {
   "FG": {
    "dir": -1,
@@ -12,8 +12,9 @@
  "start_equity": 20000.0,
  "start_date": "2026-10-12",
  "notified": {
-  "pm": "2026-10-19",
+  "pm": "2026-10-21",
   "am": "2026-10-14"
  },
- "updated": "2026-10-19 20:20:58"
+ "updated": "2026-10-21 20:20:42",
+ "baseline_done": true
 }

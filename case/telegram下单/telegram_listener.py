@@ -70,10 +70,19 @@ API_ROOT = f"https://api.telegram.org/bot{TOKEN}"
 # ==========================================================================
 # 日志：同时写控制台和文件
 # ==========================================================================
+LOG_MAX_BYTES = 10 * 1024 * 1024
+
+
 def log(msg: str) -> None:
     line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}"
     print(line, flush=True)
     try:
+        # 常驻运行必须滚动，否则日志会一路涨到把磁盘写满
+        if LISTEN_LOG.exists() and LISTEN_LOG.stat().st_size > LOG_MAX_BYTES:
+            backup = LISTEN_LOG.with_suffix(".log.1")
+            if backup.exists():
+                backup.unlink()
+            LISTEN_LOG.rename(backup)
         with LISTEN_LOG.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
     except OSError:

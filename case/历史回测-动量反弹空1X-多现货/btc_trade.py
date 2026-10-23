@@ -200,9 +200,17 @@ def load_trade_state():
 
 
 def save_trade_state(st):
+    """原子写，避免写一半被强杀留下半个 JSON（下次读不出来会丢 last_live_bar）。"""
     try:
-        with open(TRADE_STATE, "w", encoding="utf-8") as f:
+        tmp = TRADE_STATE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(st, f, ensure_ascii=False, indent=2)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except Exception:
+                pass
+        os.replace(tmp, TRADE_STATE)
     except Exception as e:
         M.log("      ⚠ 写 trade_state.json 失败：%s" % e)
 
@@ -239,7 +247,15 @@ class Binance:
         self.secret = (b.get("api_secret") or "").strip()
         self.symbol = b["symbol"]
         self.base = self.symbol.replace("USDT", "")
-        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        # 代理：留空 = 不走代理（默认，和行情下载保持一致）；
+        # 需要科学上网才能连币安的机器上填 http://127.0.0.1:7890
+        proxy = (b.get("proxy") or "").strip()
+        if proxy:
+            self.opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({"http": proxy, "https": proxy}))
+        else:
+            self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        self._offset = None            # 本机时钟与币安服务器的毫秒偏移（懒加载）
 
     def has_keys(self):
         return bool(self.key and self.secret)
@@ -247,10 +263,88 @@ class Binance:
     def endpoint_label(self):
         return "测试网 (testnet)" if self.testnet else "实盘 (mainnet)"
 
-    def _request(self, method, base, path, params=None, signed=False, timeout=25):
+    def sync_time(self):
+        """校准本机时钟偏移。
+
+        本机时钟只要快/慢超过 recvWindow（5 秒），所有签名请求都会报
+        **-1021 Timestamp for this request is outside of the recvWindow**，
+        表现是「明明 key 没错却全部失败」。电教室/老机器的时钟常年没校准，
+        所以这里主动跟服务器对一次时间，用偏移量修正 timestamp。
+        """
+        # 交易域名优先（返回的就是撮合用的时间），但它在本机常年不通；
+        # 补一个行情域名 data-api.binance.vision 作备选 —— 它跟 K 线同一个源，
+        # 即使不能下单也能对时，避免「时钟快了 → 把还在交易的 K 线当成已收盘」。
+        for base, path in ((self.fut, "/fapi/v1/time"), (self.spot, "/api/v3/time"),
+                           ("https://data-api.binance.vision", "/api/v3/time")):
+            try:
+                t0 = time.time()
+                req = urllib.request.Request(base + path)
+                req.add_header("User-Agent", "btc-trader/1.0")
+                with self.opener.open(req, timeout=10) as r:
+                    srv = json.loads(r.read().decode()).get("serverTime")
+                t1 = time.time()
+                if srv:
+                    # 用往返中点估计，抵消网络延迟的一半
+                    self._offset = int(srv) - int((t0 + t1) / 2.0 * 1000)
+                    return self._offset
+            except Exception:
+                continue
+        self._offset = 0
+        M.log("      ⚠ 连不上币安的服务器时间接口，按本机时钟处理（可能需要代理）")
+        return 0
+
+    def preflight(self):
+        """开跑前探一下交易接口通不通，返回 (是否可用, 说明)。
+
+        只探「时间接口」——它不需要 key、不需要权限，通了说明网络到得了币安，
+        不通就一定下不了单，早点说清楚比让用户在查余额那一步看到裸超时好。
+        """
+        for base, path, name in ((self.fut, "/fapi/v1/time", "合约"),
+                                 (self.spot, "/api/v3/time", "现货")):
+            try:
+                req = urllib.request.Request(base + path)
+                req.add_header("User-Agent", "btc-trader/1.0")
+                with self.opener.open(req, timeout=8) as r:
+                    json.loads(r.read().decode())
+                return True, "%s接口可达（%s）" % (name, self.endpoint_label())
+            except Exception as e:
+                last = e
+        return False, ("连不上币安交易接口（%s: %s）。多半是这台机器没挂代理 —— "
+                       "在 monitor_config.json 的 binance.proxy 里填本地代理地址后再试。"
+                       "注意：每日行情走 data-api.binance.vision，"
+                       "它能下载不代表交易接口能通。"
+                       % (type(last).__name__, last))
+
+    @staticmethod
+    def _hint(msg):
+        """网络类错误补一句「大概率是没挂代理」，否则用户只看到裸英文。"""
+        low = msg.lower()
+        keys = ("timed out", "timeout", "10054", "10060", "10061", "urlerror",
+                "connection", "ssl", "网络错误")
+        if any(k in low for k in keys):
+            return (msg + "  ← 这台机器连不上币安**交易**接口。"
+                    "① 需要代理的话，在 monitor_config.json 的 binance.proxy 填 "
+                    "http://127.0.0.1:7890（Clash 默认端口）这类本地代理地址；"
+                    "② 行情走的是 data-api.binance.vision，**它能通不代表交易接口能通**。")
+        return msg
+
+    @staticmethod
+    def _retryable(msg):
+        """这个错误重试一次有没有意义（只对幂等的 GET 用）。"""
+        if "HTTP 5" in msg or "HTTP 429" in msg or "HTTP 418" in msg:
+            return True
+        for k in ("-1003", "-1001", "-1007", "timed out", "timeout",
+                  "URLError", "Connection", "网络错误"):
+            if k in msg:
+                return True
+        return False
+
+    def _send_once(self, method, base, path, params, signed, timeout):
         params = dict(params or {})
         if signed:
-            params["timestamp"] = int(time.time() * 1000)
+            if self._offset is None:
+                self.sync_time()
+            params["timestamp"] = int(time.time() * 1000) + (self._offset or 0)
             params["recvWindow"] = 5000
             qs = urllib.parse.urlencode(params)
             sig = hmac.new(self.secret.encode(), qs.encode(), hashlib.sha256).hexdigest()
@@ -267,6 +361,43 @@ class Binance:
         except urllib.error.HTTPError as e:
             body = e.read().decode(errors="replace")
             raise RuntimeError("HTTP %d %s -> %s" % (e.code, path, body))
+        except Exception as e:
+            # URLError / socket.timeout / ssl 错误统一成中文，别让用户看裸英文栈
+            raise RuntimeError(self._hint(
+                "网络错误（%s）：%s: %s" % (path, type(e).__name__, e)))
+
+    def _request(self, method, base, path, params=None, signed=False, timeout=25,
+                 retries=None):
+        """发一个请求。
+
+        重试策略（很重要，直接关系到会不会下重复单）：
+        · **GET（查余额/查持仓/查订单）幂等 → 网络抖动、5xx、限频自动重试 3 次**
+        · **POST（下单/划转/设杠杆）绝不自动重试** —— 请求可能已经进撮合了，
+          再发一次就是双倍仓位。唯一例外是 -1021（时间戳被拒，请求根本没被受理），
+          校准时钟后可以安全重发一次。
+        """
+        if retries is None:
+            retries = 3 if method == "GET" else 1
+        attempts = 0
+        ts_retried = False
+        while True:
+            attempts += 1
+            try:
+                return self._send_once(method, base, path, params, signed, timeout)
+            except RuntimeError as e:
+                msg = str(e)
+                if "-1021" in msg and not ts_retried:
+                    # 时间戳被拒 → 请求根本没被受理，重新对时后重发是安全的
+                    ts_retried = True
+                    self._offset = None
+                    self.sync_time()
+                    M.log("      ⚠ 币安拒绝时间戳（-1021），已校准时钟偏移 %+d ms，重发一次"
+                          % (self._offset or 0))
+                    continue
+                if attempts < retries and self._retryable(msg):
+                    time.sleep(1.2 * attempts)
+                    continue
+                raise
 
     # ---------------- 只读 ----------------
     def spot_balances(self):
@@ -403,8 +534,10 @@ class Binance:
                              signed=True)
 
     def futures_market_order(self, side, qty_str, reduce_only=False):
+        # newOrderRespType=RESULT 必须显式指定：默认是 ACK，返回里的 executedQty /
+        # avgPrice 全是 0，日志会写成「成交 0.000 @ 0.00」，看着像没成交。
         p = {"symbol": self.symbol, "side": side, "type": "MARKET",
-             "quantity": qty_str}
+             "quantity": qty_str, "newOrderRespType": "RESULT"}
         if reduce_only:
             p["reduceOnly"] = "true"
         return self._request("POST", self.fut, "/fapi/v1/order", p, signed=True)
@@ -931,6 +1064,21 @@ def main():
     M.log("  连接目标：%s" % bnc.endpoint_label())
     M.log("  空头杠杆：%d× 逐仓（下单量系数 %.2f）"
           % (int(b["leverage"]), M.short_size_factor(b["leverage"])))
+
+    # ---- 网络预检 ----
+    # 只探时间接口：不需要 key、不需要权限。通不了就一定下不了单，
+    # 早点说清楚，比让用户在「查余额」那一步看到裸超时好得多。
+    if bnc.has_keys():
+        M.log("  正在探测币安交易接口 ...")
+        reachable, why = bnc.preflight()
+        M.log("  %s %s" % ("✔" if reachable else "✘", why))
+        if not reachable:
+            M.log("")
+            M.log("  提示：行情下载（data-api.binance.vision）和交易接口是两套域名，")
+            M.log("        行情能更新不代表这里能下单。")
+            M.log("")
+            M.log("=" * 100)
+            return 3
 
     if status_only:
         if not bnc.has_keys():

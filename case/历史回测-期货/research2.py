@@ -17,7 +17,6 @@
     python research2.py xmom       横截面动量因子
     python research2.py xcombo     carry x 动量 双因子
     python research2.py pairs      产业链配对价差
-    python research2.py regime     波动率状态过滤
     python research2.py all        全部跑一遍并写出 research2.json
 """
 import os, sys, json, math, statistics, random
@@ -133,7 +132,13 @@ def run_weights(P, weight_fn, cost=COST, vol_target=None, expo_cap=2.0,
         # ② 调仓日才更新目标权重，并计换手成本
         turn = 0.0
         if (i % rebal) == 0:
-            tgt = weight_fn(i - 1) or {}
+            # 语义约定：weight_fn 返回 None = 「沿用上一期仓位」，返回 {} = 「清仓」。
+            # 以前写 `weight_fn(i-1) or {}`，把 None 和 {} 混为一谈，导致
+            # make_xcombo 这种经常返回 {} 的双因子策略在确认日被全额平仓，
+            # 而不是维持昨日仓位 —— 收益被系统性低估（且换手成本被高估）。
+            tgt = weight_fn(i - 1)
+            if tgt is None:
+                tgt = dict(w_prev)
             # 波动率缩放
             if vol_target is not None:
                 scaled = {}
@@ -424,63 +429,16 @@ def run_pair(P, a, b, look=60, z_in=2.0, z_out=0.5, cost=COST, beta_hedge=True):
                         if abs(z) < z_out or z * pos > 0 and abs(z) < z_in:
                             newpos = 0
         if newpos != pos:
-            # 两腿都换：各 0.5 敞口
-            r -= abs(newpos - pos) * 0.5 * cost * 2
+            # 两腿都换，但换手量不同：A 腿 0.5、B 腿 0.5×beta（beta 对冲）。
+            # 以前固定写 0.5*cost*2，等于假设 beta=1 —— beta=2 时少算一半成本，
+            # 把配对收益系统性做高。按实际换手 (0.5 + 0.5*beta) 收。
+            r -= abs(newpos - pos) * cost * (0.5 + 0.5 * beta)
             turns.append(abs(newpos - pos))
         else:
             turns.append(0)
         pos = newpos
         rets.append(r)
     return dates[1:], rets, turns
-
-
-# ================================================================ 因子 5：波动率状态过滤
-def make_regime(P, base="carry_trend", lo_pct=0.4, hi_pct=0.9):
-    """波动率状态过滤：只在「市场整体波动率」处于中低位时持有趋势仓。
-
-    市场波动率 = 所有品种 dvol 的中位数。过高时（危机/暴动）趋势策略
-    容易在反转里连续被打，故降仓或空仓。
-    这里做的是「时序」版本：单品种信号 + 组合层按市场波动缩放。
-    """
-    dates, dvol = P["dates"], P["dvol"]
-    syms = P["syms"]
-    n = len(dates)
-
-    mkt = []
-    for i in range(n):
-        vals = [dvol[s][i] for s in syms if dvol[s][i]]
-        mkt.append(statistics.median(vals) if vals else None)
-
-    def wfn(i):
-        # 用 ft 的单品种信号，横截面汇总
-        w = {}
-        for s in syms:
-            b = _bars_cache.get(s)
-            if b is None:
-                continue
-            j = _date_pos[b].get(dates[i])
-            if j is None or j < 1:
-                continue
-            sg = _sig_cache.get(s)
-            if sg is None:
-                continue
-            w[s] = sg[j - 1] * 0.5 / max(1, len(syms) ** 0.5)
-        return w
-
-    return wfn
-
-
-_bars_cache, _date_pos, _sig_cache = {}, {}, {}
-
-
-def load_sig_cache(P, sigfn):
-    for s in P["syms"]:
-        b = ft.load(s)
-        if not b:
-            continue
-        _bars_cache[s] = b
-        _date_pos[s] = {x["date"]: k for k, x in enumerate(b)}
-        _sig_cache[s] = sigfn(b)
 
 
 # ================================================================ 各命令
@@ -534,7 +492,7 @@ def cmd_xcombo(P):
 
 
 def cmd_pairs(P):
-    print("\n【产业链配对价差回归】等名义对冲，z 阈值 ±2.0，回看 60 日")
+    print("\n【产业链配对价差回归】beta 对冲（滚动 OLS 估对冲比），z 阈值 ±2.0，回看 60 日")
     print("%-30s %9s %9s %8s %8s %8s %7s" % ("配对", "年化", "最大回撤", "Calmar", "Sharpe", "持仓胜率", "持仓占比"))
     print("-" * 82)
     out = {}

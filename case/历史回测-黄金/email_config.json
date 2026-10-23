@@ -1,0 +1,14 @@
+{
+  "enabled": true,
+  "from": "a1247504226@163.com",
+  "to": "656677027@qq.com",
+  "password": "XKCINXNMOMMDCAFI",
+  "server": "smtp.163.com",
+  "port": 465,
+  "max_retries": 3,
+  "notify_on_new_long": true,
+  "notify_on_new_short": false,
+  "notify_on_long_exit": true,
+  "fund_mode": true,
+  "recent_days": 7
+}

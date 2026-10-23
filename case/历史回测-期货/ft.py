@@ -70,22 +70,43 @@ SPEC = {
 
 # ================================================================ 数据层
 def _read_csv(sym):
+    """读 CSV，并做「排序 + 去重 + 剔除非法价」。
+
+    这三件事必须做在入口，理由：
+      · 排序：复权 / EMA / ATR / carry 都假设序列按日期递增，乱序会让复权因子
+        按错序累乘，结果全错且不报错。
+      · 去重：同一天两行会让 gap 误判成换月跳空。
+      · 剔除 NaN / <=0：条件判断 `s < -thresh` 对 NaN 恒为 False，carry
+        信号会静默翻成「做空」，这是最危险的一种错法。
+    """
     p = os.path.join(DATA, sym + ".csv")
     if not os.path.exists(p):
         return None
-    bars = []
+    bars, seen = [], set()
     with open(p, encoding="utf-8") as f:
-        next(f)
+        next(f, None)
         for line in f:
             q = line.strip().split(",")
             if len(q) < 6:
                 continue
             try:
-                bars.append({"date": q[0], "open": float(q[1]), "high": float(q[2]),
-                             "low": float(q[3]), "close": float(q[4]), "volume": float(q[5])})
+                d = q[0]
+                o, h, l, c, vol = (float(q[1]), float(q[2]), float(q[3]),
+                                   float(q[4]), float(q[5]))
             except ValueError:
                 continue
-    return _clean(bars) if bars else None
+            if d in seen:
+                continue
+            if any(v != v or v <= 0 for v in (o, h, l, c)):
+                continue
+            seen.add(d)
+            bars.append({"date": d, "open": o, "high": h, "low": l,
+                         "close": c, "volume": vol})
+    if not bars:
+        return None
+    bars.sort(key=lambda x: x["date"])
+    return bars
+
 
 
 def load(sym):
@@ -361,8 +382,10 @@ def asset_returns(bars, sig, fee=0.0002, slip=0.0005, vol_target=0.02,
                 stopped = True
                 exit_px = min(o, stop) if pos > 0 else max(o, stop)
                 exit_px *= (1 - slip) if pos > 0 else (1 + slip)
+                # 注意：滑点已含在 exit_px 里，这里只再收手续费。
+                # 以前写 (fee + slip) 等于滑点计两次，每次换向多付 5bp。
                 r += pos * expo * (exit_px / prev_c - 1.0)     # 结算已实现亏损
-                r -= abs(pos) * expo * (fee + slip)
+                r -= abs(pos) * expo * fee
                 t += abs(pos) * expo
                 pos, expo = 0, 0.0
 
@@ -371,13 +394,13 @@ def asset_returns(bars, sig, fee=0.0002, slip=0.0005, vol_target=0.02,
             if pos != 0:                                        # 先平旧仓
                 exit_px = o * (1 - slip) if pos > 0 else o * (1 + slip)
                 r += pos * expo * (exit_px / prev_c - 1.0)
-                r -= abs(pos) * expo * (fee + slip)
+                r -= abs(pos) * expo * fee
                 t += abs(pos) * expo
                 pos, expo = 0, 0.0
             if tgt != 0 and A[i - 1] > 0:                       # 再开新仓
                 entry_px = o * (1 + slip) if tgt > 0 else o * (1 - slip)
                 expo, pos = e, tgt
-                r -= abs(pos) * expo * (fee + slip)
+                r -= abs(pos) * expo * fee
                 t += abs(pos) * expo
                 stop = entry_px - sl_atr * A[i - 1] if pos > 0 else entry_px + sl_atr * A[i - 1]
                 r += pos * expo * (c / entry_px - 1.0)          # 入场当日剩余收益

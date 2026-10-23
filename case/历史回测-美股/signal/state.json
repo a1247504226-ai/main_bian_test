@@ -1,5 +1,5 @@
 {
- "asof": "2026-10-19",
+ "asof": "2026-10-21",
  "hold": {
   "AAPL": true,
   "MSFT": true,
@@ -7,5 +7,5 @@
   "AMZN": true,
   "NFLX": false
  },
- "saved_at": "2026-10-20 20:30:05"
+ "saved_at": "2026-10-22 20:30:06"
 }

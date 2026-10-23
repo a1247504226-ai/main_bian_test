@@ -63,10 +63,15 @@ FUNDING_D = 0.0003          # 资金费 0.03%/日
 WARMUP = 60                 # 预热期（前 60 根不出信号）
 LEVERAGE = 1.0              # 合约杠杆（空头腿；名义仓位与杠杆无关，只影响爆仓线。1× = 逆行 100% 才爆）
 REGIME_MA = 50              # 只约束多头的趋势过滤：收盘价 > SMA(50) 才允许做多；0 = 关闭
+PRIMARY_SET = (10, 30)      # 双均线参数（快线, 慢线）
+ATR_N = 14                  # ATR 窗口（波动率目标的输入）
 PARAM_SETS = [(8, 24), (10, 30), (12, 36), (15, 45), (20, 60)]
 DAY_MS = 86400000
+DATA_MAX_AGE_DAYS = 2.0     # 本地行情缓存最后一根超过这么多天，就自动重拉
 API_BASE = "https://data-api.binance.vision/api/v3/klines"
 FETCH_START = 1502928000000  # 2017-08-17
+CFG_PATH = os.path.join(HERE, "monitor_config.json")
+CFG_SOURCE = "内置默认值（没找到 monitor_config.json）"
 
 
 LOG_BUF = []
@@ -104,6 +109,61 @@ def row(cells):
     return "  " + " ".join(pad(t, w, a) for t, w, a in cells)
 
 
+def _apply_monitor_config():
+    """
+    同目录如果有 monitor_config.json，就用它的策略参数覆盖上面的常量。
+
+    为什么必须这么做：以前回测脚本和每日检测各写一份参数（均线 10/30、SMA50、预热 60、
+    波动率目标 3%……）。只要有一边被改过而另一边没改，回测报告就不再描述你真正在跑的策略，
+    而且这种不一致是「静默」的 —— 报告照样跑完、数字照样好看，只是已经跟实盘对不上了。
+    现在统一成：以 monitor_config.json 为唯一来源，回测跟着它走。
+    """
+    global VT, EXPOSURE_CAP, WARMUP, REGIME_MA, LEVERAGE, CAPITAL
+    global PRIMARY_SET, ATR_N, CFG_SOURCE
+    if not os.path.exists(CFG_PATH):
+        return
+    try:
+        with open(CFG_PATH, encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception as e:
+        log("  ⚠ monitor_config.json 解析失败（%s），本次改用内置默认参数" % e)
+        return
+    s = d.get("strategy") or {}
+    b = d.get("binance") or {}
+
+    def _f(src, key, cur):
+        v = src.get(key)
+        if v is None:
+            return cur
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return cur
+
+    VT = _f(s, "vt", VT)
+    EXPOSURE_CAP = _f(s, "exposure_cap", EXPOSURE_CAP)
+    WARMUP = int(_f(s, "warmup", WARMUP))
+    REGIME_MA = int(_f(s, "regime_ma", REGIME_MA))
+    ATR_N = int(_f(s, "atr_n", ATR_N))
+    if ATR_N < 1:                    # atr() 里要除以窗口，0 会直接除零
+        ATR_N = 14
+    # 下面三个当分母用过，必须挡住 0 和负数，否则会除零或算出负的名义仓位
+    _cap = _f(s, "base_capital_usdt", CAPITAL)
+    CAPITAL = _cap if _cap > 0 else CAPITAL
+    _lev = _f(b, "leverage", LEVERAGE)
+    LEVERAGE = _lev if _lev > 0 else LEVERAGE
+    ps = s.get("primary_set")
+    if isinstance(ps, (list, tuple)) and len(ps) == 2:
+        try:
+            PRIMARY_SET = (int(ps[0]), int(ps[1]))
+        except (TypeError, ValueError):
+            pass
+    CFG_SOURCE = "monitor_config.json（与每日检测同一口径）"
+
+
+_apply_monitor_config()
+
+
 # ==============================================================================
 # 1. 数据获取（带本地缓存）
 # ==============================================================================
@@ -138,35 +198,113 @@ def fetch_klines(symbol, start_ms):
     return rows
 
 
+def cache_is_stale(symbol, now_ms=None, max_age_days=DATA_MAX_AGE_DAYS):
+    """
+    判断本地行情缓存能不能用，返回 (是否过期, 原因)。
+
+    除了「太旧」之外，还要挡一种更隐蔽的坏数据：
+    **最后一根日线在它收盘之前就被写进了缓存**。
+    比如 10-21 中午 12:44 拉过一次数据，那时 10-21 这根还在走，
+    文件里存下的 close 是当时的价格；等到 10-22 再跑，按墙钟这根「已收盘」，
+    于是这个半成品收盘价就被当成最终收盘价参与计算 —— 静默偏 0.5% 左右，没人看得出来。
+    """
+    path = os.path.join(DATA_DIR, "%s_1d.csv" % symbol)
+    if not os.path.exists(path):
+        return True, "没有本地缓存"
+    now_ms = int(now_ms if now_ms is not None else time.time() * 1000)
+    mtime_ms = os.path.getmtime(path) * 1000.0
+    bars = load(symbol)
+    if not bars:
+        return True, "本地缓存是空的"
+    closed = [b for b in bars if b["t"] + DAY_MS <= now_ms]
+    if not closed:
+        return True, "本地缓存里一根已收盘的日线都没有"
+    last = closed[-1]
+    lag = (now_ms - last["t"]) / float(DAY_MS)
+    if lag > max_age_days:
+        return True, "最后一根已收盘日线是 %s，距今 %.1f 天" % (fdate(last["t"]), lag)
+    if last["t"] + DAY_MS > mtime_ms:
+        return True, ("最后一根已收盘日线 %s 在它收盘前就被写进缓存了，那根的收盘价是残缺的"
+                      % fdate(last["t"]))
+    return False, ""
+
+
 def ensure_data(symbol, refresh=False):
-    """确保 data/<symbol>_1d.csv 存在；返回 bar 列表。"""
+    """确保 data/<symbol>_1d.csv 存在且可用；返回 bar 列表。
+
+    以前只在文件不存在时才联网，结果双击「运行回测.bat」可能拿着两周前的数据跑，
+    报告照样生成、照样好看，只是截止日期悄悄停在过去 —— 这种沉默的过期最容易被忽略。
+    """
     os.makedirs(DATA_DIR, exist_ok=True)
     path = os.path.join(DATA_DIR, "%s_1d.csv" % symbol)
-    if refresh or not os.path.exists(path):
+    need = refresh or not os.path.exists(path)
+    if not need:
+        stale, why = cache_is_stale(symbol)
+        if stale:
+            log("  本地缓存需要更新：%s" % why)
+            log("  自动补拉最新数据 ...")
+            need = True
+    if need:
         log("  拉取 %-9s ..." % symbol)
-        rows = fetch_klines(symbol, FETCH_START)
-        with open(path, "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            w.writerow(["open_time", "open", "high", "low", "close", "volume", "close_time"])
-            for r in rows:
-                w.writerow([r[0], r[1], r[2], r[3], r[4], r[5], r[6]])
-        log("             %d 根" % len(rows))
+        try:
+            rows = fetch_klines(symbol, FETCH_START)
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow(["open_time", "open", "high", "low", "close", "volume", "close_time"])
+                for r in rows:
+                    w.writerow([r[0], r[1], r[2], r[3], r[4], r[5], r[6]])
+            log("             %d 根" % len(rows))
+        except Exception as e:
+            if not os.path.exists(path):
+                raise
+            log("  ⚠ 拉取失败（%s），继续用本地缓存 —— 报告截止日可能不是最新" % e)
     return load(symbol)
 
 
 def load(symbol):
+    """读本地 CSV 日线，并做健壮性清洗。
+
+    币安接口偶尔会返回异常行（价格为 0、时间戳重复、OHLC 越界）。
+    旧版原样读进来：价格为 0 会让 `notional / price` 除零、整份回测崩掉；
+    乱序或重复会让 EMA/ATR 算出错误结果，但**不会报错**，报告照样生成、照样好看。
+    这里统一过滤掉非法行、按时间排序、时间戳重复只留最后一条，并打印清理条数。
+    """
     path = os.path.join(DATA_DIR, "%s_1d.csv" % symbol)
-    bars = []
+    raw = []
     with open(path, encoding="utf-8") as f:
         for row in csv.DictReader(f):
-            bars.append({
-                "t": int(row["open_time"]),
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"]),
-                "vol": float(row["volume"]),
-            })
+            try:
+                b = {"t": int(row["open_time"]),
+                     "open": float(row["open"]), "high": float(row["high"]),
+                     "low": float(row["low"]), "close": float(row["close"]),
+                     "vol": float(row["volume"])}
+            except (KeyError, TypeError, ValueError):
+                raw.append(None)                     # 缺字段/非数字
+                continue
+            o, h, l, c = b["open"], b["high"], b["low"], b["close"]
+            ok = (o > 0 and h > 0 and l > 0 and c > 0
+                  and h >= l and h >= o and h >= c and l <= o and l <= c)
+            raw.append(b if ok else None)
+
+    bad = sum(1 for x in raw if x is None)
+    bars = [x for x in raw if x is not None]
+    if not bars:
+        raise RuntimeError("%s 没有可用日线（%d 行全部非法）" % (symbol, len(raw)))
+
+    bars.sort(key=lambda x: x["t"])
+    dedup = []
+    dup = 0
+    for b in bars:
+        if dedup and dedup[-1]["t"] == b["t"]:
+            dedup[-1] = b                        # 同一根只留最后一条
+            dup += 1
+        else:
+            dedup.append(b)
+    bars = dedup
+
+    if bad or dup:
+        log("  ⚠ %s 数据清洗：丢弃非法行 %d 条、重复时间戳 %d 条（剩 %d 根）"
+            % (symbol, bad, dup, len(bars)))
     return bars
 
 
@@ -280,7 +418,9 @@ def regime_long(bars, sig, ma=None):
 def stats(equity, trades=None):
     eq = [x for x in equity if x is not None]
     if len(eq) < 2 or eq[0] <= 0:
-        return {"final": 0.0, "cagr": -1.0, "mdd": -1.0, "calmar": 0.0}
+        # 字段要和正常分支一致，否则调用方取 st["max_underwater"] 会 KeyError
+        return {"final": 0.0, "cagr": -1.0, "mdd": -1.0, "calmar": 0.0,
+                "max_underwater": 0, "roll365": None, "n_bars": len(eq)}
     n = len(eq)
     years = n / 365.25
     final = eq[-1] / eq[0]
@@ -300,10 +440,14 @@ def stats(equity, trades=None):
     W = 365
     roll = None
     if n > W:
-        r = sorted(eq[i] / eq[i - W] - 1.0 for i in range(W, n))
-        m = len(r)
-        roll = {"min": r[0], "p25": r[m // 4], "med": r[m // 2], "p75": r[3 * m // 4],
-                "max": r[-1], "pos_ratio": sum(1 for x in r if x > 0) / len(r)}
+        # 起点权益为 0 时跳过：那是「爆仓归零之后」的窗口，除零会让整个回测崩掉。
+        # 1× 逐仓通常只亏掉保证金、权益不会真的归零，但空头被逆行 100%
+        # （或把杠杆调大）时就会出现 0，届时旧版会 ZeroDivisionError 直接挂。
+        r = sorted(eq[i] / eq[i - W] - 1.0 for i in range(W, n) if eq[i - W] > 0)
+        if r:
+            m = len(r)
+            roll = {"min": r[0], "p25": r[m // 4], "med": r[m // 2], "p75": r[3 * m // 4],
+                    "max": r[-1], "pos_ratio": sum(1 for x in r if x > 0) / len(r)}
     out = {"final": final, "cagr": cagr, "mdd": mdd, "calmar": calmar,
            "max_underwater": maxuw, "roll365": roll, "n_bars": n}
     if trades:
@@ -351,10 +495,32 @@ def trade_stats(trades):
 # ==============================================================================
 # 4. 引擎：混合载体（多头走现货、空头走合约 1× 逐仓）★ 唯一方案
 # ==============================================================================
+def _check_args(capital, L, atr_n, vt, exposure_cap, warmup):
+    """拦住会算出除零或 NaN 的参数。
+
+    config 那条路径有 >0 兜底，但函数被直接调用时（分析脚本、实验）没有。
+    L=-1 尤其危险：它不报错，会安静地算出 nan 和 Calmar=-3.5 这种荒谬结果，
+    而报告照样生成 —— 比直接崩掉更难发现。
+    """
+    bad = []
+    if not (capital > 0):
+        bad.append("本金 capital 必须 > 0（当前 %r）" % capital)
+    if not (L > 0):
+        bad.append("杠杆 L 必须 > 0（当前 %r；L=0 会除零，L<0 会算出 nan）" % L)
+    if not (atr_n >= 1):
+        bad.append("ATR 窗口 atr_n 必须 >= 1（当前 %r）" % atr_n)
+    for nm, v in (("vt", vt), ("exposure_cap", exposure_cap), ("warmup", warmup)):
+        if v != v or v < 0:
+            bad.append("%s 不能为负或 NaN（当前 %r）" % (nm, v))
+    if bad:
+        raise ValueError("参数非法：" + "；".join(bad))
+
+
 def backtest_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE, spot_fee=SPOT_FEE,
                     fut_fee=FUT_FEE, slip=SLIP, funding_d=FUNDING_D, sizing="vol",
-                    vt=VT, exposure_cap=EXPOSURE_CAP, atr_n=14, warmup=WARMUP,
+                    vt=VT, exposure_cap=EXPOSURE_CAP, atr_n=ATR_N, warmup=WARMUP,
                     cooldown_after_liq=0, allow_short=True):
+    _check_args(capital, L, atr_n, vt, exposure_cap, warmup)
     n = len(bars)
     a = atr(bars, atr_n)
     eq, pos, units, entry_px, margin, fund_acc, entry_i = capital, 0, 0.0, 0.0, 0.0, 0.0, -1
@@ -415,10 +581,13 @@ def backtest_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE, spot_fee=SPOT_FEE,
             eq_ref = eq + units * (prev_c - entry_px) * pos - fund_acc
         else:
             eq_ref = eq
+        # 账户已经归零（爆仓把保证金全吃掉、还倒欠手续费）→ 不许再开新仓。
+        # 旧版会拿这个负数当「权益」算出负的名义仓位，凭空造出一笔反向的幽灵持仓。
+        can_open = eq_ref > 0
         if tgt != pos:
             if pos != 0:
                 close_pos(i, o * (1 - slip) if pos > 0 else o * (1 + slip), "signal")
-            if tgt != 0:
+            if tgt != 0 and can_open:
                 open_pos(i, o * (1 + slip) if tgt > 0 else o * (1 - slip), tgt, eq_ref)
         if pos < 0:
             liq_px = entry_px * (1 + 1.0 / L)
@@ -461,12 +630,13 @@ def backtest_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE, spot_fee=SPOT_FEE,
 # ==============================================================================
 def audit_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE, spot_fee=SPOT_FEE,
                  fut_fee=FUT_FEE, slip=SLIP, funding_d=FUNDING_D, vt=VT,
-                 exposure_cap=EXPOSURE_CAP, atr_n=14, warmup=WARMUP):
+                 exposure_cap=EXPOSURE_CAP, atr_n=ATR_N, warmup=WARMUP):
     """
     完全独立地重新实现一遍混合载体逻辑（不调用 backtest_hybrid），
     逐笔比对交易点与成交价，并比对权益曲线。
     回测最容易骗人的地方是偷看未来数据，肉眼审代码几乎发现不了 —— 只能靠独立重放。
     """
+    _check_args(capital, L, atr_n, vt, exposure_cap, warmup)
     a = atr(bars, atr_n)
     n = len(bars)
     eq, pos, units, epx, margin, fund, ei = capital, 0, 0.0, 0.0, 0.0, 0.0, -1
@@ -483,6 +653,7 @@ def audit_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE, spot_fee=SPOT_FEE,
             eq + units * (pc - epx) * pos - fund if pos < 0 else eq)
         dvol = a[i - 1] / pc if not math.isnan(a[i - 1]) else 0.05
         expo = min(exposure_cap, vt / dvol) if dvol > 0 else exposure_cap
+        can_open = eqref > 0                   # 与引擎一致：归零后不再开新仓
         if tgt != pos:
             if pos != 0:
                 px = o * (1 - slip) if pos > 0 else o * (1 + slip)
@@ -492,7 +663,7 @@ def audit_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE, spot_fee=SPOT_FEE,
                     eq = eq + units * (px - epx) * pos - units * px * fut_fee - fund
                 tr.append((ei, i, pos, epx, px))
                 pos, units, epx, margin, fund, ei = 0, 0.0, 0.0, 0.0, 0.0, -1
-            if tgt != 0:
+            if tgt != 0 and can_open:
                 px = o * (1 + slip) if tgt > 0 else o * (1 - slip)
                 notional = eqref * expo
                 if tgt > 0:
@@ -646,6 +817,9 @@ def main():
     log(" 过滤：SMA%d 只约束多头（收盘价在均线下方时不开多，空头照做）" % REGIME_MA)
     log(" 本金 %.0f USDT | 波动率目标 %.0f%%/日 | 敞口上限 %.1f× | 滑点 %.2f%%"
         % (CAPITAL, VT * 100, EXPOSURE_CAP, SLIP * 100))
+    log(" 双均线 EMA %d/%d | ATR 窗口 %d | 预热 %d 根"
+        % (PRIMARY_SET[0], PRIMARY_SET[1], ATR_N, WARMUP))
+    log(" 参数来源：%s" % CFG_SOURCE)
     hr()
     log("")
 
@@ -677,7 +851,7 @@ def main():
                ["样本区间", "%s ~ %s" % (dates[0], dates[-1])],
                ["K线数量", n], ["样本年数", "%.2f" % years],
                ["本金USDT", "%.2f" % CAPITAL],
-               ["信号", "双均线 EMA 10/30（收盘确认，次日开盘成交）"],
+               ["信号", "双均线 EMA %d/%d（收盘确认，次日开盘成交）" % PRIMARY_SET],
                ["多头腿", "现货（不付资金费）"],
                ["空头腿", "合约 %.0f× 逐仓" % LEVERAGE],
                ["趋势过滤", "SMA%d 只约束多头" % REGIME_MA],
@@ -690,7 +864,7 @@ def main():
     log("")
 
     # ---------------- 当前方案 ----------------
-    sig_raw = sig_ema_cross(bars, 10, 30)
+    sig_raw = sig_ema_cross(bars, PRIMARY_SET[0], PRIMARY_SET[1])
     sig = regime_long(bars, sig_raw, REGIME_MA)
     r = backtest_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE)
     ts = trade_stats(r["trades"])
@@ -891,11 +1065,11 @@ def main():
     variants = [
         ("关闭过滤 + 空头 %d×" % int(LEVERAGE), sig_raw, LEVERAGE),
         ("SMA%d 只约束多头 + 空头 %d× ★当前" % (REGIME_MA, int(LEVERAGE)), sig, LEVERAGE),
-        ("SMA%d 只约束多头 + 空头 2×" % REGIME_MA, sig, 2.0),
-        ("SMA%d 只约束多头 + 空头 3×" % REGIME_MA, sig, 3.0),
-        ("SMA%d 只约束多头 + 空头 4×" % REGIME_MA, sig, 4.0),
-        ("SMA%d 只约束多头 + 空头 5×" % REGIME_MA, sig, 5.0),
     ]
+    for _L in (2.0, 3.0, 4.0, 5.0):
+        if abs(_L - LEVERAGE) < 1e-9:
+            continue                    # 当前杠杆已经在上面 ★ 那行了，别重复
+        variants.append(("SMA%d 只约束多头 + 空头 %d×" % (REGIME_MA, int(_L)), sig, _L))
     for label, sg, L in variants:
         rr = backtest_hybrid(bars, sg, capital=CAPITAL, L=L)
         ss = rr["stats"]
@@ -918,6 +1092,38 @@ def main():
               conf_rows)
     log("")
 
+    # ---- 5b. 空头腿的资金费假设敏感性 ----
+    # 引擎默认「空头每天收 0.03% 资金费」。这是收益里最容易被高估的一块，
+    # 所以单独把它翻过来算一遍，看看结论还站不站得住。
+    _fd0 = FUNDING_D if FUNDING_D > 0 else 0.0003
+    log("  空头资金费敏感性（引擎默认空头每天「收」%.2f%%，这是偏乐观的一侧）：" % (_fd0 * 100))
+    hr("-")
+    log(row([("资金费假设", 30, "left"), ("只空腿终值", 12, "right"),
+             ("全策略终值", 12, "right"), ("全策略回撤", 12, "right"),
+             ("全策略Calmar", 13, "right")]))
+    hr("-")
+    fd_rows = []
+    for _fd, _lbl in ((_fd0, "+%.2f%%/日 空头收（默认）" % (_fd0 * 100)),
+                      (0.0, "0（不收不付）"),
+                      (-_fd0, "-%.2f%%/日 空头付" % (_fd0 * 100))):
+        _rs = backtest_hybrid(bars, sig_s, capital=CAPITAL, L=LEVERAGE, funding_d=_fd)["stats"]
+        _rf = backtest_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE, funding_d=_fd)["stats"]
+        log(row([(_lbl, 30, "left"), ("%.2f×" % _rs["final"], 12, "right"),
+                 ("%.2f×" % _rf["final"], 12, "right"),
+                 ("%.1f%%" % (_rf["mdd"] * 100), 12, "right"),
+                 ("%.3f" % _rf["calmar"], 13, "right")]))
+        fd_rows.append([_lbl, "%.4f" % _rs["final"], "%.4f" % _rf["final"],
+                        "%.4f" % _rf["mdd"], "%.4f" % _rf["calmar"]])
+    hr("-")
+    log("  读法：空头腿的收益里有相当一部分来自「收资金费」。真实 BTC 永续资金费长期为正")
+    log("        （多头付、空头收），但在下跌趋势里经常转负，那时空头反而要付钱。")
+    log("        所以「空头收」是上限一侧；即使按「空头付」算，多头腿仍是收益主体，")
+    log("        结论方向不变，但绝对倍数要打折看。")
+    write_csv("05b_资金费敏感性.csv",
+              ["资金费假设", "只空腿终值", "全策略终值", "全策略最大回撤", "全策略Calmar"],
+              fd_rows)
+    log("")
+
     # ---------------- 6. 参数样本外检验 ----------------
     log("【第 6 步】参数样本外检验（walk-forward，只用过去 5 年选参）")
     rets = {}
@@ -931,7 +1137,7 @@ def main():
     log(row([("方案", 34, "left"), ("终值", 10, "right"), ("年化", 9, "right"),
              ("最大回撤", 10, "right"), ("Calmar", 8, "right")]))
     hr("-")
-    log(row([("当前方案（固定 10/30）", 34, "left"), ("%.2f×" % st["final"], 10, "right"),
+    log(row([("当前方案（固定 %d/%d）" % PRIMARY_SET, 34, "left"), ("%.2f×" % st["final"], 10, "right"),
              ("%+.1f%%" % (st["cagr"] * 100), 9, "right"),
              ("%.1f%%" % (st["mdd"] * 100), 10, "right"),
              ("%.3f" % st["calmar"], 8, "right")]))
@@ -944,7 +1150,7 @@ def main():
     log("  逐年选中：%s" % "  ".join("%d→%d/%d" % (y, k[0], k[1]) for y, k in picks))
     write_csv("06_参数样本外检验.csv",
               ["方案", "终值倍数", "年化", "最大回撤", "Calmar"],
-              [["当前方案（固定 10/30）", "%.4f" % st["final"], "%.4f" % st["cagr"],
+              [["当前方案（固定 %d/%d）" % PRIMARY_SET, "%.4f" % st["final"], "%.4f" % st["cagr"],
                 "%.4f" % st["mdd"], "%.4f" % st["calmar"]],
                ["walk-forward 过去 5 年自选", "%.4f" % wf_st["final"],
                 "%.4f" % wf_st["cagr"], "%.4f" % wf_st["mdd"],
@@ -973,7 +1179,7 @@ def main():
             i -= 1
         ei = min(i + 1, n - 1)
         e_px = bars[ei]["open"] * (1 + SLIP) if s > 0 else bars[ei]["open"] * (1 - SLIP)
-        a = atr(bars, 14)
+        a = atr(bars, ATR_N)
         j = max(ei - 1, 0)
         dv = a[j] / bars[j]["close"] if a[j] == a[j] else 0.05
         expo = min(EXPOSURE_CAP, VT / dv) if dv > 0 else EXPOSURE_CAP
@@ -1065,42 +1271,50 @@ def main():
     _sline("B 改成：sig=0 做空", r_rev, "看起来更好")
     hr("-")
 
-    _d0 = [i for i in range(len(bars) - 1) if sig[i] == 0]
+    # 只看预热期之后的 sig=0 时段。预热期（前 WARMUP 根）引擎根本不下单，
+    # 把那段算进来会虚增天数，还会把 2017 年那波单边上涨混进 t 检验 —— 结论会被稀释。
+    _d0 = [i for i in range(WARMUP, len(bars) - 1) if sig[i] == 0]
     _rets = [bars[i + 1]["close"] / bars[i]["close"] - 1.0 for i in _d0]
     _n = len(_rets)
-    _m = sum(_rets) / _n
-    _sd = (sum((x - _m) ** 2 for x in _rets) / (_n - 1)) ** 0.5
-    _t = _m / (_sd / math.sqrt(_n))
+    _n_valid = max(len(bars) - WARMUP, 1)
+    if _n >= 2:
+        _m = sum(_rets) / _n
+        _sd = (sum((x - _m) ** 2 for x in _rets) / (_n - 1)) ** 0.5
+        _t = _m / (_sd / math.sqrt(_n)) if _sd > 0 else 0.0
+    else:
+        _m, _t = 0.0, 0.0
     _tot, _top5 = 1.0, 1.0
     for x in _rets:
         _tot *= (1.0 + x)
     for x in sorted(_rets)[:5]:          # 跌最多 = 做空最赚的 5 天
         _top5 *= (1.0 + x)
     # _tot / _top5 都已是「倍数」，去掉 top5 后剩下的倍数 = 两者相除
-    _rest = _tot / _top5 - 1.0
+    _rest = (_tot / _top5 - 1.0) if _top5 else 0.0
 
     _scan = []
     for _ma in (20, 30, 40, 50, 60, 80, 100, 120):
-        s2 = regime_long(bars, sig_ema_cross(bars, 10, 30), _ma)
+        s2 = regime_long(bars, sig_ema_cross(bars, PRIMARY_SET[0], PRIMARY_SET[1]), _ma)
         a2 = backtest_hybrid(bars, s2, capital=CAPITAL, L=LEVERAGE)["stats"]["final"]
         b2 = backtest_hybrid(bars, [-1 if x == 0 else x for x in s2],
                              capital=CAPITAL, L=LEVERAGE)["stats"]["final"]
         _scan.append((_ma, b2 / a2 - 1.0))
     _neg = sum(1 for _, g in _scan if g < 0)
 
-    log("  sig=0 的时段共 %d 天（占 %.1f%%）—— 三项检验："
-        % (_n, 100.0 * _n / len(bars)))
+    log("  sig=0 的时段共 %d 天（占预热后 %d 天的 %.1f%%）—— 三项检验："
+        % (_n, _n_valid, 100.0 * _n / _n_valid))
     log("    ① 统计显著性：次日 BTC 均值 %+.2f%%，t = %+.2f（|t| < 2 = 与随机无法区分）"
         % (_m * 100, _t))
-    log("    ② 收益集中度：这 %d 天累计 %+.1f%%，去掉最赚的 5 天后只剩 %+.1f%%"
-        % (_n, _tot * 100 - 100, _rest * 100))
+    log("    ② 收益集中度：这 %d 天价格累计 %+.1f%%（做空就赚这么多），"
+        % (_n, _tot * 100 - 100))
+    log("       去掉做空最赚的 5 天后，剩下 %d 天价格累计 %+.1f%%（做空反而亏这么多）"
+        % (max(_n - 5, 0), _rest * 100))
     log("    ③ 参数敏感性：扫 regime_ma 20→120，%d / %d 个是负的"
         % (_neg, len(_scan)))
     log("       %s" % "  ".join("%d:%+.1f%%" % (ma, g * 100) for ma, g in _scan))
     log("  → 结论：%s（保持 A：sig=0 空仓）"
         % ("过拟合，不采用" if _neg > len(_scan) / 2 else "稳健，可考虑采用"))
     write_csv("09_反向持仓检验.csv", ["检验项", "结果", "判定"],
-              [["sig=0 天数", _n, "占全部 %.1f%%" % (100.0 * _n / len(bars))],
+              [["sig=0 天数（预热后）", _n, "占预热后 %.1f%%" % (100.0 * _n / _n_valid)],
                ["方案A 终值（当前）", "%.4f" % st["final"], "采用"],
                ["方案B 终值（sig=0做空）", "%.4f" % r_rev["stats"]["final"], "看起来更好"],
                ["① 次日均值 t 统计量", "%.2f" % _t, "显著" if abs(_t) >= 2 else "不显著"],
@@ -1122,7 +1336,7 @@ def main():
     hr()
     log("")
     log(" 一句话总结：")
-    log("   1) 信号：双均线 EMA 10/30，收盘确认、次日开盘成交，无未来函数")
+    log("   1) 信号：双均线 EMA %d/%d，收盘确认、次日开盘成交，无未来函数" % PRIMARY_SET)
     log("   2) 过滤：SMA%d 只约束多头 —— 价格在均线下方时不开多，空头照做" % REGIME_MA)
     log("   3) 载体：多头走现货（省资金费）、空头走合约 %d× 逐仓（保留做空保护）"
         % int(LEVERAGE))

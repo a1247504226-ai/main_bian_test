@@ -26,7 +26,9 @@ TELEGRAM_CHAT_ID=        频道 id，形如 -1001234567890
 TELEGRAM_PROXY=          国内必须填代理，如 http://127.0.0.1:7890
 
 BINANCE_API_KEY / BINANCE_API_SECRET 你已经填好了。
-注意：当前 BINANCE_ENV=TEST，用的是测试网 Key（riuf...），两者是配套的。
+注意：当前 BINANCE_ENV=TEST，必须配"在 testnet.binancefuture.com 单独注册的"
+测试网 Key。如果 riuf... 是实盘 Key，--check 会报 -2015 Invalid API-key。
+测试网和实盘的 Key 完全不通用，这一点无法靠改配置绕过。
 
 
 三、启动顺序（开两个命令行窗口）
@@ -76,7 +78,33 @@ BINANCE_API_KEY / BINANCE_API_SECRET 你已经填好了。
    这份文件如果发给别人或传到网上，等于把账户交出去。建议把那段注释删掉。
 
 
-六、排查
+六、风控开关（.env，出问题先看这几个）
+----------------------------------------
+SIGNAL_MAX_AGE_SECONDS=300
+    超过 5 分钟的 OPEN 信号直接跳过。执行器停机后重启，不会拿几小时前的
+    旧价位去开仓。TP / 平仓不受此限制。
+
+TPSL_SANITY_PCT=0.5
+    止盈止损价格偏离现价超过 50% 的一律丢弃。用于兜底"不带币对的止盈止损"
+    被套用到错误持仓上（比如 BTC 持仓收到 ETH 的价格）。
+
+SYMBOLLESS_TP_CLOSE_MODE=SKIP
+    不带币对的止盈/平仓消息直接跳过。真实数据里这类绝大多数是营销播报，
+    猜错标的就会平错仓。改成 ANCHOR 才会按"上一条下单"去推断。
+
+ADOPT_UNKNOWN_POSITIONS=1
+    交易所上有、本地没记录的仓位会被自动接管并挂上 ±7% 保护。
+    如果你在同一个账户里还手动交易别的币，把那些币写进 ADOPT_EXCLUDE_SYMBOLS，
+    否则体检会把手动仓接管过去。
+
+ENABLE_ADD=0
+    补仓默认关闭。开启后才会按"补仓：0.01533"这类价位挂 LIMIT 单。
+
+SYNC_BUDGET_SECONDS=60
+    单轮体检最多占用 60 秒，防止网络故障时体检卡死、信号得不到处理。
+
+
+七、排查
 ----------------------------------------
 telegram_listener.log   监听器日志（每条收到的消息 + 解析结果）
 logs/                   执行器日志（下单、改单、对账）

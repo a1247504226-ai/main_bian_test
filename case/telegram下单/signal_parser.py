@@ -71,6 +71,15 @@ class SignalParser:
         r"|收米|内部群|社区VIP|战绩|盈利反馈|上电视|止盈第\s*\d|跟单",
     )
 
+    # ---- 战绩播报里的「现价多单 25x +257%」格式 --------------------------
+    # 真实开仓是「#VELVET 现价多」（没有「单」字），
+    # 播报是「#LAUSDT 现价多单 25x +257,10%🚀」。
+    # 这条规则必须在 OPEN 分支之前生效，否则每一条战绩播报都会真的市价开一次仓。
+    OPEN_NOISE_RE = re.compile(
+        r"(?:现价|市价)\s*[多空]\s*单[^\n]{0,40}?"
+        r"(?:\d+\s*[xX]\b|[+\-]\s*\d+(?:[.,]\d+)?\s*%)"
+    )
+
     # ---- 真实平仓 / 撤补仓 ------------------------------------------------
     CLOSE_RE = re.compile(r"离场|平仓|出局|清仓|全平")
     # 「插破低点出局即可」「可以等等回调」是行情建议，不是平仓指令
@@ -127,6 +136,10 @@ class SignalParser:
         #    执行器会直接用它开仓（比默认 ±7% 更准）；没有则留空走默认逻辑。
         m = cls.OPEN_RE.search(text)
         if m:
+            # 【致命】先拦战绩播报。营销消息里同样有「#XXX 现价多单 25x +144%」，
+            # 若直接返回 OPEN，执行器会真的去市价开仓 —— 真实日志里 9 条播报全中。
+            if cls.OPEN_NOISE_RE.search(text) or cls.MARKETING_RE.search(text):
+                return None
             sym = cls._norm_symbol(m.group("symbol"))
             if not sym:
                 return None
@@ -219,4 +232,12 @@ if __name__ == "__main__":
     # 7) 行情建议（「出局即可」）不能当成平仓
     assert P("#PONS  目前处于震荡箱体低位，可以等等回调，给机会即可尝试，插破低点出局即可") is None
 
-    print("signal_parser 自检通过 ✓  (10/10)")
+    # 8) 【致命】战绩播报里的「现价多单 25x +144%」绝不能被当成开仓
+    assert P("傲冠VIP内部群今日止盈第  3 单 💵💵\n\n#LAUSDT   现价多单  25x  +144.16%🚀\n\n每日从未缺席") is None
+    assert P("#LAUSDT   现价多单  25x  +257,10%🚀\n\n内部群收米不停，多单TP2止盈触发") is None
+    assert P("周末公开频道休息，内部群照旧发车，依旧止盈拿下\n\n#PUMPUSDT   现价空单   +308.59%🚀") is None
+    # 真实开仓「现价多」不能被误杀
+    assert P("#VELVET   现价多\n\n杠杆：30X-50X\n\n止盈：1.2-1.3\n\n止损：1.1")["type"] == "OPEN"
+    assert P("#ETH 现价空 ( 波动大，1%-2%仓位即可 )")["type"] == "OPEN"
+
+    print("signal_parser 自检通过 ✓  (15/15)")

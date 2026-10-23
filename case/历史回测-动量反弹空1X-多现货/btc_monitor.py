@@ -112,6 +112,9 @@ DEFAULT_CFG = {
         "testnet_futures_base": "https://testnet.binancefuture.com",
         "symbol": "BTCUSDT", "leverage": 1, "margin_type": "ISOLATED",
         "min_notional_usdt": 20.0,
+        # 代理：留空 = 直连（和行情下载一致）。需要科学上网才能连币安的机器上
+        # 填 http://127.0.0.1:7890 这类本地代理地址。
+        "proxy": "",
     },
     "strategy": {
         "symbol": "BTCUSDT", "vt": 0.03, "exposure_cap": 1.0, "atr_n": 14,
@@ -174,15 +177,34 @@ def load_state():
         try:
             with open(STATE_PATH, encoding="utf-8") as f:
                 return json.load(f)
-        except Exception:
-            pass
+        except Exception as e:
+            # 不能静默重置：这里面存着「是否已开始参与」「这根日线发过信没有」。
+            # 悄悄重来会让账户退回「尚未参与」，用户会以为程序算错了。
+            log("  ⚠ monitor_state.json 读不出来（%s），已按首次运行处理" % e)
+            log("    上一份内容已备份为 monitor_state.broken.json，需要的话手工核对。")
+            try:
+                os.replace(STATE_PATH, os.path.join(HERE, "monitor_state.broken.json"))
+            except Exception:
+                pass
     return {"version": 1, "positions": {}, "last_run": None, "last_bar": None,
             "last_mailed_bar": None, "last_mail_at": None, "alerts": []}
 
 
 def save_state(st):
-    with open(STATE_PATH, "w", encoding="utf-8") as f:
+    """原子写：先写临时文件再 os.replace。
+
+    直接覆盖的话，写到一半断电/强杀会留下半个 JSON，下次读到解析失败 →
+    状态被静默重置（participating 丢失 = 账户退回「尚未参与」）。
+    """
+    tmp = STATE_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(st, f, ensure_ascii=False, indent=2)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except Exception:
+            pass
+    os.replace(tmp, STATE_PATH)
 
 
 LOG_BUF = []
@@ -262,19 +284,29 @@ def load_bars(symbol, force=False, max_age_h=1.0):
     """
     取行情。缓存超过 max_age_h 小时就重新拉，避免每日任务读到旧数据。
     网络失败时回退到本地缓存（有总比没有好），但会明确提示。
+
+    注意这里用的是 E.cache_is_stale()，除了「太旧」，它还会挡住一种更隐蔽的坏数据：
+    最后一根日线在它收盘之前就被写进了缓存，那根的 close 是半成品。
+    定时任务是 08:05 本地 = 00:05 UTC，正好在 UTC 换日后 5 分钟 ——
+    如果上一次是前一天 23:30 UTC 左右手动跑的，缓存只有 0.6 小时，
+    按「小时数」判断算新鲜，但里面那根的收盘价其实是 23:30 的价格。
     """
     path = os.path.join(E.DATA_DIR, "%s_1d.csv" % symbol)
     age = None
     if os.path.exists(path):
         age = (time.time() - os.path.getmtime(path)) / 3600.0
-        if not force and age < max_age_h:
+    if not force and os.path.exists(path):
+        stale, why = E.cache_is_stale(symbol, max_age_days=max_age_h / 24.0)
+        if not stale:
             log("      使用本地缓存（%.2f 小时前更新，阈值 %.1f 小时）" % (age, max_age_h))
             return E.load(symbol)
+        log("      本地缓存需要更新：%s" % why)
     try:
         return E.ensure_data(symbol, refresh=True)
     except Exception as e:
         if os.path.exists(path):
-            log("      ⚠ 拉取失败（%s），回退到 %.2f 小时前的本地缓存" % (e, age or -1))
+            log("      ⚠ 拉取失败（%s），回退到 %.2f 小时前的本地缓存 —— 数据可能不是最新"
+                % (e, age or -1))
             return E.load(symbol)
         raise
 
@@ -291,7 +323,7 @@ def exposure_at(bars, cfg, i):
     return (min(st["exposure_cap"], st["vt"] / dvol) if dvol > 0 else st["exposure_cap"]), dvol
 
 
-def derive_position(bars, sig, cfg, tag, pending=False):
+def derive_position(bars, sig, cfg, tag, pending=False, next_bar=None, since=None):
     """
     从信号历史推演出「当前这一笔持仓」的明细，同时给两套口径：
 
@@ -348,6 +380,55 @@ def derive_position(bars, sig, cfg, tag, pending=False):
     losses = closed_n - wins
     pl_ratio = ((gross_win / wins) / (gross_loss / losses)) if (wins and losses and gross_loss) else 0.0
 
+    # ---- 刚平仓的那一笔：信号在「最后一根」才翻成空仓 ----
+    # 引擎的规则是「第 i 根收盘确认 → 第 i+1 根开盘成交」。最后一根翻 0 时，
+    # 平仓要等下一根开盘，可这根还不存在 —— 于是这笔在引擎里仍算持仓（不进 trades），
+    # 而 cur_sig=0 又让它进不了「当前持仓」。两边都不显示 = 邮件里凭空消失。
+    # 补一根虚拟 K 线（open=close=今日开盘价）让引擎自然平掉它，只用于展示，不动主结果。
+    just_closed = None
+    if cur_sig == 0 and n >= 2 and sig[-2] != 0:
+        px = (next_bar or {}).get("open") or cur_px
+        if px and px > 0:
+            vb = list(bars) + [{"t": bars[-1]["t"] + E.DAY_MS, "open": px, "high": px,
+                                "low": px, "close": px, "v": 0.0}]
+            vs = list(sig) + [0]
+            try:
+                r2 = E.backtest_hybrid(vb, vs, E.CAPITAL, L=lev,
+                                       exposure_cap=st["exposure_cap"], vt=st["vt"],
+                                       atr_n=st["atr_n"], warmup=st["warmup"])
+                if len(r2["trades"]) > len(res["trades"]):      # 确实新增了一笔才用
+                    t = r2["trades"][-1]
+                    j2 = t["entry_i"] - 1
+                    e2 = r2["equity"]
+                    e_ref2 = e2[j2] if (0 <= j2 < len(e2) and e2[j2]) else E.CAPITAL
+                    s2 = base / e_ref2 if e_ref2 else 0.0
+                    just_closed = {
+                        "entry_date": fdate(bars[t["entry_i"]]["t"]),
+                        "exit_date": fdate(vb[t["exit_i"]]["t"]),
+                        "dir": t["dir"], "entry_px": t["entry_px"], "exit_px": t["exit_px"],
+                        "pnl": t["pnl"] * s2, "comp_pnl": t["pnl"] * comp_scale,
+                        "liq": bool(t.get("liq")), "leg": t.get("leg"),
+                        "just_closed": True,
+                    }
+                    recent.append(just_closed)
+            except Exception as e:
+                log("      （补算刚平仓那笔失败：%s）" % e)
+
+    # ---- 参与起点之后已实现的盈亏 ----
+    # 用户真正开始跟单之后平掉的每一笔都要累计进来，否则「赚的钱」会在空仓那天
+    # 突然消失（账户现值从「本金+浮盈」直接退回本金），看着像程序算错了。
+    realized_since = 0.0
+    if since:
+        for t in res["trades"]:
+            # 用 > 而不是 >=：参与起点那天平掉的是「上一笔」，不算你的
+            if fdate(bars[t["exit_i"]]["t"]) > since:
+                j = t["entry_i"] - 1
+                e_ref = eq[j] if (0 <= j < n and eq[j]) else E.CAPITAL
+                realized_since += t["pnl"] * (base / e_ref if e_ref else 0.0)
+        # 今天刚平掉的那笔不在引擎 trades 里（见上），单独补
+        if just_closed and just_closed["exit_date"] > since:
+            realized_since += just_closed["pnl"]
+
     # ---- 滚仓口径的账户权益（引擎原生净值，已 mark-to-market 到最新收盘）----
     eq_last = None
     for v in reversed(eq):
@@ -369,7 +450,8 @@ def derive_position(bars, sig, cfg, tag, pending=False):
         # 主口径：从现在起算（历史已平仓不计入，账户 = 本金 + 当前浮盈）
         # pending=True（本轮尚未参与）时，当前这笔的浮盈不计入账户，账户就是本金
         "pending": bool(pending),
-        "now_equity": base, "now_mult": 1.0,
+        "now_equity": base if pending else (base + realized_since),
+        "now_mult": (1.0 if pending else ((base + realized_since) / base if base else 1.0)),
         # 回测全程参考
         "comp_realized": comp_equity - base, "comp_equity": comp_equity,
         "comp_qty": 0.0, "comp_notional": 0.0, "comp_mkt_value": 0.0,
@@ -377,9 +459,17 @@ def derive_position(bars, sig, cfg, tag, pending=False):
         "leg": ("现货" if cur_sig > 0 else
                 ("合约 %d× 逐仓" % int(lev) if cur_sig < 0 else "—")),
         "recent": recent[-3:],
+        "just_closed": just_closed,
+        "ref_expo": 0.0,
     }
 
     if cur_sig == 0:
+        # 空仓时也给一个「下一笔进场时大概多少倍」的参考值，
+        # 否则邮件会写「敞口 0.00× 进场」，看着像永远不进场。
+        try:
+            out["ref_expo"] = exposure_at(bars, cfg, n - 1)[0]
+        except Exception:
+            out["ref_expo"] = 0.0
         return out
 
     # ---- 当前持仓：找本轮起点（最后一个信号翻转处）----
@@ -422,8 +512,9 @@ def derive_position(bars, sig, cfg, tag, pending=False):
         "equity": base + realized + upnl,
         # 主口径：从现在起算，历史已平仓不计入。
         # pending=True → 这笔不算你的（你没参与），账户就还是本金，倍数 1.00×。
-        "now_equity": base if pending else (base + upnl),
-        "now_mult": 1.0 if pending else ((base + upnl) / base if base else 0.0),
+        "now_equity": base if pending else (base + realized_since + upnl),
+        "now_mult": (1.0 if pending else
+                     ((base + realized_since + upnl) / base if base else 0.0)),
         # 滚仓口径
         "comp_qty": comp_qty, "comp_notional": comp_notional,
         "comp_mkt_value": comp_qty * cur_px, "comp_upnl": comp_upnl,
@@ -479,10 +570,21 @@ def build_order_plan(pos, cfg, binance, price):
 
     # 尚未开始参与：当前这笔不计入账户，也不需要任何操作
     if pos.get("pending"):
-        actions.append("本轮不参与：当前这笔（%s 开的%s）你没有实际持仓，不计入账户。"
-                       % (pos.get("entry_date") or "—", sig_text(sig) if sig else "空仓"))
-        actions.append("等信号翻转后，按本金 %.0f USDT × 敞口 %.2f× 进场。"
-                       % (pos["base"], pos["expo"] or 0.0))
+        cap = float(cfg["strategy"].get("exposure_cap", 1.0))
+        if sig == 0:
+            jc = pos.get("just_closed")
+            if jc:
+                actions.append("上一笔（%s 开的%s）已在 %s 开盘平仓，你没有实际持仓，"
+                               "这笔盈亏不计入账户。"
+                               % (jc["entry_date"], sig_text(jc["dir"]), jc["exit_date"]))
+            actions.append("当前空仓，本轮无需操作。下一笔信号出现时按本金 %.0f USDT "
+                           "× 届时敞口（现在算约 %.2f×，上限 %.2f×）进场，从那一笔开始计入账户。"
+                           % (pos["base"], pos.get("ref_expo") or 0.0, cap))
+        else:
+            actions.append("本轮不参与：当前这笔（%s 开的%s）你没有实际持仓，不计入账户。"
+                           % (pos.get("entry_date") or "—", sig_text(sig)))
+            actions.append("等信号翻转后，按本金 %.0f USDT × 敞口 %.2f× 进场。"
+                           % (pos["base"], pos["expo"] or 0.0))
         if not binance.has_keys():
             notes.append("未配置币安 API Key → 跳过仓位核对，只给目标方向。")
         return actions, notes
@@ -603,16 +705,29 @@ def build_mail_html(res):
 
     # ---------- 顶部横幅：未参与 / 变更 / 不变 ----------
     if pending:
+        _jc = pos.get("just_closed")
+        if pos["dir"] == 0:
+            # 空仓 + 未参与：说清「上一笔今天平掉了」和「下一笔才计入」，
+            # 否则用户会以为持仓记录丢了（旧版这里会写「上面的浮盈」，可空仓根本没有浮盈）
+            _head = "空仓中 · 本轮无需操作"
+            _body = ("%s你没有实际持仓，这笔盈亏<b>不计入账户</b> —— 账户现值就是本金 "
+                     "<b>%.0f USDT</b>。等下一笔信号出现时按本金 %.0f USDT 进场，从那一笔开始计入。"
+                     % (("上一笔（%s 开的%s）已在 %s 开盘平仓，"
+                         % (_jc["entry_date"], sig_text(_jc["dir"]), _jc["exit_date"]))
+                        if _jc else "当前空仓，",
+                        pos["base"], pos["base"]))
+        else:
+            _head = "尚未开始参与 · 本轮无需操作"
+            _body = ("当前这笔（%s 开的%s）你还没有实际持仓，<b>不计入账户</b> —— "
+                     "账户现值就是本金 <b>%.0f USDT</b>。等信号翻转后按本金 %.0f USDT × 敞口进场，"
+                     "从那一笔开始计入。"
+                     % (pos.get("entry_date") or "—", sig_text(pos["dir"]),
+                        pos["base"], pos["base"]))
         banner = ('<div class="banner" style="background:#eef3f8;border-left:5px solid #2471a3;'
                   'border-radius:0 10px 10px 0;padding:13px 16px;margin-bottom:14px">'
-                  '<div style="color:#1b4f72;font-size:15px;font-weight:700">尚未开始参与 · 本轮无需操作</div>'
+                  '<div style="color:#1b4f72;font-size:15px;font-weight:700">%s</div>'
                   '<div style="color:#33607f;font-size:12.5px;margin-top:6px;line-height:1.65">'
-                  '当前这笔（%s 开的%s）你还没有实际持仓，<b>不计入账户</b> —— '
-                  '账户现值就是本金 <b>%.0f USDT</b>。等信号翻转后按本金 %.0f USDT × 敞口进场，'
-                  '从那一笔开始计入。</div></div>'
-                  % (pos.get("entry_date") or "—",
-                     sig_text(pos["dir"]) if pos["dir"] else "空仓",
-                     pos["base"], pos["base"]))
+                  '%s</div></div>' % (_head, _body))
     elif changes:
         detail = "；".join(changes)
         banner = ('<div class="banner" style="background:%s;border-radius:10px;padding:15px 16px;'
@@ -692,11 +807,14 @@ def build_mail_html(res):
 
     extra = ""
     if pos.get("pending"):
+        _sub = ("当前空仓，没有持仓可算；账户现值 = 本金 %.0f USDT，下一笔信号起计入"
+                % pos["base"] if pos["dir"] == 0 else
+                "这笔你没有实际持仓，上面的浮盈只是信号推演，不计入账户；从下一笔开始计入")
         extra += ('<tr><td style="padding:4px 0;color:%s">参与状态</td>'
-                  '<td style="padding:4px 0;color:#1b4f72"><b>尚未参与</b>'
+                  '<td style="padding:4px 0;color:#1b4f72"><b>%s</b>'
                   '<div style="font-size:11px;font-weight:400;color:#8a9aab;margin-top:3px;line-height:1.5">'
-                  '这笔你没有实际持仓，上面的浮盈只是信号推演，不计入账户；从下一笔开始计入</div></td></tr>'
-                  % C_MUTED)
+                  '%s</div></td></tr>'
+                  % (C_MUTED, "空仓 · 尚未参与" if pos["dir"] == 0 else "尚未参与", _sub))
     if pos["dir"] < 0 and res["short_risk"]:
         r = res["short_risk"]
         extra = ('<tr><td style="padding:4px 0;color:%s">爆仓价 / 安全余量</td>'
@@ -710,14 +828,21 @@ def build_mail_html(res):
             return ""
         rows = ""
         for t in rec:
+            # 「刚平仓」那笔是今天开盘才成交的，标一下，免得看着像凭空多出来一笔
+            mark = ('<span style="color:#1b4f72;font-size:10.5px;font-weight:700;'
+                    'background:#eaf1f8;border-radius:3px;padding:1px 4px;margin-left:4px">'
+                    '今日平仓</span>' if t.get("just_closed") else "")
             rows += ('<tr><td style="padding:8px 4px;border-bottom:1px solid #eef1f5;font-size:12.5px">'
-                     '%s → %s<div style="color:#8a9aab;font-size:11.5px">%.2f → %.2f</div></td>'
+                     '%s → %s%s<div style="color:#8a9aab;font-size:11.5px">%.2f → %.2f</div></td>'
                      '<td style="padding:8px 4px;border-bottom:1px solid #eef1f5;font-size:12.5px;'
                      'text-align:center;color:%s">%s</td>'
                      '<td style="padding:8px 4px;border-bottom:1px solid #eef1f5;font-size:12.5px;'
                      'text-align:right;white-space:nowrap">%s</td></tr>'
-                     % (t["entry_date"], t["exit_date"], t["entry_px"], t["exit_px"],
+                     % (t["entry_date"], t["exit_date"], mark, t["entry_px"], t["exit_px"],
                         sig_color(t["dir"]), sig_text(t["dir"]), _money_cell(t["pnl"])))
+        _sub = ("（不计入上方账户；标「今日平仓」的是今天开盘刚平掉的那笔）"
+                if any(t.get("just_closed") for t in rec)
+                else "（回测历史，不计入上方账户）")
         return ('<div style="background:#fff;border-radius:12px;padding:14px 16px;margin-top:12px">'
                 '<div style="font-size:14px;font-weight:700;color:#1c2833;margin-bottom:8px">%s'
                 '<span style="font-weight:400;font-size:12px;color:#8a9aab">%s</span></div>'
@@ -728,7 +853,7 @@ def build_mail_html(res):
                 '<th style="padding:6px 4px;text-align:center;font-size:12px;color:%s">方向</th>'
                 '<th style="padding:6px 4px;text-align:right;font-size:12px;color:%s">盈亏(U)</th></tr>'
                 '%s</table></div>'
-                % (title, "（回测历史，不计入上方账户）", C_MUTED, C_MUTED, C_MUTED, rows))
+                % (title, _sub, C_MUTED, C_MUTED, C_MUTED, rows))
 
     recent = recent_table(pos, "最近 3 笔已平仓")
 
@@ -859,7 +984,8 @@ table{width:100%%;border-collapse:collapse;table-layout:fixed}
         "mdd_txt": "%.1f%%" % (pos["mdd"] * 100),
         "uw_txt": "%d 天" % pos["uw"],
         "adv_txt": "%.1f%%" % (pos["adverse"] * 100),
-        "row": pos_row(pos, "当前信号（未参与）" if pending else "当前策略"),
+        "row": pos_row(pos, (("当前信号（空仓中）" if pos["dir"] == 0 else "当前信号（未参与）")
+                             if pending else "当前策略")),
         "detail": detail_card(pos, "混合载体 · 双均线 10/30", extra),
         "orders": orders_html, "warn": warn,
         "recent": recent,
@@ -1157,10 +1283,41 @@ def main():
     log("[1/6] 拉取行情（只用当日已收盘的 K 线）")
     raw = load_bars(st["symbol"], force=refresh,
                     max_age_h=float(st.get("cache_max_age_hours", 1)))
-    bars = closed_bars(raw)
+
+    # 本机时钟校准：closed_bars 用「本机现在」判断哪根已收盘。
+    # 时钟要是快了几个小时，就会把还在交易的那根当成已收盘 —— 用半成品的
+    # 收盘价做决策，而且完全看不出异常。对时失败时偏移为 0，退化为原行为。
+    clock_off = 0
+    try:
+        import btc_trade as T
+        clock_off = T.Binance(cfg).sync_time()
+    except Exception as e:
+        log("      （时钟校准跳过：%s）" % e)
+    if abs(clock_off) > 600000:
+        warnings.append("⚠ 本机时钟与币安服务器相差 %.1f 分钟，本次已按服务器时间修正。"
+                        "建议校准系统时间，否则下单签名会报 -1021。"
+                        % (clock_off / 60000.0))
+        log("      ⚠ 本机时钟偏差 %.1f 分钟，已用服务器时间修正"
+            % (clock_off / 60000.0))
+    bars = closed_bars(raw, now_ms=int(time.time() * 1000) + clock_off)
     log("      原始 %d 根，剔除未收盘 %d 根，参与计算 %d 根"
         % (len(raw), len(raw) - len(bars), len(bars)))
     log("      最新已收盘：%s  收盘 %.2f USDT" % (fdate(bars[-1]["t"]), bars[-1]["close"]))
+
+    # 价格合理性：下单量全部是「名义 ÷ 价格」算出来的，价格一旦错位（数据串行、
+    # 单位错、拉到别的币），算出来的数量就是荒谬的，而订单照样会发出去。
+    # 这里做两道闸：非正/非有限直接停；与近 30 日均价偏离 5 倍以上禁止真实下单。
+    _px = bars[-1]["close"]
+    if not (_px > 0) or _px != _px or _px in (float("inf"), float("-inf")):
+        raise RuntimeError("最新收盘价异常（%r），拒绝继续计算仓位与订单" % _px)
+    _ref30 = sum(b["close"] for b in bars[-30:]) / float(min(30, len(bars)))
+    price_anomaly = False
+    if _ref30 > 0 and (_px / _ref30 > 5.0 or _px / _ref30 < 0.2):
+        price_anomaly = True
+        warnings.append(
+            "⚠ 最新收盘价 %.2f 与近 30 日均价 %.2f 相差 %.1f 倍，疑似数据错位。"
+            "本次结论不可信，已禁止真实下单。" % (_px, _ref30, _px / _ref30))
+        log("      ⚠ 价格与 30 日均价相差 %.1f 倍 —— 疑似数据错位，禁止真实下单" % (_px / _ref30))
 
     # 数据新鲜度自检：日线按 UTC 00:00 开盘，正常情况下最新已收盘那根的
     # 开盘时间距今 1.0~1.7 天。超过 3 天说明连拉取都失败了、一直在读旧缓存 ——
@@ -1188,14 +1345,23 @@ def main():
 
     # ---- 持仓与盈亏 ----
     log("[3/6] 推演当前持仓（成本价 / 现价 / 浮动盈亏）")
-    pos = derive_position(bars, sig, cfg, "当前策略", pending=pending)
+    pos = derive_position(bars, sig, cfg, "当前策略", pending=pending,
+                          next_bar=(raw[len(bars)] if len(raw) > len(bars) else None),
+                          since=state.get("participate_from"))
     _lev = float(cfg["binance"]["leverage"])
     log("      配置：多头现货 · 空头合约 %d× 逐仓（爆仓线 %+.1f%%）· %s"
         % (int(_lev), 100.0 / _lev,
            ("SMA%d 只约束多头" % int(rma)) if rma else "无均线过滤"))
     if pending:
-        log("      参与状态：尚未开始 —— 当前这笔（%s 开的%s）你没有实际持仓，不计入账户"
-            % (pos["entry_date"] or "—", sig_text(pos["dir"]) if pos["dir"] else "空仓"))
+        if pos["dir"] == 0:
+            _jc = pos.get("just_closed")
+            log("      参与状态：尚未开始 —— %s，当前空仓，账户就是本金 %.0f U"
+                % (("上一笔 %s 开的%s已在 %s 开盘平仓" % (_jc["entry_date"], sig_text(_jc["dir"]),
+                                                    _jc["exit_date"])) if _jc else "当前空仓",
+                   pos["base"]))
+        else:
+            log("      参与状态：尚未开始 —— 当前这笔（%s 开的%s）你没有实际持仓，不计入账户"
+                % (pos["entry_date"] or "—", sig_text(pos["dir"])))
     log("      %s" % ("-" * 92))
     log("      " + E.row([("方案", 18, "left"), ("持仓", 6, "center"), ("成本价", 12, "right"),
                           ("现价", 12, "right"), ("浮动盈亏", 14, "right"),
@@ -1217,8 +1383,12 @@ def main():
         log("      %s：数量 %.6f BTC · 入场名义 %.2f U（敞口 %.2f×）· 市值 %.2f U"
             % (pos["tag"], pos["qty"], pos["notional"], pos["expo"], pos["mkt_value"]))
     if pos["pending"]:
-        log("      %s：账户现值 %.2f U（%.2f 倍）—— 本金 %.0f U，当前这笔未参与，浮盈 %s 不计入"
-            % (pos["tag"], pos["now_equity"], pos["now_mult"], pos["base"], money(pos["upnl"])))
+        if pos["dir"] == 0:
+            log("      %s：账户现值 %.2f U（%.2f 倍）—— 空仓中，本金 %.0f U 全额在手，下一笔信号起计入"
+                % (pos["tag"], pos["now_equity"], pos["now_mult"], pos["base"]))
+        else:
+            log("      %s：账户现值 %.2f U（%.2f 倍）—— 本金 %.0f U，当前这笔未参与，浮盈 %s 不计入"
+                % (pos["tag"], pos["now_equity"], pos["now_mult"], pos["base"], money(pos["upnl"])))
     else:
         log("      %s：本金 %.0f + 浮盈 %s = 账户现值 %.2f U（%.2f 倍）"
             % (pos["tag"], pos["base"], money(pos["upnl"]), pos["now_equity"], pos["now_mult"]))
@@ -1252,6 +1422,8 @@ def main():
         pos["pending"] = False
         pos["now_equity"] = pos["base"] + pos["upnl"]
         pos["now_mult"] = pos["now_equity"] / pos["base"] if pos["base"] else 1.0
+        # 记住参与起点：之后平掉的每一笔都要累计进账户，不能平仓当天退回本金
+        state["participate_from"] = pos["entry_date"]
         log("      ▶ 从这笔开始参与：本金 %.0f USDT 已计入账户。" % pos["base"])
         log("")
 
@@ -1276,9 +1448,11 @@ def main():
     bnc = T.Binance(cfg)
     ref_price = bars[-1]["close"]
     orders, notes = build_order_plan(pos, cfg, bnc, ref_price)
-    live_enabled = bool(cfg["binance"]["enabled"] and live and not stale)
-    if cfg["binance"]["enabled"] and live and stale:
-        log("[6/6] 数据滞后 %.1f 天，已跳过真实下单（只给计划）" % lag_days)
+    block_live = stale or price_anomaly
+    live_enabled = bool(cfg["binance"]["enabled"] and live and not block_live)
+    if cfg["binance"]["enabled"] and live and block_live:
+        log("[6/6] %s，已跳过真实下单（只给计划）"
+            % ("数据滞后 %.1f 天" % lag_days if stale else "价格疑似错位"))
     if live_enabled:
         log("[6/6] 真实下单已开启，执行中 ...")
         done = execute_plan(pos, cfg, bnc, ref_price, live,

@@ -53,6 +53,7 @@ import time
 from datetime import datetime
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 from email.mime.text import MIMEText
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
@@ -199,6 +200,9 @@ def load_config() -> Dict[str, Any]:
         # ---- 行为开关 ----
         "signal_poll_seconds": max(1, int(os.getenv("SIGNAL_POLL_SECONDS", "2"))),
         "sync_seconds": max(10, int(os.getenv("SYNC_SECONDS", "60"))),
+        # 单轮体检的时间预算（秒）。网络故障时单个请求最长可拖 50 秒以上，
+        # 若不加预算，5 个持仓的体检能卡十几分钟，期间信号完全不被处理。
+        "sync_budget_seconds": max(10, int(os.getenv("SYNC_BUDGET_SECONDS", "60"))),
         "client_id_prefix": os.getenv("CLIENT_ID_PREFIX", "wbsx"),
         "adopt_unknown_positions": os.getenv("ADOPT_UNKNOWN_POSITIONS", "1") == "1",
         "reverse_on_opposite_open": os.getenv("REVERSE_ON_OPPOSITE_OPEN", "1") == "1",
@@ -233,6 +237,14 @@ def load_config() -> Dict[str, Any]:
         # 是否处理「出补仓」（撤销补仓挂单）
         "enable_cancel_add": os.getenv("ENABLE_CANCEL_ADD", "1") == "1",
         "notify_cooldown_seconds": int(os.getenv("NOTIFY_COOLDOWN_SECONDS", "120")),
+        # 信号最大可执行时长（秒）。执行器停机几小时后重启，会把积压的旧信号一次性执行；
+        # 拿几小时前的价位去开仓毫无意义，且可能已经把仓位开到反向。0 = 不校验。
+        "signal_max_age_seconds": int(os.getenv("SIGNAL_MAX_AGE_SECONDS", "300")),
+        # 体检时「不接管」的币对（逗号分隔）。用于排除你自己手动交易的标的，
+        # 避免执行器把手动仓接管过去、挂上 ±7% 的止盈止损。
+        "adopt_exclude_symbols": {
+            s.strip().upper() for s in os.getenv("ADOPT_EXCLUDE_SYMBOLS", "").split(",") if s.strip()
+        },
 
         # ---- 邮件（密码必须走环境变量，不再硬编码）----
         "email": {
@@ -254,7 +266,13 @@ logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler(LOG_DIR / "signal_executor.log", encoding="utf-8"),
+        # 常驻运行必须滚动，否则日志会一路涨到把磁盘写满
+        RotatingFileHandler(
+            LOG_DIR / "signal_executor.log",
+            maxBytes=int(os.getenv("LOG_MAX_BYTES", str(10 * 1024 * 1024))),
+            backupCount=int(os.getenv("LOG_BACKUP_COUNT", "5")),
+            encoding="utf-8",
+        ),
         logging.StreamHandler(sys.stdout),
     ],
 )
@@ -404,12 +422,8 @@ def _request(
     if CONFIG["mock"]:
         return MOCK.request(method, endpoint, params, signed)
 
-    if signed:
-        if not CONFIG["api_key"] or not CONFIG["api_secret"]:
-            raise RuntimeError("未配置 BINANCE_API_KEY / BINANCE_API_SECRET")
-        params["timestamp"] = _ts()
-        params["recvWindow"] = CONFIG["recv_window"]
-        params["signature"] = _sign(params)
+    if signed and (not CONFIG["api_key"] or not CONFIG["api_secret"]):
+        raise RuntimeError("未配置 BINANCE_API_KEY / BINANCE_API_SECRET")
 
     headers = {"X-MBX-APIKEY": CONFIG["api_key"]} if signed else {}
 
@@ -417,6 +431,15 @@ def _request(
     last_error: Optional[Exception] = None
 
     for attempt in range(attempts):
+        # 每次尝试都必须重新签名。
+        # 重试前会 sleep 1~3 秒，加上请求本身的耗时，复用第一次的 timestamp 很容易
+        # 超出 recvWindow（默认 5000ms），重试必然以 -1021 失败 —— 等于没重试。
+        if signed:
+            params.pop("signature", None)
+            params["timestamp"] = _ts()
+            params["recvWindow"] = CONFIG["recv_window"]
+            params["signature"] = _sign(params)
+
         try:
             resp = _session.request(
                 method,
@@ -436,11 +459,9 @@ def _request(
                 except (TypeError, ValueError):
                     code = 0
                 if code < 0:
-                    # -1021 校时后重试一次
+                    # -1021 校时后重试（下一轮循环会用新 timestamp 重新签名）
                     if code == -1021 and signed and attempt < attempts - 1:
                         sync_server_time(force=True)
-                        params["timestamp"] = _ts()
-                        params["signature"] = _sign({k: v for k, v in params.items() if k != "signature"})
                         continue
                     raise BinanceError(code, str(data.get("msg")), endpoint)
 
@@ -830,9 +851,19 @@ def calc_qty(symbol: str, margin_usdt: Decimal, price: Decimal, leverage: int) -
 # ==========================================================================
 # 7. 订单操作
 # ==========================================================================
+_client_seq = 0
+
+
 def _client_id(tag: str) -> str:
-    """自己的订单标记，用于精确识别/撤销，绝不误伤用户手动挂的单。"""
-    return f"{CONFIG['client_id_prefix']}{tag}{int(time.time() * 1000) % 1000000}"
+    """
+    自己的订单标记，用于精确识别/撤销，绝不误伤用户手动挂的单。
+
+    必须带进程内自增序号：之前只有毫秒时间戳，同一毫秒内连下两单会生成完全相同的
+    clientOrderId，第二单直接被交易所拒掉（-4015 Duplicate clientOrderId）。
+    """
+    global _client_seq
+    _client_seq = (_client_seq + 1) % 1000
+    return f"{CONFIG['client_id_prefix']}{tag}{int(time.time() * 1000) % 1000000}{_client_seq:03d}"
 
 
 def place_market_order(symbol: str, side: str, qty: Decimal, direction: Optional[str] = None,
@@ -906,43 +937,61 @@ def get_our_algo_orders(symbol: str) -> List[dict]:
     ]
 
 
-def query_algo_order(symbol: str, client_algo_id: str) -> Optional[dict]:
-    """查询条件单状态。返回 None 表示查不到（不存在 / 已彻底结束）。"""
-    try:
-        return _request(
-            "GET",
-            "/fapi/v1/algoOrder",
-            params={"symbol": symbol, "clientAlgoId": client_algo_id},
-        )
-    except BinanceError as exc:
-        if exc.code in (-2013, -2011):
+def query_algo_order(symbol: str, client_algo_id: str,
+                     algo_id: Optional[str] = None) -> Optional[dict]:
+    """
+    查询条件单状态。返回 None 表示查不到（不存在 / 已彻底结束）。
+
+    优先用 algoId（主键），不被接受时退回 clientAlgoId —— 不同账号/接口版本对
+    这两个标识的支持不一致，只押一个的话，一次不兼容就会让所有 TP 推送都判成
+    「状态未知」而永不执行。
+    """
+    attempts: List[dict] = []
+    if algo_id:
+        attempts.append({"symbol": symbol, "algoId": str(algo_id)})
+    if client_algo_id:
+        attempts.append({"symbol": symbol, "clientAlgoId": client_algo_id})
+
+    for idx, params in enumerate(attempts):
+        try:
+            return _request("GET", "/fapi/v1/algoOrder", params=params)
+        except BinanceError as exc:
+            if exc.code in (-2013, -2011):
+                return None
+            if exc.code in (-1102, -1104, -1106) and idx + 1 < len(attempts):
+                continue
+            logger.warning("%s 查询条件单失败 %s: %s", symbol, client_algo_id or algo_id, exc)
             return None
-        logger.warning("%s 查询条件单失败 %s: %s", symbol, client_algo_id, exc)
-        return None
-    except Exception as exc:
-        logger.warning("%s 查询条件单异常 %s: %s", symbol, client_algo_id, exc)
-        return None
+        except Exception as exc:
+            logger.warning("%s 查询条件单异常 %s: %s", symbol, client_algo_id or algo_id, exc)
+            return None
+    return None
 
 
 def cancel_algo_order(symbol: str, algo_id: Optional[str] = None, client_algo_id: Optional[str] = None) -> bool:
-    params = {"symbol": symbol}
+    attempts: List[dict] = []
     if algo_id:
-        params["algoId"] = str(algo_id)
+        attempts.append({"symbol": symbol, "algoId": str(algo_id)})
     if client_algo_id:
-        params["clientAlgoId"] = client_algo_id
-    if len(params) == 1:
+        attempts.append({"symbol": symbol, "clientAlgoId": client_algo_id})
+    if not attempts:
         return False
-    try:
-        _request("DELETE", "/fapi/v1/algoOrder", params=params)
-        return True
-    except BinanceError as exc:
-        if exc.code in (-2011, -2013):  # 已不存在
+
+    for idx, params in enumerate(attempts):
+        try:
+            _request("DELETE", "/fapi/v1/algoOrder", params=params)
             return True
-        logger.warning("%s 撤销条件单失败 %s: %s", symbol, client_algo_id or algo_id, exc)
-        return False
-    except Exception as exc:
-        logger.warning("%s 撤销条件单异常: %s", symbol, exc)
-        return False
+        except BinanceError as exc:
+            if exc.code in (-2011, -2013):  # 已不存在
+                return True
+            if exc.code in (-1102, -1104, -1106) and idx + 1 < len(attempts):
+                continue        # 该标识不被接受，换另一种重试
+            logger.warning("%s 撤销条件单失败 %s: %s", symbol, client_algo_id or algo_id, exc)
+            return False
+        except Exception as exc:
+            logger.warning("%s 撤销条件单异常: %s", symbol, exc)
+            return False
+    return False
 
 
 def cancel_our_algo_orders(symbol: str) -> int:
@@ -1176,10 +1225,28 @@ def close_market(symbol: str, direction: str, qty: Decimal, tag: str = "CLOSE") 
     """市价平掉指定数量（reduceOnly 保护，绝不会反向开仓）。"""
     filters = get_symbol_filters(symbol)
     qty = round_by_step(qty, filters["step"])
-    actual = get_position_qty(symbol)
+    signed, _ = get_position(symbol)
+    actual = abs(signed)
     if actual <= 0:
         logger.warning("%s 无持仓可平", symbol)
         return False
+
+    # 方向校验：本地记录可能和交易所不一致（用户手动平过、反手过）。
+    # 方向传错时，单向模式会被 reduceOnly 拒单、双向模式会因 positionSide 不符被拒，
+    # 结果是「以为平了、其实没平」，所以这里一律以交易所的实际方向为准。
+    if signed != 0 and not is_dual_side():
+        real = "LONG" if signed > 0 else "SHORT"
+        if real != direction:
+            logger.error("%s 平仓方向不一致（本地=%s，实际=%s），按实际方向平仓",
+                         symbol, direction, real)
+            notify(
+                subject=f"[警告] {symbol} 平仓方向与记录不一致",
+                body=(f"时间: {now_text()}\n标的: {symbol}\n本地记录: {direction}\n"
+                      f"交易所实际: {real}\n已按实际方向平仓，请核对是否有手动操作。\n"),
+                cooldown_key=f"dir_mismatch:{symbol}",
+            )
+            direction = real
+
     if qty > actual:
         qty = actual
     if qty <= 0:
@@ -1243,11 +1310,18 @@ def open_position(
 
     cancel_our_algo_orders(symbol)
 
-    sl_order = place_stop_loss(symbol, direction, close_side, sl)
-    tp_orders = place_tp_ladder(symbol, direction, close_side, filled, [tp])
-
-    state = load_state()
-    state["positions"][symbol] = {
+    # ------------------------------------------------------------------
+    # 关键顺序：先落盘，再挂保护。
+    #
+    # 旧代码是「先挂 SL/TP，最后才写 state」，一旦挂单抛异常（限频、网络抖动、
+    # 触发价非法……），就会同时发生两件坏事：
+    #   1) 交易所已经有仓位，本地却完全没有记录 -> 体检逻辑不知道该管这笔仓，
+    #      裸仓一直拖到下一轮扫描才可能被「接管」；
+    #   2) 异常一路抛到 handle_signal，用户收到「开仓失败」的通知，
+    #      但钱其实已经进去了 —— 人会以为没开仓，不去处理。
+    # 所以这里先把仓位写进 state，挂保护失败只告警、不上抛。
+    # ------------------------------------------------------------------
+    record = {
         "direction": direction,
         "entry_price": dec_str(price),
         "qty": dec_str(filled),          # 开仓时数量（分档比例基准）
@@ -1258,18 +1332,48 @@ def open_position(
         "margin_usdt": dec_str(margin_usdt),
         "opened_at": time.time(),
         "tp_done": [],
-        "tp_orders": tp_orders,
-        "sl_order": sl_order,
+        "tp_orders": [],
+        "sl_order": None,
         "source": source,
     }
+    state = load_state()
+    state["positions"][symbol] = record
+    save_state(state)
+
+    sl_order: Optional[dict] = None
+    try:
+        sl_order = place_stop_loss(symbol, direction, close_side, sl)
+    except Exception as exc:
+        logger.error("%s 开仓已成交，但挂止损失败: %s", symbol, exc)
+        notify(
+            subject=f"[严重] {symbol} 已开仓但止损挂单失败",
+            body=(f"时间: {now_text()}\n标的: {symbol}\n方向: {direction}\n数量: {filled}\n"
+                  f"目标止损: {sl}\n错误: {exc}\n\n"
+                  f"当前处于【无止损】状态。持仓体检会在 {CONFIG['sync_seconds']} 秒内自动补挂，\n"
+                  f"若超过 2 分钟仍未收到「止损已补挂」通知，请立即人工处理。\n"),
+            cooldown_key=f"open_sl_fail:{symbol}", force=True,
+        )
+
+    tp_orders: List[dict] = []
+    try:
+        tp_orders = place_tp_ladder(symbol, direction, close_side, filled, [tp])
+    except Exception as exc:
+        logger.error("%s 开仓已成交，但挂止盈失败: %s", symbol, exc)
+
+    state = load_state()
+    pos = state["positions"].get(symbol) or record
+    pos["sl_order"] = sl_order
+    pos["tp_orders"] = tp_orders
+    state["positions"][symbol] = pos
     save_state(state)
 
     logger.info("开仓完成 | %s | TP=%s | SL=%s | QTY=%s", symbol, dec_str(tp), dec_str(sl), dec_str(filled))
     notify(
-        subject=f"[开仓成功] {symbol} {direction}",
+        subject=(f"[开仓成功] {symbol} {direction}" if sl_order
+                 else f"[开仓成功·无止损] {symbol} {direction}"),
         body=(f"时间: {now_text()}\n标的: {symbol}\n方向: {direction}\n杠杆: {leverage}x\n"
               f"保证金: {margin_usdt} USDT\n开仓价: {price}\n数量: {filled}\n"
-              f"止盈: {tp}\n止损: {sl}\n"),
+              f"止盈: {tp}\n止损: {sl if sl_order else '【挂单失败，等待自愈】'}\n"),
         cooldown_key=f"open_ok:{symbol}:{direction}",
     )
     return True
@@ -1395,6 +1499,12 @@ def cleanup_position(symbol: str, cancel_orders: bool = True) -> None:
             cancel_our_algo_orders(symbol)
         except Exception as exc:
             logger.warning("%s 清理条件单失败: %s", symbol, exc)
+        # 补仓单是普通挂单，不在上面那批条件单里，必须单独撤。
+        # 漏掉这一步的话，平仓后补仓单仍会成交，凭空开出一笔无保护的仓位。
+        try:
+            cancel_add_orders(symbol, reason="持仓已了结，撤销残留补仓单", force=True)
+        except Exception as exc:
+            logger.warning("%s 清理补仓单失败: %s", symbol, exc)
     state = load_state()
     state.get("positions", {}).pop(symbol, None)
     save_state(state)
@@ -1403,6 +1513,25 @@ def cleanup_position(symbol: str, cancel_orders: bool = True) -> None:
 # ==========================================================================
 # 10. TP 信号：与交易所条件单对账后再平仓（核心防重复平仓逻辑）
 # ==========================================================================
+def match_filled_level(position: Dict[str, Any], gap: Decimal, step: Decimal) -> Optional[int]:
+    """
+    把「仓位凭空少掉的数量」对应到具体档位。
+
+    为什么需要：交易所条件单成交后，那笔单就从 openAlgoOrders 里消失了，我们只能
+    看到「仓位少了 N」。如果直接把推送过来的档位当成已成交，就会错标 ——
+    典型场景是 TP1 在交易所自动成交、但 TP1 的推送丢了，随后来了 TP2 的推送，
+    代码会把 TP2 记成已完成，那 30% 就永远不会平，只能等止损。
+    """
+    tol = max(step * 2, gap * Decimal("0.02"))
+    candidates = []
+    for rec in position.get("tp_orders", []):
+        qty = dec(rec.get("qty", "0"))
+        level = int(rec.get("level", 0) or 0)
+        if qty > 0 and level > 0 and abs(qty - gap) <= tol:
+            candidates.append(level)
+    return min(candidates) if candidates else None
+
+
 def handle_tp_signal(symbol: str, level: int) -> bool:
     state = load_state()
     position = state.get("positions", {}).get(symbol)
@@ -1432,35 +1561,70 @@ def handle_tp_signal(symbol: str, level: int) -> bool:
     expected_qty = original_qty - closed_qty
     unexplained = expected_qty - actual_qty
     if unexplained > filters["step"]:
-        logger.warning(
-            "%s 检测到交易所条件单已成交 %s（预期剩余 %s / 实际 %s），不再重复市价平仓",
-            symbol, dec_str(unexplained), dec_str(expected_qty), dec_str(actual_qty),
-        )
-        # 同步账本，避免后续档位重复计算这笔差额
-        closed_qty += unexplained
+        # 先把缺口对齐到具体档位，再决定「是不是本次这一档已经成交了」
+        filled_level = match_filled_level(position, unexplained, filters["step"])
+
+        if filled_level is None:
+            # 对不上任何档位：不猜、不平，交给人工确认（乱平比漏平更危险）
+            logger.error(
+                "%s 仓位缺口 %s 无法对应到任何止盈档位（预期剩余 %s / 实际 %s），已跳过",
+                symbol, dec_str(unexplained), dec_str(expected_qty), dec_str(actual_qty),
+            )
+            notify(
+                subject=f"[需人工确认] {symbol} 仓位缺口无法对账",
+                body=(f"时间: {now_text()}\n标的: {symbol}\n本次推送: TP{level}\n"
+                      f"预期剩余: {dec_str(expected_qty)}\n实际持仓: {dec_str(actual_qty)}\n"
+                      f"缺口: {dec_str(unexplained)}（与任何档位数量都不匹配）\n"
+                      f"已跳过自动平仓，避免重复平仓。请人工确认。\n"),
+                cooldown_key=f"tp_gap:{symbol}", force=True,
+            )
+            return False
+
+        # 缺口能对上某一档 -> 记录该档已成交
         state = load_state()
         pos = state.get("positions", {}).get(symbol)
         if pos is not None:
-            pos["closed_qty"] = dec_str(closed_qty)
+            pos["closed_qty"] = dec_str(closed_qty + unexplained)
             state["positions"][symbol] = pos
             save_state(state)
-        mark_tp_done(symbol, level)
-        if actual_qty <= 0:
-            cleanup_position(symbol, cancel_orders=True)
+        mark_tp_done(symbol, filled_level)
         notify(
-            subject=f"[止盈对账] {symbol} TP{level} 交易所已自动成交",
-            body=(f"时间: {now_text()}\n标的: {symbol}\n档位: TP{level}\n"
-                  f"交易所已平: {unexplained}\n剩余持仓: {actual_qty}\n已跳过手动平仓，避免重复。\n"),
-            cooldown_key=f"tp_recon:{symbol}:{level}",
+            subject=f"[止盈对账] {symbol} TP{filled_level} 交易所已自动成交",
+            body=(f"时间: {now_text()}\n标的: {symbol}\n"
+                  f"交易所已平: {dec_str(unexplained)}\n剩余持仓: {dec_str(actual_qty)}\n"
+                  f"判定为 TP{filled_level} 成交（本次推送的是 TP{level}）。\n"),
+            cooldown_key=f"tp_recon:{symbol}:{filled_level}",
         )
-        return True
+
+        if filled_level == level:
+            if actual_qty <= 0:
+                cleanup_position(symbol, cancel_orders=True)
+            return True
+
+        # 缺口属于别的档位，本次这一档还没平 -> 重新读取状态后继续正常平仓
+        logger.warning("%s 本次推送 TP%s，但交易所成交的是 TP%s，继续执行 TP%s",
+                       symbol, level, filled_level, level)
+        state = load_state()
+        position = state.get("positions", {}).get(symbol)
+        if not position:
+            return True
+        tp_done = list(position.get("tp_done", []))
+        if level in tp_done:
+            return True
+        original_qty = dec(position.get("qty", "0"))
+        closed_qty = dec(position.get("closed_qty", "0"))
+        actual_qty = get_position_qty(symbol)
+        if actual_qty <= 0:
+            mark_tp_done(symbol, level)
+            cleanup_position(symbol)
+            return True
 
     # ---- 找出该档对应的交易所挂单 ----
     rec = next((o for o in position.get("tp_orders", []) if int(o.get("level", 0)) == level), None)
 
     if rec:
         cid = rec.get("client_algo_id")
-        status = query_algo_order(symbol, cid) if cid else None
+        status = query_algo_order(symbol, cid, algo_id=rec.get("algo_id")) if cid else None
 
         if status is None and cid:
             # 查不到单子：无法判断是已成交还是被撤，保守起见不重复平仓，交由人工确认
@@ -1668,9 +1832,15 @@ def handle_add_signal(symbol: str, add_list: List[Any]) -> bool:
     return True
 
 
-def cancel_add_orders(symbol: str, reason: str = "") -> bool:
-    """撤销该币对之前挂出的补仓单（对应推送里的「出补仓」）。"""
-    if not CONFIG["enable_cancel_add"]:
+def cancel_add_orders(symbol: str, reason: str = "", force: bool = False) -> bool:
+    """
+    撤销该币对之前挂出的补仓单（对应推送里的「出补仓」）。
+
+    force=True 用于「持仓已了结」的清理场景：此时必须无条件撤掉补仓单。
+    补仓单是普通 LIMIT 单，不在条件单体系里，仓位归零后交易所不会帮你撤，
+    一旦成交就会开出一笔本地完全不知情、也没有任何止盈止损的新仓位。
+    """
+    if not CONFIG["enable_cancel_add"] and not force:
         logger.info("%s 收到出补仓，但 ENABLE_CANCEL_ADD=0，已忽略", symbol)
         return False
 
@@ -1680,13 +1850,23 @@ def cancel_add_orders(symbol: str, reason: str = "") -> bool:
 
     cancelled = 0
     for rec in records:
+        params = {"symbol": symbol}
+        if rec.get("order_id"):
+            params["orderId"] = rec["order_id"]
+        elif rec.get("client_order_id"):
+            params["origClientOrderId"] = rec["client_order_id"]
+        else:
+            continue
         try:
-            _request("DELETE", "/fapi/v1/order", params={
-                "symbol": symbol,
-                "orderId": rec.get("order_id"),
-            })
+            _request("DELETE", "/fapi/v1/order", params=params)
             cancelled += 1
             logger.info("%s 已撤销补仓单 价=%s 量=%s", symbol, rec.get("price"), rec.get("qty"))
+        except BinanceError as exc:
+            if exc.code in (-2011, -2013):      # 已不存在（成交或已撤）
+                logger.info("%s 补仓单已不存在（可能已成交或已撤）: %s", symbol, rec.get("price"))
+                cancelled += 1
+            else:
+                logger.warning("%s 撤销补仓单失败: %s", symbol, exc)
         except Exception as exc:
             logger.warning("%s 撤销补仓单失败（可能已成交或已撤）: %s", symbol, exc)
 
@@ -1818,6 +1998,17 @@ def commit_cursor(cursor: int) -> None:
     save_state(state)
 
 
+def signal_age_seconds(sig: Dict[str, Any]) -> Optional[float]:
+    """信号距今多少秒。解析不出来返回 None（当作新鲜信号处理）。"""
+    raw = sig.get("_ts")
+    if not raw:
+        return None
+    try:
+        return time.time() - time.mktime(time.strptime(str(raw), "%Y-%m-%d %H:%M:%S"))
+    except Exception:
+        return None
+
+
 def consume_signals() -> None:
     """读取并处理一批新信号，全部处理完后才提交游标。"""
     state = load_state()
@@ -1827,8 +2018,29 @@ def consume_signals() -> None:
             commit_cursor(new_cursor)   # 只有空行/坏行，直接推进
         return
 
+    if len(signals) > 20:
+        logger.warning("本次积压了 %s 条信号，将连续处理（建议检查执行器是否长时间停机）", len(signals))
+
+    max_age = CONFIG["signal_max_age_seconds"]
     for sig in signals:
         try:
+            age = signal_age_seconds(sig)
+            if age is not None and max_age > 0 and age > max_age:
+                # 过期信号：开仓绝不执行（几小时前的价位早已失效），
+                # 其余类型仍按原样处理 —— 漏平的代价通常大于晚平。
+                if str(sig.get("type", "")).upper() == "OPEN":
+                    logger.warning("信号已过期 %.0f 秒（阈值 %s 秒），跳过开仓: %s",
+                                   age, max_age, json.dumps(sig, ensure_ascii=False))
+                    notify(
+                        subject=f"[风控] 过期开仓信号已跳过 {sig.get('symbol') or ''}",
+                        body=(f"时间: {now_text()}\n信号时间: {sig.get('_ts')}\n"
+                              f"已过期: {age:.0f} 秒（阈值 {max_age} 秒）\n"
+                              f"信号: {json.dumps(sig, ensure_ascii=False)}\n"
+                              f"为避免按旧价位开仓，已跳过。\n"),
+                        cooldown_key=f"stale:{sig.get('symbol')}", force=True,
+                    )
+                    continue
+                logger.warning("信号已过期 %.0f 秒，仍按原样处理（%s）", age, sig.get("type"))
             handle_signal(sig)
         except Exception as exc:
             logger.exception("处理信号失败: %s", json.dumps(sig, ensure_ascii=False))
@@ -2151,11 +2363,23 @@ def adopt_position(symbol: str, signed_qty: Decimal, entry: Decimal) -> None:
 
 def sync_positions() -> None:
     """每分钟体检：对账持仓 + 补齐缺失的条件单。不无脑撤单重挂。"""
+    started = time.time()
+    budget = CONFIG["sync_budget_seconds"]
+
+    def out_of_budget() -> bool:
+        if time.time() - started <= budget:
+            return False
+        logger.error("持仓体检已耗时 %.0f 秒（预算 %s 秒），本轮提前结束，优先保证信号处理",
+                     time.time() - started, budget)
+        return True
+
     state = load_state()
     local = dict(state.get("positions", {}))
 
     # 1) 本地记录 -> 交易所核对
     for symbol in list(local.keys()):
+        if out_of_budget():
+            return
         try:
             if get_position_qty(symbol) <= 0:
                 logger.info("%s 已无持仓（可能被止损/止盈平掉），清理本地记录", symbol)
@@ -2167,14 +2391,19 @@ def sync_positions() -> None:
 
     # 2) 交易所 -> 本地未记录持仓
     if CONFIG["adopt_unknown_positions"]:
+        excluded = CONFIG["adopt_exclude_symbols"]
         try:
             data = _request("GET", "/fapi/v2/positionRisk")
             for item in data if isinstance(data, list) else []:
+                if out_of_budget():
+                    return
                 symbol = item.get("symbol")
                 amt = dec(item.get("positionAmt", "0"))
                 if not symbol or amt == 0:
                     continue
                 if symbol in load_state().get("positions", {}):
+                    continue
+                if symbol in excluded:
                     continue
                 adopt_position(symbol, amt, dec(item.get("entryPrice", "0")))
         except Exception as exc:

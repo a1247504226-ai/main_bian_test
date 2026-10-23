@@ -91,6 +91,7 @@ import math
 import time
 import smtplib
 import statistics
+import shutil
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.header import Header
@@ -175,6 +176,8 @@ MIN_FILL = 0.50             # 目标手数低于此值就不开仓
                             # —— 目标 0.1 手却开 1 手，实际风险是目标的 10 倍
 MARGIN_BUDGET = 0.50        # 全部持仓的保证金占用上限（占权益）
 MARGIN_SAFE = 0.60          # 单腿保证金超过权益此比例则不再开新仓
+STALE_DAYS = 5              # 某品种数据落后「最新品种」超过这么多个自然日，就剔除不参与
+                           # —— 拿旧信号的品种去分新信号的钱，仓位和浮盈都会串味
 MAX_LEG_LEVERAGE = 3.0      # 单腿「名义/权益」上限。1 手就超过 3 倍的品种直接不做
                             # —— 例：1 手沪金名义 90 万，在 2 万账户上是 45 倍杠杆，必爆
 
@@ -226,23 +229,43 @@ def active_instruments(equity=None):
 
 # ══════════════════════════════════════════════════════ 数据层
 def read_csv(sym):
+    """读本地 CSV，并做「排序 + 去重 + 剔除非法价」三道加固。
+
+    为什么必须排序：复权、EMA、ATR、carry 全部假设序列按日期递增。
+    一旦 CSV 乱序，复权因子会按错序累乘，信号与回测全错，而且不报错。
+    去重：同一天出现两行会令 gap 误判成换月跳空。
+    剔除非法价：NaN 或 <=0 的价格会让后续比较变成 False ——
+    sig_carry 的 `s < -thresh` 对 NaN 恒为 False，信号会静默变成「做空」，
+    这是最危险的一种错法。
+    """
     path = os.path.join(DATA, sym + ".csv")
     if not os.path.exists(path):
         return None
-    bars = []
+    bars, seen = [], set()
     with open(path, encoding="utf-8") as f:
-        next(f)
+        next(f, None)
         for line in f:
             q = line.strip().split(",")
             if len(q) < 6:
                 continue
             try:
-                bars.append({"date": q[0], "open": float(q[1]), "high": float(q[2]),
-                             "low": float(q[3]), "close": float(q[4]),
-                             "volume": float(q[5])})
+                d = q[0]
+                o, h, l, c, vol = (float(q[1]), float(q[2]), float(q[3]),
+                                   float(q[4]), float(q[5]))
             except ValueError:
                 continue
-    return bars or None
+            if d in seen:
+                continue
+            if any(v != v or v <= 0 for v in (o, h, l, c)):
+                continue
+            seen.add(d)
+            bars.append({"date": d, "open": o, "high": h, "low": l,
+                         "close": c, "volume": vol})
+    if not bars:
+        return None
+    bars.sort(key=lambda x: x["date"])
+    return bars
+
 
 
 # 新浪接口返回中文列名，必须映射成英文
@@ -254,8 +277,15 @@ LAST_FETCH_ERROR = ""
 
 
 def fetch(sym):
-    """用 akshare 拉新浪主连日线并覆盖本地 CSV。失败返回 None，
-    失败原因写入模块级 LAST_FETCH_ERROR（供 refresh 打印）。"""
+    """用 akshare 拉新浪主连日线并更新本地 CSV。失败返回 None，
+    失败原因写入模块级 LAST_FETCH_ERROR（供 refresh 打印）。
+
+    【必须防「数据源抽风」】直接覆盖 CSV 是危险的：
+    数据源某天只返回近 3 个月，本地 14 年历史就被冲掉了，
+    而 carry 需要 252 根才出信号 —— 策略会静默变成全程空仓。
+    所以覆盖前先做完整性校验，不通过就保留旧文件、当次按失败处理，
+    并把旧文件备份成 .bak 以便人工恢复。
+    """
     global LAST_FETCH_ERROR
     LAST_FETCH_ERROR = ""
     try:
@@ -276,9 +306,64 @@ def fetch(sym):
     if not all(c in df.columns for c in cols):
         LAST_FETCH_ERROR = "列名不符：%s" % list(df.columns)
         return None
+    # 列名对不代表列里是数字。新浪偶发把 '-' / 'None' 写进数值列，
+    # astype(float) 会抛 ValueError。这里用 errors="coerce" 转成 NaN 再 dropna，
+    # 整段包 try：数据解析失败宁可保留旧文件，也绝不能让定时任务崩在早上 8 点。
+    try:
+        df = df[cols].dropna()
+        for c in cols[1:]:
+            df[c] = df[c].astype(float)
+        df = df[(df[cols[1:]] > 0).all(axis=1)]
+    except Exception as e:
+        LAST_FETCH_ERROR = "数据解析失败：%s: %s" % (type(e).__name__, e)
+        return None
+    if len(df) == 0:
+        LAST_FETCH_ERROR = "清洗后无有效数据"
+        return None
+
+    path = os.path.join(DATA, sym + ".csv")
+    old = read_csv(sym)
+    new_bars = [{"date": str(r[0]), "open": float(r[1]), "high": float(r[2]),
+                 "low": float(r[3]), "close": float(r[4]), "volume": float(r[5])}
+                for r in df.itertuples(index=False, name=None)]
+    new_bars.sort(key=lambda x: x["date"])
+
+    # ── 用「合并」而不是「覆盖」──
+    # 覆盖模式的教训（2026-10-20 定时任务实测）：akshare 返回的主连比本地少 5 个
+    # 交易日（数据源自己丢了一段），覆盖后 14 年历史被截断，回测收益从 19.1%
+    # 掉到 18.8%，而且不报错。少 5 行只占 0.16%，任何百分比阈值都拦不住。
+    # 合并模式从根上解决：本地每个日期都必须保留，新数据只覆盖同日期、追加新日期，
+    # 历史只增不减。代价是数据源删掉某天时本地仍留着 —— 但主连历史是既成事实，
+    # 不会消失，留着比丢了安全得多。
+    merged = {}
+    for b in (old or []):
+        merged[b["date"]] = b
+    added = 0
+    for b in new_bars:
+        if b["date"] not in merged:
+            added += 1
+        merged[b["date"]] = b
+    bars_out = [merged[k] for k in sorted(merged)]
+
+    # 合并后仍比本地少 → 说明有日期对不上（格式差异等），拒绝写入
+    if old and len(bars_out) < len(old):
+        LAST_FETCH_ERROR = ("合并后 %d 根少于本地 %d 根，已保留本地数据"
+                            % (len(bars_out), len(old)))
+        return None
+
     os.makedirs(DATA, exist_ok=True)
-    df[cols].to_csv(os.path.join(DATA, sym + ".csv"), index=False)
+    if os.path.exists(path):
+        try:
+            shutil.copy2(path, path + ".bak")
+        except Exception:
+            pass                                   # 备份失败不阻断主流程
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("date,open,high,low,close,volume" + chr(10))
+        for b in bars_out:
+            f.write("%s,%s,%s,%s,%s,%s%s" % (b["date"], b["open"], b["high"],
+                                             b["low"], b["close"], b["volume"], chr(10)))
     return read_csv(sym)
+
 
 
 def refresh(syms=None, verbose=True):
@@ -445,6 +530,12 @@ def plan(equity=None, verbose=False):
             skipped.append({"sym": sym, "name": NAME.get(sym, sym), "why": "无数据"})
             continue
         dates.append(bars[-1]["date"])
+        # 只有 1 根 K 线时 WARMUP 都过不了，直接跳过 —— 否则下面
+        # bars[last-1] 会变成 bars[-1]（负索引）取到同一根，指标全是废值。
+        if len(bars) < st_min_bars():
+            skipped.append({"sym": sym, "name": NAME.get(sym, sym),
+                            "why": "仅 %d 根 K 线，不足 %d 根预热" % (len(bars), st_min_bars())})
+            continue
         A = atr(bars)
         last = len(bars) - 1
         cur = signal(bars)[last]
@@ -490,27 +581,87 @@ def plan(equity=None, verbose=False):
         rows.append(c)
 
     # 总保证金预算：超了先砍【目标最小】的（它们被 1 手取整扭曲得最厉害）
+    # 抽成共享函数：回测 backtest() 以前没走这段，导致回测收益系统性高于实盘可执行水平。
     if LOTS_MODE != "fixed":
-        budget = eq * MARGIN_BUDGET
-        total = sum(r["margin"] for r in rows)
-        for r in sorted([x for x in rows if x["lots"] > 0], key=lambda x: x["want"]):
-            if total <= budget:
-                break
-            while total > budget and r["lots"] > 0:
-                r["lots"] -= 1
-                r["notional"] = r["lots"] * r["lot_notional"]
-                r["margin"] = r["lots"] * r["margin_per"]
-                total -= r["margin_per"]
+        _fit_margin_budget(rows, eq)
 
-    data_date = max(dates) if dates else None
+    # ── 数据日期口径：取【所有参与品种都齐备的最新日期】──
+    # 以前取 max(dates)，实测踩过坑（2026-10-21）：FG 更新到 10-21、HC 拉取失败
+    # 仍停在 10-20，max 取 10-21 → FG 用 10-21 的信号、HC 用 10-20 的信号，
+    # n_sig/share 按混合口径分钱，浮盈也把 HC 的陈旧价标成最新日期的账。
+    # 落后太多（>STALE_DAYS 个自然日）的品种直接剔除，不让它拖累全体。
+    if dates:
+        newest = max(dates)
+        kept = []
+        for c in cand:
+            gap = _days_between(c["date"], newest)
+            if gap > STALE_DAYS:
+                skipped.append({"sym": c["sym"], "name": NAME.get(c["sym"], c["sym"]),
+                                "why": "数据截止 %s，落后最新日期 %d 天，本期不参与"
+                                       % (c["date"], gap)})
+            else:
+                kept.append(c)
+        rows = [r for r in rows if r["sym"] in {c["sym"] for c in kept}]
+        dates = [c["date"] for c in kept]
+    data_date = min(dates) if dates else None
     if verbose:
         for s in skipped:
             print("  跳过 %s(%s)：%s" % (s["name"], s["sym"], s["why"]))
+        if dates and len(set(dates)) > 1:
+            print("  ⚠ 各品种数据日期不一致（%s），已按最早的 %s 出信号"
+                  % ("/".join(sorted(set(dates))), data_date))
     return rows, skipped, data_date
+
+
+def _days_between(a, b):
+    """两个 YYYY-MM-DD 之间相差几个自然日；解析不了返回 0（当作不落后）。"""
+    try:
+        import datetime as _dt
+        da = _dt.datetime.strptime(a[:10], "%Y-%m-%d")
+        db = _dt.datetime.strptime(b[:10], "%Y-%m-%d")
+        return abs((da - db).days)
+    except Exception:
+        return 0
+
+
+def _fit_margin_budget(rows, eq):
+    """把持仓压到保证金预算内。plan() 与 backtest() 共用，保证两边口径一致。
+
+    以前 backtest() 没走这段：回测能开出实盘开不起的仓位，收益被系统性高估。
+    rows 里每项至少要有 lots / lot_notional / margin_per / want；
+    margin 与 notional 缺失时按 lots × 单价现算（backtest 的临时结构走这条）。
+    """
+    for r in rows:
+        if "margin" not in r or "notional" not in r:
+            r["margin"] = r["lots"] * r["margin_per"]
+            r["notional"] = r["lots"] * r["lot_notional"]
+    budget = eq * MARGIN_BUDGET
+    total = sum(r["margin"] for r in rows)
+    for r in sorted([x for x in rows if x["lots"] > 0], key=lambda x: x["want"]):
+        if total <= budget:
+            break
+        while total > budget and r["lots"] > 0:
+            r["lots"] -= 1
+            r["notional"] = r["lots"] * r["lot_notional"]
+            r["margin"] = r["lots"] * r["margin_per"]
+            total -= r["margin_per"]
 
 
 def dir_txt(v):
     return {1: "多", -1: "空", 0: "空仓"}[v]
+
+
+def _ym(d):
+    """把日期字符串转成「年×12+月」用于比较起点；非标准格式返回 None。"""
+    try:
+        return int(d[:4]) * 12 + int(d[5:7])
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def st_min_bars():
+    """plan() 要求的最少 K 线数：至少要能算出 ATR20 与 EMA60。"""
+    return max(WARMUP, ATR_N, MA_SLOW) + 2
 
 
 # ══════════════════════════════════════════════════════ 实盘信号
@@ -558,17 +709,21 @@ def show_signal():
 
     if rows:
         print("\n  ── 最近 15 个交易日的信号 ──")
-        ser, dts = {}, None
+        # 必须按【日期】对齐，不能按索引：FG 从 2012 年就有数据、HC 从 2014 年
+        # 才开始，两者差约 300 根。按索引对齐会让 FG 列显示一年前的信号，
+        # 却标着 HC 的日期 —— 用户会据此判断错信号时序。
+        ser, all_dates = {}, set()
         for r in rows:
             b, _c, _l = load(r["sym"])
-            ser[r["sym"]] = signal(b)
-            if dts is None or len(b) < len(dts):
-                dts = [x["date"] for x in b]
+            if not b:
+                continue
+            ser[r["sym"]] = {x["date"]: s for x, s in zip(b, signal(b))}
+            all_dates |= {x["date"] for x in b}
+        common = sorted(all_dates)
         print("  %-12s" % "日期" + "".join("  %-8s" % (NAME.get(s, s) + " " + s) for s in ser))
-        n = min(len(v) for v in ser.values())
-        for k in range(max(0, n - 15), n):
-            print("  %-12s" % dts[k] + "".join(
-                "  %-8s" % dir_txt(ser[s][k]) for s in ser))
+        for d in common[-15:]:
+            print("  %-12s" % d + "".join(
+                "  %-8s" % dir_txt(ser[s].get(d, 0)) for s in ser))
     print("\n  数据截止 %s" % data_date)
     print()
 
@@ -628,26 +783,47 @@ def _pos_norm(v):
 
     旧版只存方向（0 / ±1），没有手数和成本 —— lots=None 表示"手数未知"，
     用于区分「真的加减仓」和「旧记录缺字段」，避免升级后误报一次变动。
+
+    容错：state 是人手可改的 JSON，也可能是更早版本写的。任何无法解析的值
+    一律兜底成「空仓」(dir=0)，绝不能让一个坏字段把整个 notify 打崩 ——
+    定时任务崩了不会重试，当天邮件就没了。
     """
+    def _num(x):
+        try:
+            f = float(x)
+            return f if f == f else 0.0        # 顺带挡掉 NaN
+        except (TypeError, ValueError):
+            return 0.0
+
     if isinstance(v, dict):
-        d = int(v.get("dir", 0) or 0)
+        d = int(_num(v.get("dir", 0)) or 0)
+        d = 1 if d > 0 else (-1 if d < 0 else 0)
+        lots = v.get("lots")
+        ent = _num(v.get("entry_px") or 0.0)
         return {"dir": d,
-                "lots": (int(v["lots"]) if v.get("lots") is not None else None),
-                "entry_px": v.get("entry_px"),
+                "lots": (int(_num(lots)) if lots is not None else None),
+                "entry_px": (ent if ent > 0 else None),
                 "entry_date": v.get("entry_date")}
-    d = int(v or 0)
-    return {"dir": d, "lots": None, "entry_px": None, "entry_date": None}
+    d = int(_num(v) or 0)
+    return {"dir": (1 if d > 0 else (-1 if d < 0 else 0)),
+            "lots": None, "entry_px": None, "entry_date": None}
 
 
 def _rebuild_entry(sym, direction):
     """从信号历史倒推开仓价：最后一次信号翻成 direction 那天的收盘真实价。
 
     只用于把旧版 state（只有方向、没有成本）迁移成带成本的记录。
+
+    【必须校验方向】如果信号历史里根本没有 direction（state 与信号对不上），
+    倒推循环会把 i 停在最后一根，于是把【今天收盘价】当成开仓价返回 ——
+    浮盈恒为 0，用户完全看不出账目是错的。此时宁可返回 None 让上层兜底。
     """
     bars, _c, _l = load(sym)
     if bars is None:
         return None
     sg = signal(bars)
+    if sg[-1] != direction:
+        return None                       # 当前信号与该方向不符，倒推无意义
     i = len(sg) - 1
     while i > WARMUP and sg[i] == direction:
         i -= 1
@@ -656,9 +832,16 @@ def _rebuild_entry(sym, direction):
 
 
 def _load_positions(st):
-    """读上次记录的仓位，并把旧格式补全成 {sym: {dir, lots, entry_px, entry_date}}。"""
+    """读上次记录的仓位，并把旧格式补全成 {sym: {dir, lots, entry_px, entry_date}}。
+
+    positions 本身不是 dict（手改坏了）时整体忽略，返回空 dict ——
+    宁可当成「没有旧仓位」重新开始，也不能让定时任务崩在早上 8 点。
+    """
     out = {}
-    for sym, v in (st.get("positions") or {}).items():
+    pos = st.get("positions")
+    if not isinstance(pos, dict):
+        return out
+    for sym, v in pos.items():
         p = _pos_norm(v)
         if p["dir"] != 0 and p["entry_px"] is None:
             rb = _rebuild_entry(sym, p["dir"])
@@ -666,6 +849,15 @@ def _load_positions(st):
                 p["entry_px"], p["entry_date"] = rb
         out[sym] = p
     return out
+
+
+def _num_state(st, key, default=0.0):
+    """安全读取 state 里的数值字段。手改坏成字符串时返回默认值。"""
+    try:
+        f = float(st.get(key) or 0.0)
+        return f if f == f else default
+    except (TypeError, ValueError):
+        return default
 
 
 def _track(rows, st, data_date):
@@ -692,12 +884,15 @@ def _track(rows, st, data_date):
         olot = o["lots"] if lots_known else nlot
 
         # ── 开仓成本维护 ───────────────────────────────────────────
+        # 手数未知的旧记录：olot 取 nlot 只是为了让「变动判定」不误报，
+        # 但它不能参与盈亏结算 —— 否则反手时会用「新仓手数」去乘旧仓价差，
+        # 凭空造出一笔已实现盈亏。lots_known=False 时一律跳过 realized。
         if ndir == 0:
             ent, edat = None, None
-            if odir and oent is not None:
+            if odir and oent is not None and lots_known:
                 realized += (px - oent) * odir * olot * mult          # 平仓兑现
         elif odir != ndir:
-            if odir and oent is not None:                              # 反手先平旧仓
+            if odir and oent is not None and lots_known:              # 反手先平旧仓
                 realized += (px - oent) * odir * olot * mult
             ent, edat = px, data_date
         elif oent is None:                                             # 旧记录缺成本
@@ -707,7 +902,8 @@ def _track(rows, st, data_date):
             edat = odat
         elif nlot < olot:                                              # 减仓 → 成本不变
             ent, edat = oent, odat
-            realized += (px - oent) * ndir * (olot - nlot) * mult
+            if lots_known:
+                realized += (px - oent) * ndir * (olot - nlot) * mult
         else:
             ent, edat = oent, odat
 
@@ -832,7 +1028,6 @@ def _build_mail(rows, changes, data_date, positions=None, pnl=None,
 
     tn = sum(r["notional"] for r in rows)
     tm = sum(r["margin"] for r in rows)
-    worst = tn * 0.08
 
     # ── ① 本次变动表 ──
     ch_rows, ch_notes = [], {}
@@ -942,7 +1137,7 @@ def _build_mail(rows, changes, data_date, positions=None, pnl=None,
     h.append('<p style="%s">· 本策略不设止损，风险控制靠波动率目标仓位 + 杠杆护栏。<br>'
              '· 极端情形（全部持仓同时反向 8%%）约亏 %s 元 = %.1f%% 权益。<br>'
              '· 历史回测不代表未来表现；期货为保证金交易，存在本金全部损失的风险。</p>'
-             % (S, format(worst, ",.0f"), worst / EQUITY * 100))
+             % (S, format(tn * 0.08, ",.0f"), tn * 0.08 / EQUITY * 100))
     h.append('<p style="%s;margin-top:16px;padding-top:10px;border-top:1px solid #eceff3">'
              '由 strategy_top2.py 自动发送</p>' % S)
     h.append("</div>")
@@ -981,7 +1176,7 @@ def _build_mail(rows, changes, data_date, positions=None, pnl=None,
                     _money(cur_eq - start_equity)))
     L.append("")
     L.append("风险提示：不设止损；极端情形约亏 %.1f%% 权益；历史回测不代表未来表现。"
-             % (worst / EQUITY * 100))
+             % (tn * 0.08 / EQUITY * 100))
     L.append("-- 由 strategy_top2.py 自动发送")
     return subject, "\n".join(L), html
 
@@ -1010,6 +1205,11 @@ def notify(argv=None):
     elif "pm" in argv:
         slot = "pm"
     else:
+        # 手动运行（没带 am/pm）时才自动判场次。
+        # 定时任务的 bat 一律显式传 am/pm，不受这里影响。
+        # 注意 15:00~20:00 会被判成 pm —— 这段是日盘已收、夜盘未开，
+        # 数据与 20:00 那次几乎相同，若 20:00 那次也推过就会被去重挡下，
+        # 反过来先跑 20:00 的则这次会被挡。想强制发就加 daily。
         slot = "am" if time.localtime().tm_hour < 15 else "pm"
 
     if "nofetch" not in argv:
@@ -1032,19 +1232,26 @@ def notify(argv=None):
         return
 
     # 权益基数变了（用户加/减本金）→ 跟踪基线重置，避免盈亏数字对不上
+    # start_equity 可能被手改坏成字符串/None，统一走 _num_state 兜底
     start_equity = st.get("start_equity")
-    realized = float(st.get("realized", 0.0) or 0.0)
+    se_num = _num_state(st, "start_equity", 0.0) if start_equity is not None else 0.0
+    realized = _num_state(st, "realized", 0.0)
     start_date = st.get("start_date")
-    if start_equity is None or abs(float(start_equity) - EQUITY) > 0.5:
-        if start_equity is not None:
+    if not start_equity or se_num <= 0 or abs(se_num - EQUITY) > 0.5:
+        if start_equity and se_num > 0:
             print("权益基数由 %s 改为 %s 元，跟踪基线重置。"
-                  % (format(float(start_equity), ",.0f"), format(EQUITY, ",.0f")))
+                  % (format(se_num, ",.0f"), format(EQUITY, ",.0f")))
         start_equity, realized, start_date = EQUITY, 0.0, data_date
+    else:
+        start_equity = se_num
 
     newpos, changes, pnl, rdelta = _track(rows, st, data_date)
     realized += rdelta
 
-    first = not (st.get("positions") or {})
+    # 「首次建基线」只应由「从未有过持仓」触发。
+    # 以前用 not st.get("positions")：全部平仓后 positions 为空字典，
+    # 会被误判成首日，标题从「浮盈/浮亏」变成毫无信息量的「初始持仓 0 项」。
+    first = not st.get("baseline_done")
     subject, text, html = _build_mail(rows, changes, data_date, newpos, pnl,
                                       realized, start_equity, start_date, first)
 
@@ -1061,6 +1268,7 @@ def notify(argv=None):
         _save_state({"data_date": data_date, "positions": newpos,
                      "realized": realized, "start_equity": start_equity,
                      "start_date": start_date, "notified": notified,
+                     "baseline_done": True,
                      "updated": time.strftime("%Y-%m-%d %H:%M:%S")})
     else:
         print("邮件发送失败，状态未更新，下次运行会重试。")
@@ -1112,6 +1320,10 @@ def backtest(verbose=True):
         share = eq / n_sig
 
         pnl = 0.0
+        # 本日各品种的「计划持仓」：先按 plan() 同一公式算目标手数，
+        # 再统一压到保证金预算内 —— 与 plan() 共用 _fit_margin_budget，
+        # 否则回测会开出实盘开不起的手数，收益被系统性高估。
+        calc = []
         for sym, v in S.items():
             i = idx[sym].get(dt)
             if i is None or i == 0:
@@ -1119,16 +1331,30 @@ def backtest(verbose=True):
             bars = v["bars"]
             if tgt[sym] == 0:
                 lots = 0
+                want = 0.0
             elif LOTS_MODE == "fixed":
                 lots = LOTS_PER_LEG * tgt[sym]
+                want = float(abs(lots))
             else:
                 lot_notional = real_px(bars, i - 1) * v["mult"]
                 want = exposure_at(bars, v["atr"], i - 1) * share / lot_notional
                 n = int(want)
-                if n == 0 and want >= MIN_FILL:
+                if n == 0 and want >= MIN_FILL and \
+                        lot_notional * (v["mrate"] + BROKER_ADD) <= eq * MARGIN_SAFE:
                     n = 1
                 lots = n * tgt[sym]
+            calc.append({"sym": sym, "v": v, "i": i, "bars": bars, "lots": lots,
+                         "want": want,
+                         "lot_notional": real_px(bars, i - 1) * v["mult"],
+                         "margin_per": real_px(bars, i - 1) * v["mult"] * (v["mrate"] + BROKER_ADD)})
+        if LOTS_MODE != "fixed":
+            _fit_margin_budget(calc, eq)
+
+        for c in calc:
+            sym, v, i, bars, lots = c["sym"], c["v"], c["i"], c["bars"], c["lots"]
             if lots != pos[sym]:
+                # 成本按【次日开盘】才是真实可成交价；这里用当日收盘近似，
+                # 与 ft.py 的口径（开盘价）差一个隔夜跳空量级，属已知近似。
                 pnl -= abs(lots - pos[sym]) * real_px(bars, i) * v["mult"] * (FEE + SLIP)
                 if pos[sym] == 0 and lots != 0:
                     trades[sym] += 1

@@ -1,0 +1,19 @@
+{
+  "symbol": "AU0",
+  "contract_multiplier": 1000,
+  "account_equity": 1000000,
+  "ma_slow": 60,
+  "ma_fast": 10,
+  "fail_bars": 2,
+  "stop_mult": 0.0,
+  "target_vol": 0.15,
+  "max_size": 3.0,
+  "vol_win": 60,
+  "trail_atr": 3.0,
+  "adx_min": 0.0,
+  "pyramid_units": 1,
+  "pyramid_atr": 1.0,
+  "gap_guard": 0.04,
+  "cost": 0.0004,
+  "intraday": true
+}
