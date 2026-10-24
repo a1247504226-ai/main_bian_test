@@ -15,7 +15,7 @@
     "strategy_label": "BTC动量策略 · SMA50过滤多头 1×做空"
   },
   "binance": {
-    "_说明": "默认关闭。要真实下单需同时满足：enabled=true、填好 api_key/api_secret、运行一键下单.bat（等于加 --live）。use_testnet=false 表示连实盘，改成 true 或加 --testnet 参数可连测试网。leverage 只影响保证金占用与爆仓线，不影响收益：1× 要价格逆行 +100% 才爆仓，2× 只要 +50%；1× 逐仓会占满 100% 保证金，所以下单会自动缩量留 1% 缓冲。rebalance_tolerance 是「目标与实际差多少才动手」，0.02 = 名义差 2% 以内不动，避免天天小额调整磨损手续费。fee_buffer 是下单时预留的手续费比例。 proxy 留空=直连；如果这台机器必须挂代理才能连币安，填 http://127.0.0.1:7890 这种本地代理地址，否则查余额/下单会报网络错误。",
+    "_说明": "默认关闭。要真实下单需同时满足：enabled=true、填好 api_key/api_secret、运行一键下单.bat（等于加 --live）。use_testnet=false 表示连实盘，改成 true 或加 --testnet 参数可连测试网。leverage 只影响保证金占用与爆仓线，不影响收益：1× 要价格逆行 +100% 才爆仓，2× 只要 +50%；1× 逐仓会占满 100% 保证金，所以下单会自动缩量留 1% 缓冲。rebalance_tolerance 是「目标与实际差多少才动手」，0.02 = 名义差 2% 以内不动，避免天天小额调整磨损手续费。fee_buffer 是下单时预留的手续费比例。 proxy 留空=直连；如果这台机器必须挂代理才能连币安，填 http://127.0.0.1:7890 这种本地代理地址，否则查余额/下单会报网络错误。 auto_stop_order=true 时，真实下单完成后会自动挂/撤空头止损条件单（默认 false = 不碰你的条件单，按邮件里的止损价自己挂）。stop_working_type 是触发基准：MARK_PRICE（标记价格，抗插针，默认）或 CONTRACT_PRICE（最新成交价，与回测口径一致）。",
     "enabled": false,
     "use_testnet": false,
     "api_key": "",
@@ -30,14 +30,18 @@
     "margin_type": "ISOLATED",
     "min_notional_usdt": 20.0,
     "rebalance_tolerance": 0.02,
-    "fee_buffer": 0.002
+    "fee_buffer": 0.002,
+    "auto_stop_order": false,
+    "stop_working_type": "MARK_PRICE"
   },
   "strategy": {
-    "_说明": "与 btc_strategy.py 回测口径保持一致。base_capital_usdt 是邮件里所有成本/盈亏的计算基准（固定本金，不复利）。primary_set 是唯一的一组均线参数。regime_ma 是长期均线过滤：只约束多头，收盘价在 SMA(regime_ma) 下方时不开多、空头照做；设 0 关闭。participate_from_next_trade=true 表示当前这笔你没有参与、不计入账户，等下一次仓位变化时再按本金开始计算。",
+    "_说明": "与 btc_strategy.py 回测口径保持一致。base_capital_usdt 是邮件里所有成本/盈亏的计算基准（固定本金，不复利）。primary_set 是唯一的一组均线参数。regime_ma 是长期均线过滤：只约束多头，收盘价在 SMA(regime_ma) 下方时不开多、空头照做；设 0 关闭。participate_from_next_trade=true 表示当前这笔你没有参与、不计入账户，等下一次仓位变化时再按本金开始计算。 short_stop 是空头固定止损：0.05 = 空头逆行 5% 就市价平仓（默认 0.05，填 0 关闭）。多头不设止损 —— 现货无爆仓风险，实测加了反而更差（见使用说明 §八）。",
     "symbol": "BTCUSDT",
     "vt": 0.03,
     "exposure_cap": 1.0,
     "atr_n": 14,
+    "short_stop": 0.05,
+    "long_stop": 0.0,
     "regime_ma": 50,
     "warmup": 60,
     "cache_max_age_hours": 1,

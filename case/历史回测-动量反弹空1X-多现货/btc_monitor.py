@@ -42,14 +42,15 @@ BTC 日线趋势策略 · 每日检测（邮件推送 + 可选币安下单）
 
 口径说明
 --------
-· 邮件/日志的主口径是【从现在起算】：本金就是 base_capital_usdt（默认 1000 U），
-  账户现值 = 本金 + 当前浮盈。历史回测的已平仓盈亏**不计入**（那是回测数据，不是实盘）。
-  仓位也按 base 算：名义 = base × 敞口。
+· 邮件/日志的主口径是【从现在起算 + 滚仓】：本金就是 base_capital_usdt（默认 1000 U），
+  从你实际开始跟单那一笔起计入账户，之后每笔名义 = 当时账户权益 × 敞口，
+  赚的滚进下一笔、亏的缩小下一笔。账户现值 = 本金 + 已实现（参与后平掉的）+ 当前浮盈。
+  参与之前的历史回测盈亏**不计入**（那是回测数据，不是实盘）。
 · 同时给一行【回测全程参考】：若从数据起点（2017-08）就用 base 一路跟着做，
   固定本金（每笔按 base 开仓）终值约 9,900 U（约 10 倍），
-  滚仓（每笔按当时权益开仓、利润滚入下一笔）终值约 146,000 U（约 146 倍）。
+  滚仓（每笔按当时权益开仓、利润滚入下一笔）终值约 162,000 U（约 162 倍）。
   这两个数字每多一根已收盘日线都会小幅变动，**以邮件正文打印的为准**，别拿这里当常数。
-· 两者收益率完全相同，滚仓只是把绝对金额放大约 14.8 倍。不要混用。
+· 两者收益率完全相同，滚仓只是把绝对金额放大约 16 倍。不要混用。
 
 安全设计
 --------
@@ -327,13 +328,16 @@ def derive_position(bars, sig, cfg, tag, pending=False, next_bar=None, since=Non
     """
     从信号历史推演出「当前这一笔持仓」的明细，同时给两套口径：
 
-    【滚仓口径 · 主口径】起点 base_capital_usdt（默认 1000 U），
+    【滚仓口径 · 主口径】since = 你实际开始跟单那一笔的入场日（state 里的 participate_from）。
+        从那笔起账户从 base_capital_usdt（默认 1000 U）起步，
         每笔名义 = 当时账户权益 × 敞口 → 赚了自动放大下一笔，亏了自动缩小。
-        等价于「把利润全部滚进下一笔仓位」，也就是复利。
+        数学上等价于：我的盈亏 = 引擎盈亏 × (我的权益 / 引擎当时的权益)。
+        since 为空（还没参与）时退化为 base，即「固定本金」，与旧行为一致。
 
     【固定本金口径 · 对照】每笔都按固定的 base_capital_usdt 重新起算，不复利。
         pnl_fixed = pnl_engine × base / equity[entry_i - 1]
         （敞口倍数在分子分母同时出现，自动约掉，缩放是精确的。）
+        只用来给「参与之前」的历史交易作参考。
 
     两套口径的交易规则完全相同，唯一区别是「赚到的钱要不要立刻滚进下一笔」。
 
@@ -353,28 +357,62 @@ def derive_position(bars, sig, cfg, tag, pending=False, next_bar=None, since=Non
     cur_px = bars[-1]["close"]
     comp_scale = (base / E.CAPITAL) if E.CAPITAL else 1.0
 
+    # ---- 参与起点之后的滚仓链（必须先算：recent 明细与当前持仓都要用）----
+    # since = 你真正开始跟单那一笔的入场日（落盘在 monitor_state.json 的 participate_from）。
+    # 从那笔起账户就是 base（默认 1000 U），之后每笔名义 = 当时账户权益 × 敞口，
+    # 赚的自动滚进下一笔、亏的自动缩小下一笔 —— 这就是滚仓（复利）。
+    # 数学上等价于：我的盈亏 = 引擎盈亏 × (我的权益 / 引擎当时的权益)。
+    # 参与之前的历史交易不属于你，只按「每笔 base 固定本金」折算作参考。
+    acc = base                 # 参与后的账户权益（滚仓口径，逐笔滚）
+    realized_since = 0.0       # 参与后已平仓的累计盈亏（滚仓口径）
+    part_n = 0                 # 参与后已平仓的笔数
+    chain = []                 # 与 res["trades"] 一一对应
+    for t in res["trades"]:
+        j = t["entry_i"] - 1
+        e_ref = eq[j] if (0 <= j < n and eq[j]) else E.CAPITAL
+        _d = fdate(bars[t["entry_i"]]["t"])
+        # 引擎的逐笔 pnl 里没扣合约「开仓」手续费（现货的扣了），
+        # 这里补上，否则滚仓链会系统性高估（9 年 138 笔累计约 1.8%）。
+        _p = t["pnl"]
+        if t.get("leg") == "fut":
+            try:
+                _ex, _ = exposure_at(bars, cfg, t["entry_i"])
+                _p -= e_ref * _ex * E.FUT_FEE
+            except Exception:
+                pass
+        if since and _d >= since:
+            my = _p * (acc / e_ref) if e_ref else 0.0
+            acc += my
+            realized_since += my
+            part_n += 1
+        else:
+            my = None
+        chain.append({"my_pnl": my, "e_ref": e_ref, "date": _d, "p": _p})
+
     # ---- 历史已平仓交易 ----
     realized, closed_n, wins = 0.0, 0, 0
     gross_win, gross_loss = 0.0, 0.0
     recent = []
-    for t in res["trades"]:
-        j = t["entry_i"] - 1
-        e_ref = eq[j] if (0 <= j < n and eq[j]) else E.CAPITAL
+    for k, t in enumerate(res["trades"]):
+        e_ref = chain[k]["e_ref"]
         scale = base / e_ref if e_ref else 0.0
-        pnl = t["pnl"] * scale
+        pnl = chain[k]["p"] * scale
         realized += pnl
         closed_n += 1
-        if t["pnl"] > 0:                    # 胜率/盈亏比用引擎原始金额，避免被复利缩放放大
+        if chain[k]["p"] > 0:               # 胜率/盈亏比用引擎原始金额，避免被复利缩放放大
             wins += 1
-            gross_win += t["pnl"]
+            gross_win += chain[k]["p"]
         else:
-            gross_loss += -t["pnl"]
+            gross_loss += -chain[k]["p"]
         recent.append({
             "entry_date": fdate(bars[t["entry_i"]]["t"]),
             "exit_date": fdate(bars[t["exit_i"]]["t"]),
             "dir": t["dir"], "entry_px": t["entry_px"], "exit_px": t["exit_px"],
             "pnl": pnl, "comp_pnl": t["pnl"] * comp_scale,
+            "my_pnl": chain[k]["my_pnl"],
             "liq": bool(t.get("liq")), "leg": t.get("leg"),
+            "why": t.get("why"),
+            "idx": k,                    # 在 res["trades"] 里的位置
         })
     win_rate = (wins / closed_n) if closed_n else 0.0
     losses = closed_n - wins
@@ -402,32 +440,42 @@ def derive_position(bars, sig, cfg, tag, pending=False, next_bar=None, since=Non
                     e2 = r2["equity"]
                     e_ref2 = e2[j2] if (0 <= j2 < len(e2) and e2[j2]) else E.CAPITAL
                     s2 = base / e_ref2 if e_ref2 else 0.0
+                    # 同主链：补上合约开仓手续费（引擎逐笔 pnl 里没扣）
+                    _p2 = t["pnl"]
+                    if t.get("leg") == "fut":
+                        try:
+                            _ex2, _ = exposure_at(bars, cfg, t["entry_i"])
+                            _p2 -= e_ref2 * _ex2 * E.FUT_FEE
+                        except Exception:
+                            pass
+                    # 这笔如果在你参与之后开仓，也要滚进账户（它是最后一笔，直接接在链尾）
+                    _d2 = fdate(bars[t["entry_i"]]["t"])
+                    if since and _d2 >= since:
+                        my2 = _p2 * (acc / e_ref2) if e_ref2 else 0.0
+                        acc += my2
+                        realized_since += my2
+                        part_n += 1
+                    else:
+                        my2 = None
                     just_closed = {
-                        "entry_date": fdate(bars[t["entry_i"]]["t"]),
+                        "entry_date": _d2,
                         "exit_date": fdate(vb[t["exit_i"]]["t"]),
                         "dir": t["dir"], "entry_px": t["entry_px"], "exit_px": t["exit_px"],
-                        "pnl": t["pnl"] * s2, "comp_pnl": t["pnl"] * comp_scale,
+                        "pnl": _p2 * s2, "comp_pnl": _p2 * comp_scale,
+                        "my_pnl": my2,
+                        "engine_pnl": _p2, "e_ref": e_ref2,
                         "liq": bool(t.get("liq")), "leg": t.get("leg"),
+                        "why": t.get("why"),
                         "just_closed": True,
                     }
                     recent.append(just_closed)
             except Exception as e:
                 log("      （补算刚平仓那笔失败：%s）" % e)
 
-    # ---- 参与起点之后已实现的盈亏 ----
-    # 用户真正开始跟单之后平掉的每一笔都要累计进来，否则「赚的钱」会在空仓那天
-    # 突然消失（账户现值从「本金+浮盈」直接退回本金），看着像程序算错了。
-    realized_since = 0.0
-    if since:
-        for t in res["trades"]:
-            # 用 > 而不是 >=：参与起点那天平掉的是「上一笔」，不算你的
-            if fdate(bars[t["exit_i"]]["t"]) > since:
-                j = t["entry_i"] - 1
-                e_ref = eq[j] if (0 <= j < n and eq[j]) else E.CAPITAL
-                realized_since += t["pnl"] * (base / e_ref if e_ref else 0.0)
-        # 今天刚平掉的那笔不在引擎 trades 里（见上），单独补
-        if just_closed and just_closed["exit_date"] > since:
-            realized_since += just_closed["pnl"]
+    # ---- 参与起点之后的已实现盈亏：已在上面的滚仓链里逐笔累加（realized_since）----
+    # 注意：以前这里按「每笔 base 固定本金」缩放，等于永远 1000 U 不滚 ——
+    # 与用户「下一笔 1000 U 起、之后滚仓」的预期不符，已改为链式滚仓。
+    # 参与之前平掉的那笔不算你的（用 >= 而不是 >：起点那天平的是上一笔）。
 
     # ---- 滚仓口径的账户权益（引擎原生净值，已 mark-to-market 到最新收盘）----
     eq_last = None
@@ -447,9 +495,12 @@ def derive_position(bars, sig, cfg, tag, pending=False, next_bar=None, since=Non
         "uw": res["stats"].get("max_underwater", 0),
         "adverse": res["stats"].get("short_adverse", 0.0),
         "equity": base + realized,
-        # 主口径：从现在起算（历史已平仓不计入，账户 = 本金 + 当前浮盈）
+        # 主口径：从现在起算 + 滚仓（参与前的历史已平仓不计入，账户 = 本金 + 参与后已实现 + 当前浮盈）
         # pending=True（本轮尚未参与）时，当前这笔的浮盈不计入账户，账户就是本金
         "pending": bool(pending),
+        "realized_since": realized_since,      # 参与后已平仓的累计盈亏（滚仓口径）
+        "part_n": part_n,                      # 参与后已平仓的笔数
+        "acc": acc,                            # 参与后的账户权益（滚仓口径，逐笔滚）
         "now_equity": base if pending else (base + realized_since),
         "now_mult": (1.0 if pending else ((base + realized_since) / base if base else 1.0)),
         # 回测全程参考
@@ -461,26 +512,34 @@ def derive_position(bars, sig, cfg, tag, pending=False, next_bar=None, since=Non
         "recent": recent[-3:],
         "just_closed": just_closed,
         "ref_expo": 0.0,
+        "stop_px": None, "stop_pct": 0.0, "short_stop": 0.0, "entry_i": None,
     }
 
     if cur_sig == 0:
         # 空仓时也给一个「下一笔进场时大概多少倍」的参考值，
         # 否则邮件会写「敞口 0.00× 进场」，看着像永远不进场。
+        out["short_stop"] = float(st.get("short_stop") or 0.0)
         try:
             out["ref_expo"] = exposure_at(bars, cfg, n - 1)[0]
         except Exception:
             out["ref_expo"] = 0.0
         return out
 
-    # ---- 当前持仓：找本轮起点（最后一个信号翻转处）----
-    i = n - 1
-    while i > 0 and sig[i - 1] == cur_sig:
-        i -= 1
-    entry_i = min(i + 1, n - 1)
+    # ---- 当前持仓：优先用引擎里真实的那笔（止损后当天重开，成本价会变）----
+    op = res.get("open")
+    if op and op["dir"] == cur_sig and 0 <= op["entry_i"] < n:
+        entry_i = op["entry_i"]
+        entry_px = op["entry_px"]          # 引擎里已含滑点
+    else:
+        # 回退：按信号连续段反推（老逻辑，正常情况下不会走到）
+        i = n - 1
+        while i > 0 and sig[i - 1] == cur_sig:
+            i -= 1
+        entry_i = min(i + 1, n - 1)
+        entry_px = bars[entry_i]["open"]
+        entry_px = entry_px * (1 + E.SLIP) if cur_sig > 0 else entry_px * (1 - E.SLIP)
 
     expo, _ = exposure_at(bars, cfg, entry_i)
-    entry_px = bars[entry_i]["open"]
-    entry_px = entry_px * (1 + E.SLIP) if cur_sig > 0 else entry_px * (1 - E.SLIP)
 
     days = n - 1 - entry_i
 
@@ -491,12 +550,15 @@ def derive_position(bars, sig, cfg, tag, pending=False, next_bar=None, since=Non
         fg = q * cur_px * E.FUNDING_D * days          # 空头收资金费
         return q * (entry_px - cur_px) - q * cur_px * E.FUT_FEE + fg
 
-    # 固定本金口径
-    notional = base * expo
+    # ---- 当前持仓的仓位尺寸：滚仓口径 ----
+    # 这笔开仓时的可用权益 = 本金 + 参与后已平仓的累计盈亏（acc），
+    # 名义 = acc × 敞口 → 赚了下一笔自动变大、亏了自动变小，就是滚仓。
+    # 还没参与时 acc 就等于 base，与「固定 1000 U」完全一致（向后兼容）。
+    notional = acc * expo
     qty = notional / entry_px if entry_px > 0 else 0.0
     upnl = _upnl(qty, cur_sig)
 
-    # 滚仓口径：这笔是在入场时按「当时的账户权益 × 敞口」开的
+    # 全历史滚仓参考（2017 年起一路滚下来的那套，仅作「回测全程」对照）
     j = entry_i - 1
     eq_ref = eq[j] if (0 <= j < n and eq[j]) else E.CAPITAL
     comp_notional = eq_ref * expo * comp_scale
@@ -505,12 +567,13 @@ def derive_position(bars, sig, cfg, tag, pending=False, next_bar=None, since=Non
 
     out.update({
         "entry_date": fdate(bars[entry_i]["t"]), "entry_px": entry_px,
+        "entry_i": entry_i,
         "qty": qty, "notional": notional, "expo": expo,
         "mkt_value": qty * cur_px, "upnl": upnl,
         "upnl_pct": (upnl / notional) if notional > 0 else 0.0,
         "hold_days": days,
         "equity": base + realized + upnl,
-        # 主口径：从现在起算，历史已平仓不计入。
+        # 主口径：从现在起算 + 滚仓，参与前的历史已平仓不计入。
         # pending=True → 这笔不算你的（你没参与），账户就还是本金，倍数 1.00×。
         "now_equity": base if pending else (base + realized_since + upnl),
         "now_mult": (1.0 if pending else
@@ -522,24 +585,38 @@ def derive_position(bars, sig, cfg, tag, pending=False, next_bar=None, since=Non
     # 已实现用反推，保证「本金 + 已实现 + 浮盈 = 账户现值」三行能精确对上
     # （引擎的净值已含开仓手续费，而浮盈是「现在平掉能拿到多少」，两者差一个平仓成本）
     out["comp_realized"] = comp_equity - base - comp_upnl
+
+    # ---- 空头止损价（只有空头才挂，多头不设止损）----
+    # 止损基准是「含滑点的成本价」，和你实际成交价一致；
+    # 价格涨到 entry × (1 + short_stop) 就市价买回平仓。
+    _ss = float(st.get("short_stop") or 0.0)
+    out["short_stop"] = _ss
+    if cur_sig < 0 and _ss > 0 and entry_px > 0:
+        out["stop_px"] = entry_px * (1.0 + _ss)
+        out["stop_pct"] = (out["stop_px"] / cur_px - 1.0) if cur_px > 0 else 0.0
     return out
 
 
-def short_risk(bars, sig, cfg):
+def short_risk(bars, sig, cfg, entry_px=None, entry_i=None):
     """
     空头腿风控：L× 逐仓的爆仓线在 入场价 ×(1+1/L)。
     用本轮空头区间的最高价估算最大逆行与安全边际。
+
+    entry_px / entry_i 传了就用它（止损后当天重开会改变成本价，
+    按信号连续段反推会算出旧成本价，爆仓价和余量都会偏）。
     """
     lev = float(cfg["binance"]["leverage"])
     sig = regime_long(bars, sig, cfg["strategy"].get("regime_ma", 0))
     line = 1.0 / lev
     if sig[-1] >= 0:
         return None
-    i = len(bars) - 1
-    while i > 0 and sig[i - 1] < 0:
-        i -= 1
-    entry_i = min(i + 1, len(bars) - 1)
-    entry_px = bars[entry_i]["open"]
+    if entry_i is None:
+        i = len(bars) - 1
+        while i > 0 and sig[i - 1] < 0:
+            i -= 1
+        entry_i = min(i + 1, len(bars) - 1)
+    if entry_px is None:
+        entry_px = bars[entry_i]["open"]
     peak = max(b["high"] for b in bars[entry_i:])
     adverse = 1.0 - peak / entry_px
     return {"entry_date": fdate(bars[entry_i]["t"]), "entry_px": entry_px,
@@ -578,8 +655,13 @@ def build_order_plan(pos, cfg, binance, price):
                                "这笔盈亏不计入账户。"
                                % (jc["entry_date"], sig_text(jc["dir"]), jc["exit_date"]))
             actions.append("当前空仓，本轮无需操作。下一笔信号出现时按本金 %.0f USDT "
-                           "× 届时敞口（现在算约 %.2f×，上限 %.2f×）进场，从那一笔开始计入账户。"
+                           "× 届时敞口（现在算约 %.2f×，上限 %.2f×）进场，从那一笔开始计入账户，"
+                           "之后每笔按当时账户权益滚仓。"
                            % (pos["base"], pos.get("ref_expo") or 0.0, cap))
+            if pos.get("short_stop"):
+                actions.append("若下一笔是做空，止损价 = 届时成本价 × %.2f（逆行 %.0f%% 市价买回）；"
+                               "真开空那天邮件会直接给出具体价格，照着挂止损市价单即可。"
+                               % (1.0 + pos["short_stop"], pos["short_stop"] * 100.0))
         else:
             actions.append("本轮不参与：当前这笔（%s 开的%s）你没有实际持仓，不计入账户。"
                            % (pos.get("entry_date") or "—", sig_text(sig)))
@@ -598,6 +680,12 @@ def build_order_plan(pos, cfg, binance, price):
                               pct(pos["upnl_pct"])))
             actions.append("应持 %.6f BTC（名义 %.2f USDT，敞口 %.2f×）"
                            % (pos["qty"], pos["notional"], pos["expo"]))
+            if sig < 0 and pos.get("stop_px"):
+                actions.append("【要挂的止损单】方向：买入平空 · 触发价 %.2f · 类型：止损市价单"
+                               "（成本价 %.2f × %.2f = %.2f，即逆行 %.0f%%）"
+                               % (pos["stop_px"], pos["entry_px"],
+                                  1.0 + pos["short_stop"], pos["stop_px"],
+                                  pos["short_stop"] * 100.0))
         return actions, notes
 
     import btc_trade as T
@@ -614,6 +702,11 @@ def build_order_plan(pos, cfg, binance, price):
                     snap["fut_wallet"], snap["fut_upnl"], snap["equity"]))
     notes.extend(pnotes)
     actions = [a["text"] for a in acts] or ["已与目标对齐，本轮无需操作"]
+    if sig < 0 and pos.get("stop_px"):
+        actions.append("【要挂的止损单】方向：买入平空 · 触发价 %.2f · 类型：止损市价单"
+                       "（成本价 %.2f × %.2f，即逆行 %.0f%%）"
+                       % (pos["stop_px"], pos["entry_px"], 1.0 + pos["short_stop"],
+                          pos["short_stop"] * 100.0))
     return actions, notes
 
 
@@ -678,6 +771,18 @@ def build_mail_html(res):
     rma = cfg["strategy"].get("regime_ma", 0)
     regime_txt = ("SMA%d 只约束多头（收盘价在均线下方时不开多、空头照做）" % int(rma)
                   if rma else "无长期均线过滤")
+    _ss = float(cfg["strategy"].get("short_stop") or 0.0)
+    _ls = float(cfg["strategy"].get("long_stop") or 0.0)
+    if _ss > 0 and _ls > 0:
+        stop_txt = "空头逆行 %.0f%% 市价买回；多头下跌 %.0f%% 市价卖出；其余靠信号反转出场" % (
+            _ss * 100, _ls * 100)
+    elif _ss > 0:
+        stop_txt = ("空头逆行 %.0f%% 即市价买回平仓（止损单），多头不设止损；"
+                    "其余靠信号反转出场" % (_ss * 100))
+    elif _ls > 0:
+        stop_txt = "多头下跌 %.0f%% 即市价卖出，空头不设止损；其余靠信号反转出场" % (_ls * 100)
+    else:
+        stop_txt = "不设固定止盈止损，只靠信号反转出场"
 
     def pos_row(p, label):
         if p["dir"] == 0:
@@ -711,7 +816,8 @@ def build_mail_html(res):
             # 否则用户会以为持仓记录丢了（旧版这里会写「上面的浮盈」，可空仓根本没有浮盈）
             _head = "空仓中 · 本轮无需操作"
             _body = ("%s你没有实际持仓，这笔盈亏<b>不计入账户</b> —— 账户现值就是本金 "
-                     "<b>%.0f USDT</b>。等下一笔信号出现时按本金 %.0f USDT 进场，从那一笔开始计入。"
+                     "<b>%.0f USDT</b>。等下一笔信号出现时按本金 %.0f USDT 进场，从那一笔开始计入，"
+                     "之后每笔按当时账户权益滚仓。"
                      % (("上一笔（%s 开的%s）已在 %s 开盘平仓，"
                          % (_jc["entry_date"], sig_text(_jc["dir"]), _jc["exit_date"]))
                         if _jc else "当前空仓，",
@@ -720,7 +826,7 @@ def build_mail_html(res):
             _head = "尚未开始参与 · 本轮无需操作"
             _body = ("当前这笔（%s 开的%s）你还没有实际持仓，<b>不计入账户</b> —— "
                      "账户现值就是本金 <b>%.0f USDT</b>。等信号翻转后按本金 %.0f USDT × 敞口进场，"
-                     "从那一笔开始计入。"
+                     "从那一笔开始计入，之后每笔按当时账户权益滚仓。"
                      % (pos.get("entry_date") or "—", sig_text(pos["dir"]),
                         pos["base"], pos["base"]))
         banner = ('<div class="banner" style="background:#eef3f8;border-left:5px solid #2471a3;'
@@ -750,35 +856,56 @@ def build_mail_html(res):
             return ('<div style="background:#fff;border-radius:12px;padding:14px 16px;margin-top:12px">'
                     '<div style="font-size:14px;font-weight:700;color:#1c2833;margin-bottom:9px">%s</div>'
                     '<table role="presentation" style="width:100%%;border-collapse:collapse;font-size:13.5px">'
-                    '<tr><td style="padding:4px 0;color:%s;width:46%%">本金</td>'
+                    '<tr><td style="padding:4px 0;color:%s;width:46%%">%s</td>'
                     '<td style="padding:4px 0">%.0f USDT（空仓中，全额在手）</td></tr>'
-                    '<tr><td style="padding:4px 0;color:%s">账户现值<span style="font-size:11.5px">（现在起算）</span></td>'
-                    '<td style="padding:4px 0;font-weight:700">%.2f USDT（%.2f 倍）</td></tr>'
+                    '<tr><td style="padding:4px 0;color:%s">账户现值<span style="font-size:11.5px">（起算 + 滚仓）</span></td>'
+                    '<td style="padding:4px 0;font-weight:700">%.2f USDT（%.2f 倍）'
+                    '<div style="font-size:11px;font-weight:400;color:#8a9aab;margin-top:3px">%s</div></td></tr>'
                     '<tr><td style="padding:4px 0;color:%s">↳ 回测全程参考</td>'
                     '<td style="padding:4px 0;color:#8a9aab;font-size:12.5px">'
                     '滚仓 %.0f USDT（%.1f 倍）· 固定本金 %.0f USDT（%.1f 倍）</td></tr>'
                     '%s</table></div>'
-                    % (label, C_MUTED, p["base"], C_MUTED,
+                    % (label, C_MUTED, ("账户权益" if p.get("part_n") else "本金"),
+                       p.get("acc") or p["base"], C_MUTED,
                        p["now_equity"], p["now_mult"],
+                       ("本金 %s + 已实现 %s（参与后 %d 笔）"
+                        % (format(p["base"], ",.0f"),
+                           format(p["realized_since"], "+,.2f"), p["part_n"]))
+                       if p.get("part_n") else "",
                        C_MUTED, p["comp_equity"], p["comp_mult"],
                        p["equity"], p["equity"] / p["base"] if p["base"] else 0.0,
                        extra))
         c = sig_color(p["dir"])
+        # 空头止损价单独一行：这是下单时要照着挂条件单的价格，必须显眼
+        stop_row = ""
+        if p["dir"] < 0 and p.get("stop_px"):
+            stop_row = ('<tr><td style="padding:4px 0;color:%s">止损价'
+                        '<span style="font-size:11.5px">（涨到此价市价买回）</span></td>'
+                        '<td style="padding:4px 0;font-weight:700;color:%s">%.2f USDT'
+                        '<span style="font-weight:400;color:#8a9aab;font-size:12px">'
+                        '　距现价 %+.2f%%</span></td></tr>'
+                        % (C_MUTED, C_UP, p["stop_px"], p["stop_pct"] * 100.0))
         # 「本金 + 浮盈」那一行的小字：未参与时浮盈不计入，措辞要跟着变
-        eq_sub = ("本金 %s（这笔未参与，浮盈不计入）" % format(p["base"], ",.0f")
-                  if p.get("pending") else
-                  "本金 %s + 浮盈 %s" % (format(p["base"], ",.0f"), money(p["upnl"])))
+        if p.get("pending"):
+            eq_sub = "本金 %s（这笔未参与，浮盈不计入）" % format(p["base"], ",.0f")
+        elif p.get("part_n"):
+            eq_sub = "本金 %s + 已实现 %s（参与后 %d 笔）+ 浮盈 %s" % (
+                format(p["base"], ",.0f"), format(p["realized_since"], "+,.2f"),
+                p["part_n"], money(p["upnl"]))
+        else:
+            eq_sub = "本金 %s + 浮盈 %s" % (format(p["base"], ",.0f"), money(p["upnl"]))
         return ('<div style="background:#fff;border-radius:12px;padding:14px 16px;margin-top:12px">'
                 '<div style="font-size:14px;font-weight:700;color:#1c2833;margin-bottom:9px">'
                 '%s <span style="font-weight:400;color:%s;font-size:12.5px">· %s</span></div>'
                 '<table role="presentation" style="width:100%%;border-collapse:collapse;font-size:13.5px">'
                 '<tr><td style="padding:4px 0;color:%s;width:46%%">成本价（入场价）</td>'
                 '<td style="padding:4px 0;font-weight:700">%.2f USDT</td></tr>'
+                '%s'
                 '<tr><td style="padding:4px 0;color:%s">最新收盘价</td>'
                 '<td style="padding:4px 0">%.2f USDT</td></tr>'
                 '<tr><td style="padding:4px 0;color:%s">持仓数量</td>'
                 '<td style="padding:4px 0">%.6f %s</td></tr>'
-                '<tr><td style="padding:4px 0;color:%s">入场名义（本金×敞口）</td>'
+                '<tr><td style="padding:4px 0;color:%s">入场名义（权益×敞口）</td>'
                 '<td style="padding:4px 0">%.2f USDT（%.0f × %.2f× 仓位比例）</td></tr>'
                 '<tr><td style="padding:4px 0;color:%s">当前市值</td>'
                 '<td style="padding:4px 0">%.2f USDT</td></tr>'
@@ -786,7 +913,7 @@ def build_mail_html(res):
                 '<td style="padding:4px 0">%s USDT（%s）</td></tr>'
                 '<tr><td style="padding:4px 0;color:%s">已持有</td>'
                 '<td style="padding:4px 0">%d 天（自 %s）</td></tr>'
-                '<tr><td style="padding:4px 0;color:%s">账户现值<span style="font-size:11.5px">（现在起算）</span></td>'
+                '<tr><td style="padding:4px 0;color:%s">账户现值<span style="font-size:11.5px">（起算 + 滚仓）</span></td>'
                 '<td style="padding:4px 0;font-weight:700">%.2f USDT（%.2f 倍）'
                 '<div style="font-size:11px;font-weight:400;color:#8a9aab;margin-top:3px;line-height:1.5">'
                 '%s</div></td></tr>'
@@ -794,9 +921,9 @@ def build_mail_html(res):
                 '<td style="padding:4px 0;color:#8a9aab;font-size:12.5px">'
                 '滚仓 %.0f USDT（%.1f 倍）· 固定本金 %.0f USDT（%.1f 倍）</td></tr>'
                 '%s</table></div>'
-                % (label, c, p["leg"], C_MUTED, p["entry_px"], C_MUTED, p["cur_px"], C_MUTED,
+                % (label, c, p["leg"], C_MUTED, p["entry_px"], stop_row, C_MUTED, p["cur_px"], C_MUTED,
                    p["qty"], sym.replace("USDT", ""), C_MUTED,
-                   p["notional"], p["base"], p["expo"], C_MUTED, p["mkt_value"], C_MUTED,
+                   p["notional"], p.get("acc") or p["base"], p["expo"], C_MUTED, p["mkt_value"], C_MUTED,
                    _money_cell(p["upnl"]), _pct_cell(p["upnl_pct"]), C_MUTED,
                    p["hold_days"], p["entry_date"], C_MUTED,
                    p["now_equity"], p["now_mult"],
@@ -807,7 +934,7 @@ def build_mail_html(res):
 
     extra = ""
     if pos.get("pending"):
-        _sub = ("当前空仓，没有持仓可算；账户现值 = 本金 %.0f USDT，下一笔信号起计入"
+        _sub = ("当前空仓，没有持仓可算；账户现值 = 本金 %.0f USDT，下一笔信号起计入，之后滚仓"
                 % pos["base"] if pos["dir"] == 0 else
                 "这笔你没有实际持仓，上面的浮盈只是信号推演，不计入账户；从下一笔开始计入")
         extra += ('<tr><td style="padding:4px 0;color:%s">参与状态</td>'
@@ -815,11 +942,12 @@ def build_mail_html(res):
                   '<div style="font-size:11px;font-weight:400;color:#8a9aab;margin-top:3px;line-height:1.5">'
                   '%s</div></td></tr>'
                   % (C_MUTED, "空仓 · 尚未参与" if pos["dir"] == 0 else "尚未参与", _sub))
-    if pos["dir"] < 0 and res["short_risk"]:
+    if pos["dir"] < 0 and res.get("short_risk"):
         r = res["short_risk"]
-        extra = ('<tr><td style="padding:4px 0;color:%s">爆仓价 / 安全余量</td>'
-                 '<td style="padding:4px 0">%.2f USDT / <b>%.2f pp</b></td></tr>'
-                 % (C_MUTED, r["liq_px"], r["margin"] * 100))
+        # 用 += 而不是 =，否则「参与状态」那行会被覆盖掉（空头 + 未参与时会丢）
+        extra += ('<tr><td style="padding:4px 0;color:%s">爆仓价 / 安全余量</td>'
+                  '<td style="padding:4px 0">%.2f USDT / <b>%.2f pp</b></td></tr>'
+                  % (C_MUTED, r["liq_px"], r["margin"] * 100))
 
     # ---------- 最近平仓 ----------
     def recent_table(p, title):
@@ -832,23 +960,56 @@ def build_mail_html(res):
             mark = ('<span style="color:#1b4f72;font-size:10.5px;font-weight:700;'
                     'background:#eaf1f8;border-radius:3px;padding:1px 4px;margin-left:4px">'
                     '今日平仓</span>' if t.get("just_closed") else "")
+            # 止损出场的也标出来 —— 和信号反转离场不是一回事，看回测时要能区分
+            if t.get("why") == "stop":
+                mark += ('<span style="color:#8a4b00;font-size:10.5px;font-weight:700;'
+                         'background:#fdf0e3;border-radius:3px;padding:1px 4px;margin-left:4px">'
+                         '止损</span>')
+            # 你参与之后平掉的：金额就是实际滚仓盈亏，直接当主数字，打「已计入」标。
+            # 参与之前的：只是回测历史，按每笔 base 固定本金折算，滚仓口径另起一行小字。
+            _my = t.get("my_pnl")
+            if _my is not None:
+                _amt = _my
+                _sub2 = ""
+                mark += ('<span style="color:#1e6b3a;font-size:10.5px;font-weight:700;'
+                         'background:#e6f4ec;border-radius:3px;padding:1px 4px;margin-left:4px">'
+                         '已计入</span>')
+            else:
+                _amt = t["pnl"]
+                _c = t.get("comp_pnl", 0.0)
+                _sub2 = ""
+                # 「若从 2017 年一路滚过来这笔会是多少」只在还没参与时给 ——
+                # 一旦有了自己的实盘记录，这行就是噪音，删掉免得和「已计入」混在一起。
+                if not p.get("part_n") and abs(_c - t["pnl"]) > max(abs(t["pnl"]) * 0.05, 1.0):
+                    _sub2 = ('<div style="color:#8a9aab;font-size:10.5px;font-weight:400;'
+                             'margin-top:2px">滚仓 %s%s</div>'
+                             % ('+' if _c > 0 else '', format(_c, ",.0f")))
             rows += ('<tr><td style="padding:8px 4px;border-bottom:1px solid #eef1f5;font-size:12.5px">'
                      '%s → %s%s<div style="color:#8a9aab;font-size:11.5px">%.2f → %.2f</div></td>'
                      '<td style="padding:8px 4px;border-bottom:1px solid #eef1f5;font-size:12.5px;'
                      'text-align:center;color:%s">%s</td>'
                      '<td style="padding:8px 4px;border-bottom:1px solid #eef1f5;font-size:12.5px;'
-                     'text-align:right;white-space:nowrap">%s</td></tr>'
+                     'text-align:right;white-space:nowrap">%s%s</td></tr>'
                      % (t["entry_date"], t["exit_date"], mark, t["entry_px"], t["exit_px"],
-                        sig_color(t["dir"]), sig_text(t["dir"]), _money_cell(t["pnl"])))
-        _sub = ("（不计入上方账户；标「今日平仓」的是今天开盘刚平掉的那笔）"
-                if any(t.get("just_closed") for t in rec)
-                else "（回测历史，不计入上方账户）")
+                        sig_color(t["dir"]), sig_text(t["dir"]), _money_cell(_amt), _sub2))
+        _tail = ("标「今日平仓」的是今天开盘刚平掉的那笔 · "
+                 if any(t.get("just_closed") for t in rec) else "")
+        if p.get("part_n"):
+            _sub = ("（%s标<b>「已计入」</b>的是你参与后平掉的，金额为<b>从 %s U 起逐笔滚仓</b>的"
+                    "实际盈亏，已累加进上方账户现值；其余是参与前的回测历史，"
+                    "按<b>每笔 %s U</b> 折算，只作参考）"
+                    % (_tail, format(p["base"], ",.0f"), format(p["base"], ",.0f")))
+        else:
+            _csum = sum(t.get("comp_pnl", 0.0) for t in rec)
+            _sub = ("（回测历史，不计入上方账户 · %s金额按<b>每笔 %s U 本金</b>折算；"
+                    "若按滚仓口径，这 %d 笔合计 %s U）"
+                    % (_tail, format(p["base"], ",.0f"), len(rec), format(_csum, ",.0f")))
         return ('<div style="background:#fff;border-radius:12px;padding:14px 16px;margin-top:12px">'
                 '<div style="font-size:14px;font-weight:700;color:#1c2833;margin-bottom:8px">%s'
                 '<span style="font-weight:400;font-size:12px;color:#8a9aab">%s</span></div>'
                 '<table role="presentation" style="width:100%%;border-collapse:collapse;'
                 'table-layout:fixed">'
-                '<colgroup><col style="width:52%%"><col style="width:20%%"><col style="width:28%%"></colgroup>'
+                '<colgroup><col style="width:48%%"><col style="width:18%%"><col style="width:34%%"></colgroup>'
                 '<tr><th style="padding:6px 4px;text-align:left;font-size:12px;color:%s">持仓期 / 成本→出场</th>'
                 '<th style="padding:6px 4px;text-align:center;font-size:12px;color:%s">方向</th>'
                 '<th style="padding:6px 4px;text-align:right;font-size:12px;color:%s">盈亏(U)</th></tr>'
@@ -877,6 +1038,30 @@ def build_mail_html(res):
                 'border-radius:0 8px 8px 0;font-size:13px;color:#7a5410;margin-top:12px">'
                 + "<br>".join(res["warnings"]) + "</div>")
 
+    # 账户现值的算式 + 这一笔的仓位算式（滚仓口径：名义 = 当时账户权益 × 敞口）
+    _acc = pos.get("acc") or pos["base"]
+    if pos.get("part_n"):
+        _eq_formula = ("本金 %s + 已实现 %s（参与后已平 %d 笔）+ 当前浮盈 = 账户现值"
+                       % (format(pos["base"], ",.0f"),
+                          format(pos["realized_since"], "+,.0f"), pos["part_n"]))
+    else:
+        _eq_formula = "本金 %s + 当前浮盈 = 账户现值" % format(pos["base"], ",.0f")
+    if pos["dir"] == 0:
+        _pos_rule = ("下一笔进场时：名义 = 届时账户权益 <b>%s U</b> × 届时敞口"
+                     "（按现在算约 %.2f×，上限 %.2f×）"
+                     % (format(_acc, ",.0f"), pos.get("ref_expo") or 0.0,
+                        float(cfg["strategy"].get("exposure_cap", 1.0))))
+    elif pos.get("part_n"):
+        _pos_rule = ("这一笔的仓位：名义 = 当时账户权益 <b>%s U</b> × 敞口 %.2f× = "
+                     "<b>%s USDT</b>（数量 %.6f BTC）—— 赚了下一笔自动变大，这就是滚仓"
+                     % (format(_acc, ",.0f"), pos["expo"] or 0.0,
+                        format(pos["notional"], ",.2f"), pos["qty"]))
+    else:
+        _pos_rule = ("这一笔的仓位：名义 = 本金 <b>%s U</b> × 敞口 %.2f× = "
+                     "<b>%s USDT</b>（数量 %.6f BTC）"
+                     % (format(pos["base"], ",.0f"), pos["expo"] or 0.0,
+                        format(pos["notional"], ",.2f"), pos["qty"]))
+
     return """<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -903,7 +1088,7 @@ table{width:100%%;border-collapse:collapse;table-layout:fixed}
   <div style="font-size:18px;font-weight:800;color:#1c2833">BTC 日线趋势策略 · 每日检测</div>
   <div style="color:%(muted)s;font-size:12.5px;margin-top:6px;line-height:1.6">
     标的 %(sym)s · 数据截至 <b>%(bar)s</b> 收盘（%(close).2f USDT）<br>
-    <b>本金 %(base).0f USDT</b>（从现在起算，历史回测盈亏不计入）· 当前 <b>%(now_mult).2f 倍</b><br>
+    <b>本金 %(base).0f USDT 起</b>（之后按权益滚仓，参与前的回测盈亏不计入）· 当前 <b>%(now_mult).2f 倍</b><br>
     %(rule)s · 生成时间 %(gen)s</div>
 </div>
 
@@ -918,7 +1103,7 @@ table{width:100%%;border-collapse:collapse;table-layout:fixed}
     %(row)s
   </table>
   <div style="color:#8a9aab;font-size:11.5px;margin-top:9px;line-height:1.65">
-    成本价 = 信号翻转后次日开盘成交价（含滑点）；名义 = %(base).0f USDT × 敞口比例；
+    成本价 = 信号翻转后次日开盘成交价（含滑点）；名义 = 届时账户权益 × 敞口比例；
     收益率 = 浮盈 ÷ 入场名义。盈亏均已扣手续费 / 资金费。金额单位 USDT。
   </div>
 </div>
@@ -930,20 +1115,21 @@ table{width:100%%;border-collapse:collapse;table-layout:fixed}
 
 <div style="color:#8a9aab;font-size:11.5px;margin-top:20px;line-height:1.75">
   <b>关于「账户现值」：</b><br>
-  · <b>本邮件采用「从现在起算」</b>：本金就是 <b>%(base).0f USDT</b>，
-  账户现值 = %(base).0f 本金 + 当前浮盈，当前 <b>%(now).2f USDT（%(now_mult).2f 倍）</b>。
-  历史回测里那 %(closed_n)d 笔已平仓盈亏<b>不计入</b>这个数字 —— 那是回测数据，不是你的实盘。
-  仓位也按 %(base).0f U 算：名义 = %(base).0f × 敞口 %(expo).2f× = <b>%(notional).2f USDT</b>。<br>
+  · <b>本邮件采用「从现在起算 + 滚仓」</b>：本金就是 <b>%(base).0f USDT</b>，
+  %(_eq_formula)s，当前 <b>%(now).2f USDT（%(now_mult).2f 倍）</b>。
+  参与之前的历史回测盈亏<b>不计入</b>这个数字 —— 那是回测数据，不是你的实盘。<br>
+  · %(_pos_rule)s。<br>
   %(pending_note)s
   · <b>「回测全程参考」</b>（仅供了解这套策略长期跑下来什么水平）：
   若从 %(first_month)s 就用 %(base).0f U 一路跟着做 ——
   <b>固定本金</b>（每笔都按 %(base).0f U 开仓）终值 %(fix).0f USDT（%(fix_mult).1f 倍）；
   <b>滚仓</b>（每笔按当时账户权益开仓、利润滚入下一笔）终值 %(cmp).0f USDT（%(cmp_mult).1f 倍）。
   两者收益率完全相同，滚仓只是把绝对金额放大了 %(mult_ratio).1f 倍。<br>
-  · <b>往后的滚仓</b>：如果你要滚仓，就每笔按「当时账户权益 × 敞口 %(expo).2f×」下单，
-  赚了自动放大下一笔。滚仓收益高得多，但回撤与爆仓风险同步放大，中途要能扛住 %(mdd_txt)s 回撤才拿得住，
-  亏损期也会加速缩水。<b>建议先按固定 %(base).0f U 跑熟再考虑滚仓。</b><br><br>
-  仓位规则：波动率目标 %(vt_pct).1f%%/日，敞口上限 %(expocap).2f×；%(regime_txt)s；不设固定止盈止损，靠信号反转出场。<br>
+  · <b>滚仓怎么执行</b>：每笔都按「当时账户权益 × 敞口 %(_expo_ref).2f×」下单，
+  赚了下一笔自动变大、亏了自动缩小。收益高，但回撤与亏损期的缩水也同步放大，
+  中途要能扛住 %(mdd_txt)s 回撤才拿得住。<br><br>
+  仓位规则：波动率目标 %(vt_pct).1f%%/日，敞口上限 %(expocap).2f×；%(regime_txt)s。<br>
+  <b>止损规则</b>：%(stop_txt)s。<br>
   历史参考：%(first_month)s 至今（%(span_years).2f 年）胜率 %(win_rate).0f%%，盈亏比 %(pl_ratio).1f，最大回撤 %(mdd_txt)s，最长水下 %(uw_txt)s。<br>
   空头腿固定 %(lev)d× 逐仓（价格逆行 +%(liqline).1f%% 即爆仓；历史最深逆行 %(adv_txt)s）；多头腿不上杠杆。<br>
   <b>本邮件是回测规则的机械信号，不构成投资建议。</b>加密资产波动极大，请自行判断并控制风险。
@@ -953,10 +1139,14 @@ table{width:100%%;border-collapse:collapse;table-layout:fixed}
         "banner": banner, "muted": C_MUTED, "sym": sym,
         "bar": res["bar_date"], "close": res["close"], "gen": fdt(),
         "pending_note": (
-            "<b>⚠ 当前这笔你还没有参与</b>（%s 开的%s），所以它的浮盈<b>不计入</b>账户现值，"
-            "账户就是本金 <b>%.0f USDT</b>；等信号翻转后按本金进场，从那一笔开始计入。<br>"
-            % (pos.get("entry_date") or "—",
-               sig_text(pos["dir"]) if pos["dir"] else "空仓", pos["base"])
+            ("<b>⚠ 当前这笔你还没有参与</b>（%s 开的%s），所以它的浮盈<b>不计入</b>账户现值，"
+             "账户就是本金 <b>%.0f USDT</b>；等信号翻转后按本金进场，从那一笔开始计入，"
+             "之后每笔按当时账户权益滚仓。<br>"
+             % (pos.get("entry_date") or "—", sig_text(pos["dir"]), pos["base"]))
+            if (pending and pos["dir"]) else
+            ("<b>⚠ 你还没有参与</b>：当前空仓，账户就是本金 <b>%.0f USDT</b>；"
+             "下一笔信号出现时按本金进场，从那一笔开始计入，之后每笔按当时账户权益滚仓。<br>"
+             % pos["base"])
             if pending else ""),
         "base": pos["base"],
         "first_month": fdate(res["bars"][0]["t"])[:7],
@@ -965,17 +1155,21 @@ table{width:100%%;border-collapse:collapse;table-layout:fixed}
         "now": pos["now_equity"],
         "now_mult": pos["now_mult"],
         "notional": pos["notional"],
+        "_eq_formula": _eq_formula,
+        "_pos_rule": _pos_rule,
         "fix": pos["equity"],
         "fix_mult": (pos["equity"] / pos["base"]) if pos["base"] else 0.0,
         "cmp": pos["comp_equity"],
         "cmp_mult": pos["comp_mult"],
         "mult_ratio": (pos["comp_equity"] / pos["equity"]) if pos["equity"] else 0.0,
         "expo": pos["expo"],
+        "_expo_ref": (pos["expo"] or pos.get("ref_expo") or 0.0),
         "expocap": cfg["strategy"]["exposure_cap"],
         "vt_pct": float(cfg["strategy"]["vt"]) * 100.0,
         "lev": int(float(cfg["binance"]["leverage"])),
         "liqline": 100.0 / float(cfg["binance"]["leverage"]),
         "regime_txt": regime_txt,
+        "stop_txt": stop_txt,
         "rule": "多头走现货 · 空头走合约 %d× 逐仓 · %s"
                 % (int(float(cfg["binance"]["leverage"])), regime_txt),
         "closed_n": pos["closed_n"],
@@ -1355,7 +1549,7 @@ def main():
     if pending:
         if pos["dir"] == 0:
             _jc = pos.get("just_closed")
-            log("      参与状态：尚未开始 —— %s，当前空仓，账户就是本金 %.0f U"
+            log("      参与状态：尚未开始 —— %s，账户就是本金 %.0f U"
                 % (("上一笔 %s 开的%s已在 %s 开盘平仓" % (_jc["entry_date"], sig_text(_jc["dir"]),
                                                     _jc["exit_date"])) if _jc else "当前空仓",
                    pos["base"]))
@@ -1384,14 +1578,20 @@ def main():
             % (pos["tag"], pos["qty"], pos["notional"], pos["expo"], pos["mkt_value"]))
     if pos["pending"]:
         if pos["dir"] == 0:
-            log("      %s：账户现值 %.2f U（%.2f 倍）—— 空仓中，本金 %.0f U 全额在手，下一笔信号起计入"
+            log("      %s：账户现值 %.2f U（%.2f 倍）—— 空仓中，本金 %.0f U 全额在手，下一笔信号起计入并开始滚仓"
                 % (pos["tag"], pos["now_equity"], pos["now_mult"], pos["base"]))
         else:
             log("      %s：账户现值 %.2f U（%.2f 倍）—— 本金 %.0f U，当前这笔未参与，浮盈 %s 不计入"
                 % (pos["tag"], pos["now_equity"], pos["now_mult"], pos["base"], money(pos["upnl"])))
     else:
-        log("      %s：本金 %.0f + 浮盈 %s = 账户现值 %.2f U（%.2f 倍）"
-            % (pos["tag"], pos["base"], money(pos["upnl"]), pos["now_equity"], pos["now_mult"]))
+        if pos.get("realized_since"):
+            log("      %s：本金 %.0f + 已实现 %s + 浮盈 %s = 账户现值 %.2f U（%.2f 倍）"
+                % (pos["tag"], pos["base"], money(pos["realized_since"]),
+                   money(pos["upnl"]), pos["now_equity"], pos["now_mult"]))
+        else:
+            log("      %s：本金 %.0f + 浮盈 %s = 账户现值 %.2f U（%.2f 倍）"
+                % (pos["tag"], pos["base"], money(pos["upnl"]),
+                   pos["now_equity"], pos["now_mult"]))
     log("      %s：回测全程参考 滚仓 %.0f U（%.1f 倍）· 固定本金 %.0f U（%.1f 倍）"
         % (pos["tag"], pos["comp_equity"], pos["comp_mult"],
            pos["equity"], pos["equity"] / pos["base"] if pos["base"] else 0.0))
@@ -1429,10 +1629,19 @@ def main():
 
     # ---- 风控 ----
     log("[5/6] 风控检查")
-    sr = short_risk(bars, sig, cfg)
+    sr = short_risk(bars, sig, cfg, entry_px=pos.get("entry_px"),
+                    entry_i=pos.get("entry_i"))
     if sr:
+        # 用 pos 里的真实成本价（止损重开后 sr 按信号段推的会偏）
+        _ep = pos.get("entry_px") or sr["entry_px"]
+        _liq = _ep * (1 + 1.0 / sr["lev"])
         log("      空头腿：入场 %s @ %.2f，期间最高 %.2f，最大逆行 %s，爆仓价 %.2f"
-            % (sr["entry_date"], sr["entry_px"], sr["peak"], pct(sr["adverse"]), sr["liq_px"]))
+            % (pos.get("entry_date") or sr["entry_date"], _ep, sr["peak"],
+               pct(sr["adverse"]), _liq))
+        if pos.get("stop_px"):
+            log("      止损价 %.2f（逆行 %.0f%% 市价买回）—— 比爆仓价 %.2f 低 %.2f%%"
+                % (pos["stop_px"], pos["short_stop"] * 100, _liq,
+                   (_liq / pos["stop_px"] - 1) * 100))
         log("      距 %d× 爆仓线还有 %.2f pp%s"
             % (int(sr["lev"]), sr["margin"] * 100,
                "  ← 余量不足！" if sr["margin"] < 0.05 else ""))

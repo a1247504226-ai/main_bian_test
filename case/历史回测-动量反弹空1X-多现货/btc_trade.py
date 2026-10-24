@@ -71,6 +71,7 @@ import csv
 import hashlib
 import hmac
 import json
+import math
 import os
 import sys
 import time
@@ -542,6 +543,31 @@ class Binance:
             p["reduceOnly"] = "true"
         return self._request("POST", self.fut, "/fapi/v1/order", p, signed=True)
 
+    # ---------------- 止损条件单 ----------------
+    def fut_open_orders(self):
+        """当前挂着的合约委托（含条件单）。"""
+        data = self._request("GET", self.fut, "/fapi/v1/openOrders",
+                             {"symbol": self.symbol}, signed=True)
+        return data if isinstance(data, list) else []
+
+    def fut_stop_market(self, side, stop_px_str, working_type="MARK_PRICE"):
+        """
+        挂「触发即全平」的止损市价单。
+
+        用 closePosition=true：触发时把当前持仓一次平光，不用算数量，
+        也不会因为 stepSize 取整留下零头。币安规定 closePosition 与
+        quantity / reduceOnly 互斥，所以这里都不传。
+        """
+        p = {"symbol": self.symbol, "side": side, "type": "STOP_MARKET",
+             "stopPrice": stop_px_str, "closePosition": "true",
+             "workingType": working_type, "timeInForce": "GTC"}
+        return self._request("POST", self.fut, "/fapi/v1/order", p, signed=True)
+
+    def fut_cancel(self, order_id):
+        return self._request("DELETE", self.fut, "/fapi/v1/order",
+                             {"symbol": self.symbol, "orderId": order_id},
+                             signed=True)
+
 
 # ==============================================================================
 # 2. 账户快照 & 目标仓位
@@ -901,6 +927,74 @@ def execute(cfg, bnc, target_dir, expo, price, bar_date, sig_label,
         release_lock()
 
 
+def sync_stop_order(cfg, bnc, snap, price):
+    """
+    把合约账户里的止损条件单对齐到「当前空头持仓 × short_stop」。
+
+    幂等，重复跑安全：
+      · 没有空头持仓 → 撤掉所有「触发即全平」的条件单
+      · 有空头持仓   → 必须恰好一张，触发价 = 成本价 ×(1+short_stop)
+        已有的那张价格差 < 0.3% 就不动，否则撤旧挂新
+
+    为什么要按「成本价」而不是现价：策略是固定止损（亏 5% 就走），
+    不是移动止损。浮盈变大时止损价不会跟着抬，这一点邮件里也写明了。
+
+    ⚠ closePosition=true → 触发时全平，不用管数量精度。
+    ⚠ workingType 默认 MARK_PRICE（标记价格），抗插针；回测是按成交价判断的，
+      所以极端行情下实盘可能比回测晚一点点触发。
+    """
+    b = cfg["binance"]
+    ss = to_float(cfg["strategy"].get("short_stop"))
+    acts, notes = [], []
+    if ss <= 0:
+        return acts, notes
+
+    orders = bnc.fut_open_orders()
+    stops = [o for o in orders
+             if o.get("type") in ("STOP_MARKET", "STOP")
+             and str(o.get("closePosition")).lower() == "true"]
+
+    amt = snap["fut_amt"]
+    entry = snap["fut_entry"]
+
+    # 没有空头持仓（或不是空头）→ 全部撤掉，别留孤儿单
+    if amt >= 0 or entry <= 0:
+        for o in stops:
+            bnc.fut_cancel(o["orderId"])
+            acts.append("撤销止损单 #%s（当前没有空头持仓）" % o["orderId"])
+        return acts, notes
+
+    want = entry * (1.0 + ss)
+    rule = bnc.rules("fut")
+    tick = to_float(rule.get("tick"), 0.1)
+    # 向上取整到 tickSize：宁可早一个 tick 止损，也不要因为差一档挂不上。
+    # 代价是实际止损幅度比设定值高不到 0.01%。
+    want = math.ceil(want / tick) * tick
+    want_s = ("%.8f" % want).rstrip("0").rstrip(".")
+
+    keep = None
+    for o in stops:
+        sp = to_float(o.get("stopPrice"))
+        if sp > 0 and abs(sp / want - 1.0) < 0.003:
+            keep = o
+            break
+    for o in stops:
+        if keep and o["orderId"] == keep["orderId"]:
+            continue
+        bnc.fut_cancel(o["orderId"])
+        acts.append("撤销旧止损单 #%s（触发价 %s，已不匹配）"
+                    % (o["orderId"], o.get("stopPrice")))
+    if keep:
+        notes.append("止损单已在：触发价 %s（#%s）" % (keep.get("stopPrice"), keep["orderId"]))
+        return acts, notes
+
+    wt = b.get("stop_working_type") or "MARK_PRICE"
+    r = bnc.fut_stop_market("BUY", want_s, working_type=wt)
+    acts.append("挂止损单：买入平空 · 触发价 %s · 市价 · %s（#%s）"
+                % (want_s, wt, r.get("orderId")))
+    return acts, notes
+
+
 def _execute(cfg, bnc, target_dir, expo, price, bar_date, sig_label,
              live, force=False, max_rounds=3):
     """
@@ -915,6 +1009,30 @@ def _execute(cfg, bnc, target_dir, expo, price, bar_date, sig_label,
     if live and not force and last_live_bar == bar_date:
         M.log("      提示：%s 这根日线之前已经执行过一次（%s），本次做对账补齐。"
               % (bar_date, tst.get("last_live_at") or "—"))
+
+    def _sync_stop(snap):
+        """
+        仓位动作做完后再对齐止损单 —— 顺序不能反：先有仓位才有止损。
+        只有 auto_stop_order=true 才做，默认关闭（手动挂单的人不需要程序碰条件单）。
+        """
+        if not live or not to_float(cfg["binance"].get("auto_stop_order")):
+            return
+        try:
+            s_acts, s_notes = sync_stop_order(cfg, bnc, snap, price)
+        except Exception as e:
+            M.log("      ✘ 止损单对齐失败：%s（请手动到币安挂/撤条件单）" % e)
+            rounds.append({"round": "stop", "actions": [],
+                           "notes": ["止损单对齐失败：%s" % e]})
+            return
+        if s_acts or s_notes:
+            M.log("      ── 止损单 ──")
+            for x in s_acts:
+                M.log("      · " + x)
+            for x in s_notes:
+                M.log("      " + x)
+            rounds.append({"round": "stop",
+                           "actions": [{"text": x} for x in s_acts],
+                           "notes": s_notes})
 
     for rd in range(1, max_rounds + 1):
         snap = snapshot(bnc, price)
@@ -933,6 +1051,7 @@ def _execute(cfg, bnc, target_dir, expo, price, bar_date, sig_label,
             M.log("      ✔ 已对齐，本轮无需下单")
             rounds.append({"round": rd, "actions": [], "notes": notes})
             if rd == 1:
+                _sync_stop(snap)
                 return True, rounds, snap
             break
 
@@ -972,6 +1091,7 @@ def _execute(cfg, bnc, target_dir, expo, price, bar_date, sig_label,
 
     snap = snapshot(bnc, price)
     append_trade_log(log_rows)
+    _sync_stop(snap)
 
     if live:
         tst["last_live_bar"] = bar_date
@@ -1016,6 +1136,11 @@ def show_status(cfg, bnc, bar_date, sig_label, target_dir, expo, price):
                  snap["fut_lev"] or 0, snap["fut_margin"], snap["fut_liq"]))
     else:
         M.log("  合约 %-6s 无持仓" % bnc.symbol)
+    # 空头止损价：查看账户时也直接看得到，不用翻邮件
+    _ss = to_float(cfg["strategy"].get("short_stop"))
+    if _ss > 0 and snap["fut_amt"] < 0 and snap["fut_entry"] > 0:
+        M.log("  空头止损价 %.2f（成本价 × %.2f，逆行 %.0f%% 市价买回）"
+              % (snap["fut_entry"] * (1 + _ss), 1 + _ss, _ss * 100))
     M.log("  账户权益 %.2f USDT · 合约可用保证金 %.2f" % (snap["equity"], snap["available"]))
     M.log("")
     M.log("【策略目标】")

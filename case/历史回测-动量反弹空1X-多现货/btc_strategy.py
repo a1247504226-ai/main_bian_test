@@ -65,6 +65,8 @@ LEVERAGE = 1.0              # 合约杠杆（空头腿；名义仓位与杠杆�
 REGIME_MA = 50              # 只约束多头的趋势过滤：收盘价 > SMA(50) 才允许做多；0 = 关闭
 PRIMARY_SET = (10, 30)      # 双均线参数（快线, 慢线）
 ATR_N = 14                  # ATR 窗口（波动率目标的输入）
+SHORT_STOP = None           # 空头固定止损（None = 关闭；0.05 = 逆行 5% 平仓）
+LONG_STOP = None            # 多头固定止损（默认关闭，实测不划算，见使用说明）
 PARAM_SETS = [(8, 24), (10, 30), (12, 36), (15, 45), (20, 60)]
 DAY_MS = 86400000
 DATA_MAX_AGE_DAYS = 2.0     # 本地行情缓存最后一根超过这么多天，就自动重拉
@@ -119,7 +121,7 @@ def _apply_monitor_config():
     现在统一成：以 monitor_config.json 为唯一来源，回测跟着它走。
     """
     global VT, EXPOSURE_CAP, WARMUP, REGIME_MA, LEVERAGE, CAPITAL
-    global PRIMARY_SET, ATR_N, CFG_SOURCE
+    global PRIMARY_SET, ATR_N, CFG_SOURCE, SHORT_STOP, LONG_STOP
     if not os.path.exists(CFG_PATH):
         return
     try:
@@ -152,6 +154,19 @@ def _apply_monitor_config():
     CAPITAL = _cap if _cap > 0 else CAPITAL
     _lev = _f(b, "leverage", LEVERAGE)
     LEVERAGE = _lev if _lev > 0 else LEVERAGE
+    # 止损：0 或缺失 = 关闭；只有正数才生效（负数会变成「反着做」，必须挡掉）
+    def _stop(src, key, cur):
+        v = src.get(key)
+        if v is None:
+            return cur
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return cur
+        return v if v > 0 else None
+
+    SHORT_STOP = _stop(s, "short_stop", SHORT_STOP)
+    LONG_STOP = _stop(s, "long_stop", LONG_STOP)
     ps = s.get("primary_set")
     if isinstance(ps, (list, tuple)) and len(ps) == 2:
         try:
@@ -519,7 +534,15 @@ def _check_args(capital, L, atr_n, vt, exposure_cap, warmup):
 def backtest_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE, spot_fee=SPOT_FEE,
                     fut_fee=FUT_FEE, slip=SLIP, funding_d=FUNDING_D, sizing="vol",
                     vt=VT, exposure_cap=EXPOSURE_CAP, atr_n=ATR_N, warmup=WARMUP,
-                    cooldown_after_liq=0, allow_short=True):
+                    cooldown_after_liq=0, allow_short=True, short_stop=SHORT_STOP,
+                    long_stop=LONG_STOP, stop_reentry="immediate"):
+    """
+    short_stop / long_stop：固定百分比止损（默认 None = 不设，只用信号反转出场）。
+        short_stop=0.05 → 空头逆行 5% 平仓；long_stop=0.05 → 多头下跌 5% 平仓。
+    stop_reentry：止损后怎么再入场
+        "immediate"  = 下一根开盘按信号重新进场（止损基准随之重置，即滚动止损）
+        "wait_signal"= 等信号先翻转再进场（同一段行情只止损一次，更贴近手工交易）
+    """
     _check_args(capital, L, atr_n, vt, exposure_cap, warmup)
     n = len(bars)
     a = atr(bars, atr_n)
@@ -529,6 +552,7 @@ def backtest_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE, spot_fee=SPOT_FEE,
     liq_days = []
     short_adverse = 0.0
     block_until = -1
+    stopped_dir = 0            # 被止损平掉的方向，用于 stop_reentry="wait_signal"
 
     def expo_at(i):
         if sizing == "vol":
@@ -547,7 +571,8 @@ def backtest_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE, spot_fee=SPOT_FEE,
             eq += pnl
             leg = "fut"
         trades.append({"entry_i": entry_i, "exit_i": i, "dir": pos, "entry_px": entry_px,
-                       "exit_px": px, "pnl": pnl, "liq": reason == "liq", "leg": leg})
+                       "exit_px": px, "pnl": pnl, "liq": reason == "liq", "leg": leg,
+                       "why": reason})
         pos, units, entry_px, margin, fund_acc, entry_i = 0, 0.0, 0.0, 0.0, 0.0, -1
 
     def open_pos(i, px, direction, eq_ref):
@@ -574,6 +599,12 @@ def backtest_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE, spot_fee=SPOT_FEE,
             tgt = 0
         if i < block_until:
             tgt = 0
+        # 止损后「等信号翻转才再入场」：信号没变就一直待在场外，不再被同一段行情反复扫损
+        if stopped_dir and stop_reentry == "wait_signal":
+            if tgt == stopped_dir:
+                tgt = 0
+            else:
+                stopped_dir = 0
         prev_c = bars[i - 1]["close"]
         if pos > 0:
             eq_ref = eq + units * prev_c
@@ -603,6 +634,25 @@ def backtest_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE, spot_fee=SPOT_FEE,
                 liq_days.append(i)
                 block_until = i + cooldown_after_liq
                 pos, units, entry_px, margin, fund_acc, entry_i = 0, 0.0, 0.0, 0.0, 0.0, -1
+            elif short_stop:
+                # 空头固定止损（默认关闭）。触及即按止损价成交；开盘就跳空过止损价则按开盘价。
+                # 止损是市价单，必须和信号平仓一样计滑点（买回价格更高 = 更差）。
+                stop_px = entry_px * (1 + short_stop)
+                if o >= stop_px:
+                    close_pos(i, o * (1 + slip), "stop")
+                    stopped_dir = -1
+                elif h >= stop_px:
+                    close_pos(i, stop_px * (1 + slip), "stop")
+                    stopped_dir = -1
+        if pos > 0 and long_stop:
+            # 多头固定止损（现货，无爆仓风险，纯粹限制单笔亏损）。
+            stop_px = entry_px * (1 - long_stop)
+            if o <= stop_px:
+                close_pos(i, o * (1 - slip), "stop")
+                stopped_dir = 1
+            elif l <= stop_px:
+                close_pos(i, stop_px * (1 - slip), "stop")
+                stopped_dir = 1
         if pos < 0:
             fund_acc += pos * units * c * funding_d
         if pos > 0:
@@ -616,7 +666,13 @@ def backtest_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE, spot_fee=SPOT_FEE,
     st = stats(equity, trades)
     st["liq"] = len(liq_days)
     st["short_adverse"] = short_adverse
-    return {"equity": equity, "trades": trades, "stats": st}
+    # 期末仍未平的仓位：止损后会「当天重开」，成本价随之改变，按信号连续段反推会算错，
+    # 所以直接把引擎内部真实的 entry_i / entry_px 交出去。
+    open_pos = None
+    if pos != 0:
+        open_pos = {"entry_i": entry_i, "entry_px": entry_px, "dir": pos,
+                    "units": units, "margin": margin, "fund": fund_acc}
+    return {"equity": equity, "trades": trades, "stats": st, "open": open_pos}
 
 
 
@@ -630,11 +686,15 @@ def backtest_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE, spot_fee=SPOT_FEE,
 # ==============================================================================
 def audit_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE, spot_fee=SPOT_FEE,
                  fut_fee=FUT_FEE, slip=SLIP, funding_d=FUNDING_D, vt=VT,
-                 exposure_cap=EXPOSURE_CAP, atr_n=ATR_N, warmup=WARMUP):
+                 exposure_cap=EXPOSURE_CAP, atr_n=ATR_N, warmup=WARMUP,
+                 short_stop=SHORT_STOP, long_stop=LONG_STOP):
     """
     完全独立地重新实现一遍混合载体逻辑（不调用 backtest_hybrid），
     逐笔比对交易点与成交价，并比对权益曲线。
     回测最容易骗人的地方是偷看未来数据，肉眼审代码几乎发现不了 —— 只能靠独立重放。
+
+    止损也要在这里独立实现一遍：否则一开止损，主引擎和重放必然对不上，
+    而「对不上」会被误读成引擎有 bug。
     """
     _check_args(capital, L, atr_n, vt, exposure_cap, warmup)
     a = atr(bars, atr_n)
@@ -685,6 +745,21 @@ def audit_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE, spot_fee=SPOT_FEE,
             if hit:
                 eq -= margin
                 tr.append((ei, i, pos, epx, px))
+                pos, units, epx, margin, fund, ei = 0, 0.0, 0.0, 0.0, 0.0, -1
+            elif short_stop:
+                # 止损：先判开盘是否已跳空过止损价（那就按开盘价，更差），再判盘中最高
+                sp = epx * (1 + short_stop)
+                fp = o * (1 + slip) if o >= sp else (sp * (1 + slip) if h >= sp else None)
+                if fp is not None:
+                    eq = eq + units * (fp - epx) * pos - units * fp * fut_fee - fund
+                    tr.append((ei, i, pos, epx, fp))
+                    pos, units, epx, margin, fund, ei = 0, 0.0, 0.0, 0.0, 0.0, -1
+        if pos > 0 and long_stop:
+            sp = epx * (1 - long_stop)
+            fp = o * (1 - slip) if o <= sp else (sp * (1 - slip) if l <= sp else None)
+            if fp is not None:
+                eq = eq + units * fp * (1 - spot_fee)
+                tr.append((ei, i, pos, epx, fp))
                 pos, units, epx, margin, fund, ei = 0, 0.0, 0.0, 0.0, 0.0, -1
         if pos < 0:
             fund += pos * units * c * funding_d
@@ -1161,12 +1236,21 @@ def main():
 
     # ---------------- 7. 资金路径 ----------------
     log("【第 7 步】%.0f USDT 资金路径：固定本金 vs 滚仓" % CAPITAL)
+    # 引擎的逐笔 pnl 只扣了「平仓费」：现货开仓费扣了，合约开仓费是从权益里直接扣的、
+    # 没进 pnl。这里补上，否则「固定本金」会系统性高估（9 年 138 笔约 +0.2%），
+    # 也会和每日检测邮件里打印的数字对不上。
+    _a7 = atr(bars, ATR_N)
     fixed = CAPITAL
     for t in r["trades"]:
         j = t["entry_i"] - 1
         e_ref = eq[j] if (0 <= j < n and eq[j]) else CAPITAL
         if e_ref:
-            fixed += t["pnl"] * CAPITAL / e_ref
+            _p = t["pnl"]
+            if t.get("leg") == "fut" and 0 <= j < n:
+                _dv = _a7[j] / bars[j]["close"] if not math.isnan(_a7[j]) else 0.05
+                _ex = min(EXPOSURE_CAP, VT / _dv) if _dv > 0 else EXPOSURE_CAP
+                _p -= e_ref * _ex * FUT_FEE
+            fixed += _p * CAPITAL / e_ref
 
     # 当前持仓的浮动盈亏（固定本金口径），让这里的数字和每日检测邮件的
     # 「账户现值 = 本金 + 浮盈」完全对齐，避免两处对不上。
@@ -1203,7 +1287,7 @@ def main():
     hr("-")
     log("  两者都含当前持仓浮盈（%.2f U，固定本金口径），与每日检测邮件的「账户现值」同口径。" % cur_upnl)
     log("  单笔收益率完全相同，差别只在「赚到的钱要不要立刻滚进下一笔」。")
-    log("  滚仓收益高得多，但回撤与爆仓风险同步放大 —— 建议先按固定本金跑熟。")
+    log("  滚仓收益高得多，但回撤与亏损期的缩水同步放大 —— 扛得住回撤才用滚仓，否则固定本金。")
     write_csv("07_资金路径.csv",
               ["口径", "账户现值USDT", "倍数", "其中当前浮盈"],
               [["固定本金（每笔都按 %.0f U 开仓）" % CAPITAL, "%.2f" % (fixed + cur_upnl),
@@ -1214,6 +1298,8 @@ def main():
 
     # ---------------- 8. 无前视自检 ----------------
     log("【第 8 步】无前视自检（绕开引擎独立重放）")
+    log("  重放口径：%s" % ("含空头止损 %.0f%%（独立实现）" % (SHORT_STOP * 100)
+                          if SHORT_STOP else "无止损"))
     aeq, atr_tr = audit_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE)
     max_rel, diff_i = 0.0, -1
     for i in range(n):
