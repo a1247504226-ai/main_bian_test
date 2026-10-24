@@ -613,7 +613,7 @@ def target_of(cfg, bars, sig):
 # ==============================================================================
 # 3. 生成动作计划（不执行）
 # ==============================================================================
-def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now):
+def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now, resize=None):
     """
     对比「目标」和「实际」，返回结构化动作列表。
     每条：{kind, market, side, qty(float), qty_str, notional, text}
@@ -621,6 +621,13 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now):
     关键点：现货账户和 U 本位合约账户的 USDT 是两个独立账户，必须显式划转。
     所以这里用「预演余额」（proj_spot_usdt / proj_fut_avail）逐条推演，
     平仓所得、卖出所得都算进去，避免「明明有钱却说余额不足」。
+
+    resize：持仓期间要不要按当日波动率调仓。
+        None → 读 config 的 binance.resize_on_drift（默认 false）
+        false（默认）= 只在进场那天定名义，持有期间**不动**（= 回测口径）
+        true  = 每天把名义对齐到「当日权益 × 当日敞口」（旧行为）
+        ⚠ 实测每日再平衡 9 年终值 55.97×，而回测（持仓不动）是 162.62×，差 −65.6%，
+          10 年里 9 年负贡献。所以默认必须是 false，否则实盘跑出来的不是回测的那个策略。
     """
     b = cfg["binance"]
     price = snap["price"]
@@ -628,6 +635,8 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now):
     min_notional_cfg = float(b.get("min_notional_usdt", 20.0))
     fee_buffer = float(b.get("fee_buffer", 0.002))
     lev = max(1, int(to_float(b.get("leverage"), 1)))   # 0 或空会除零，兜到 1
+    if resize is None:
+        resize = bool(to_float(b.get("resize_on_drift")))
 
     acts, notes = [], []
     equity = snap["equity"]
@@ -652,8 +661,29 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now):
     sf = M.short_size_factor(lev)
     target_fut_qty = (target_notional * sf / price) if target_dir < 0 else 0.0
 
-    notes.append("账户权益 %.2f USDT × 敞口 %.2f× = 目标名义 %.2f USDT"
-                 % (equity, expo, target_notional))
+    # ---- 持仓期间不调仓（回测口径）----
+    # 回测引擎只在「进场那根」按 权益×敞口 定名义，之后整段持有不再动。
+    # 如果这里每天按当日敞口重算目标，就等于给策略偷偷加了一个「每日再平衡」，
+    # 实测会把 162.62× 打成 55.97×。所以只要同方向已经有仓位，就把目标设成「现有仓位」，
+    # 让下面的差额逻辑自然判定「已对齐」—— 只保留方向翻转/清仓的判断。
+    if not resize and target_dir != 0:
+        if target_dir > 0 and snap["spot_qty"] > 0:
+            target_spot_qty = snap["spot_qty"]
+            target_notional = target_spot_qty * price
+        elif target_dir < 0 and snap["fut_amt"] < 0:
+            target_fut_qty = abs(snap["fut_amt"])
+            target_notional = target_fut_qty * price
+
+    if resize:
+        notes.append("账户权益 %.2f USDT × 敞口 %.2f× = 目标名义 %.2f USDT"
+                     % (equity, expo, target_notional))
+    elif target_dir != 0 and (snap["spot_qty"] > 0 or snap["fut_amt"] < 0):
+        notes.append("持仓期间不调仓：沿用进场时的名义 %.2f USDT"
+                     "（今天若重新进场会用 权益 %.2f × 敞口 %.2f× = %.2f USDT）"
+                     % (target_notional, equity, expo, equity * expo))
+    else:
+        notes.append("账户权益 %.2f USDT × 敞口 %.2f× = 目标名义 %.2f USDT（今天进场，按此定仓）"
+                     % (equity, expo, target_notional))
 
     # 预演余额：平仓/卖出所得都会改变可用资金
     proj_spot_usdt = snap["usdt_free"]
@@ -779,7 +809,10 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now):
             # 开空需要合约账户里有保证金：不够就从现货划转。
             # 按「实际要开的量」算（target_fut_qty 已含 1% 保证金缓冲），
             # 不能按 target_notional 算 —— 1× 下那会把现货余额整锅搬走，还多搬。
-            need_margin = (target_fut_qty * price) / lev / (1.0 - fee_buffer)
+            # ⚠ 先按 stepSize 取整再算，否则会把「取整后被砍掉的那一截」也划过去，
+            #   白白留在合约账户里（1000 U 账户开 0.002 曾划 248 却只用到 200）。
+            _want_round = float(fmt_qty(target_fut_qty, r_fut["step"])) or target_fut_qty
+            need_margin = (_want_round * price) / lev / (1.0 - fee_buffer)
             if proj_fut_avail < need_margin and proj_spot_usdt > 0:
                 move = min(need_margin - proj_fut_avail, proj_spot_usdt)
                 if move >= min_move:
@@ -907,7 +940,7 @@ def run_action(bnc, act, cfg):
 
 
 def execute(cfg, bnc, target_dir, expo, price, bar_date, sig_label,
-            live, force=False, max_rounds=3, lock=True):
+            live, force=False, max_rounds=3, lock=True, resize=None):
     """对外入口：真实下单时先抢机器级锁，防止「定时任务 + 手动双击」并发下双倍单。
 
     btc_trade 自己的 main() 已经先抢了锁，那里传 lock=False；
@@ -916,13 +949,13 @@ def execute(cfg, bnc, target_dir, expo, price, bar_date, sig_label,
     """
     if not (live and lock):
         return _execute(cfg, bnc, target_dir, expo, price, bar_date, sig_label,
-                        live, force=force, max_rounds=max_rounds)
+                        live, force=force, max_rounds=max_rounds, resize=resize)
     got, owner = claim_lock()
     if not got:
         raise TradeLockBusy(owner)
     try:
         return _execute(cfg, bnc, target_dir, expo, price, bar_date, sig_label,
-                        live, force=force, max_rounds=max_rounds)
+                        live, force=force, max_rounds=max_rounds, resize=resize)
     finally:
         release_lock()
 
@@ -996,7 +1029,7 @@ def sync_stop_order(cfg, bnc, snap, price):
 
 
 def _execute(cfg, bnc, target_dir, expo, price, bar_date, sig_label,
-             live, force=False, max_rounds=3):
+             live, force=False, max_rounds=3, resize=None):
     """
     对账 → 下单 → 再对账，最多 max_rounds 轮，直到没有动作。
     返回 (ok, rounds_detail, final_snapshot)
@@ -1036,7 +1069,8 @@ def _execute(cfg, bnc, target_dir, expo, price, bar_date, sig_label,
 
     for rd in range(1, max_rounds + 1):
         snap = snapshot(bnc, price)
-        acts, notes = build_actions(cfg, bnc, snap, target_dir, expo, sig_label)
+        acts, notes = build_actions(cfg, bnc, snap, target_dir, expo, sig_label,
+                                    resize=resize)
 
         M.log("")
         M.log("      ── 第 %d 轮对账 ──" % rd)
@@ -1109,13 +1143,13 @@ def _execute(cfg, bnc, target_dir, expo, price, bar_date, sig_label,
     return converged, rounds, snap
 
 
-def preview(cfg, bnc, target_dir, expo, price, sig_label):
+def preview(cfg, bnc, target_dir, expo, price, sig_label, resize=None):
     """
     只读预览：读账户 → 算出「该做什么」，不下单。
     给 btc_monitor 的邮件「执行计划」板块复用，保证**邮件里写的 = 实际会做的**。
     """
     snap = snapshot(bnc, price)
-    acts, notes = build_actions(cfg, bnc, snap, target_dir, expo, sig_label)
+    acts, notes = build_actions(cfg, bnc, snap, target_dir, expo, sig_label, resize=resize)
     return snap, acts, notes
 
 
@@ -1145,8 +1179,13 @@ def show_status(cfg, bnc, bar_date, sig_label, target_dir, expo, price):
     M.log("")
     M.log("【策略目标】")
     M.log("  最新已收盘日线 %s · 收盘 %.2f" % (bar_date, price))
-    M.log("  信号：%s · 敞口 %.2f× → 目标名义 %.2f USDT"
+    M.log("  信号：%s · 敞口 %.2f× → 今天若进场，名义 %.2f USDT"
           % (sig_label, expo, snap["equity"] * expo))
+    _resize = bool(to_float(cfg["binance"].get("resize_on_drift")))
+    _holding = (snap["spot_qty"] > 0) or (snap["fut_amt"] != 0)
+    if _holding and not _resize:
+        M.log("  持仓期间不调仓：沿用进场时的名义（回测口径）。"
+              "要让每天都对齐敞口，把 binance.resize_on_drift 改成 true。")
     if target_dir > 0:
         M.log("  目标：现货持有 %.6f %s（当前 %.6f）"
               % (snap["equity"] * expo / price, bnc.base, snap["spot_qty"]))

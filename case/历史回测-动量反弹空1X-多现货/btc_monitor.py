@@ -113,6 +113,10 @@ DEFAULT_CFG = {
         "testnet_futures_base": "https://testnet.binancefuture.com",
         "symbol": "BTCUSDT", "leverage": 1, "margin_type": "ISOLATED",
         "min_notional_usdt": 20.0,
+        # 持仓期间要不要按当日波动率调仓。默认 False = 只在进场那天定名义，
+        # 之后整段持有不动（= 回测口径）。开成 True 等于给策略加「每日再平衡」，
+        # 实测 9 年终值 162.62× → 55.97×，不要开。
+        "resize_on_drift": False,
         # 代理：留空 = 直连（和行情下载一致）。需要科学上网才能连币安的机器上
         # 填 http://127.0.0.1:7890 这类本地代理地址。
         "proxy": "",
@@ -123,6 +127,9 @@ DEFAULT_CFG = {
         "warmup": 60, "cache_max_age_hours": 1,
         "base_capital_usdt": 1000.0,
         "primary_set": [10, 30],  # 唯一的参数组：双均线 EMA 10/30
+        # 空头逆行 5% 市价止损（成本价 × 1.05 买回）。填 0 关闭。
+        # 必须和交付口径一致：少了它，全新安装会静默跑「无止损」的另一套策略。
+        "short_stop": 0.05,
         # True = 当前这笔不计入账户（用户没参与），等下一次仓位变化再按本金开始计算
         "participate_from_next_trade": False,
         "always_mail": True, "mail_only_on_change": False,
@@ -177,7 +184,12 @@ def load_state():
     if os.path.exists(STATE_PATH):
         try:
             with open(STATE_PATH, encoding="utf-8") as f:
-                return json.load(f)
+                st = json.load(f)
+            if not isinstance(st, dict):
+                # 顶层不是对象（被人手改成数组/字符串/数字）→ 后面 state.get 会
+                # AttributeError 裸崩。按损坏处理，至少能说清楚。
+                raise ValueError("顶层不是 JSON 对象（是 %s）" % type(st).__name__)
+            return st
         except Exception as e:
             # 不能静默重置：这里面存着「是否已开始参与」「这根日线发过信没有」。
             # 悄悄重来会让账户退回「尚未参与」，用户会以为程序算错了。
@@ -512,17 +524,25 @@ def derive_position(bars, sig, cfg, tag, pending=False, next_bar=None, since=Non
         "recent": recent[-3:],
         "just_closed": just_closed,
         "ref_expo": 0.0,
+        "expo_now": 0.0,
         "stop_px": None, "stop_pct": 0.0, "short_stop": 0.0, "entry_i": None,
     }
+
+    # 「今天要下单」该用的敞口 = 用最后一根已收盘 K 线的 ATR 算的那个，
+    # 也就是引擎在第 n 根执行时的 expo_at(n)（= a[n-1]/close[n-1]）。
+    # ⚠ 以前这里写的是 exposure_at(bars, cfg, n - 1)，取的是倒数第二根 ATR（差一天），
+    #   和 btc_trade.target_of() 用的 n 不是同一个值 —— 波动率一放大，邮件与下单量就对不上
+    #   （实测 2021-05-20 差 36%、2022-06-20 差 55%）。务必保持 n。
+    try:
+        out["expo_now"] = exposure_at(bars, cfg, n)[0]
+    except Exception:
+        out["expo_now"] = 0.0
 
     if cur_sig == 0:
         # 空仓时也给一个「下一笔进场时大概多少倍」的参考值，
         # 否则邮件会写「敞口 0.00× 进场」，看着像永远不进场。
         out["short_stop"] = float(st.get("short_stop") or 0.0)
-        try:
-            out["ref_expo"] = exposure_at(bars, cfg, n - 1)[0]
-        except Exception:
-            out["ref_expo"] = 0.0
+        out["ref_expo"] = out["expo_now"]
         return out
 
     # ---- 当前持仓：优先用引擎里真实的那笔（止损后当天重开，成本价会变）----
@@ -665,8 +685,8 @@ def build_order_plan(pos, cfg, binance, price):
         else:
             actions.append("本轮不参与：当前这笔（%s 开的%s）你没有实际持仓，不计入账户。"
                            % (pos.get("entry_date") or "—", sig_text(sig)))
-            actions.append("等信号翻转后，按本金 %.0f USDT × 敞口 %.2f× 进场。"
-                           % (pos["base"], pos["expo"] or 0.0))
+            actions.append("等信号翻转后，按本金 %.0f USDT × 届时敞口（现在算约 %.2f×）进场。"
+                           % (pos["base"], pos.get("expo_now") or pos["expo"] or 0.0))
         if not binance.has_keys():
             notes.append("未配置币安 API Key → 跳过仓位核对，只给目标方向。")
         return actions, notes
@@ -690,7 +710,13 @@ def build_order_plan(pos, cfg, binance, price):
 
     import btc_trade as T
     try:
-        snap, acts, pnotes = T.preview(cfg, binance, sig, pos["expo"] or 0.0,
+        # ⚠ 这里必须传「今天该用的敞口」expo_now，不能传 pos["expo"]。
+        #   pos["expo"] 是**这笔开仓时**的敞口（用来算当前持仓名义/浮盈），
+        #   而预览「今天要下多少单」应该和 btc_trade.target_of() 一致（用最新 ATR）。
+        #   以前传 pos["expo"] → 空仓时是 0、持仓中途波动率变了也不更新，
+        #   导致邮件「执行计划」写的数量和一键下单.bat 实际算的不一样。
+        snap, acts, pnotes = T.preview(cfg, binance, sig,
+                                       pos.get("expo_now") or pos["expo"] or 0.0,
                                        price, sig_text(sig))
     except Exception as e:
         notes.append("读取账户失败：%s → 跳过下单" % e)
@@ -728,7 +754,9 @@ def execute_plan(pos, cfg, binance, price, live, bar_date=None, sig_label=None):
         sig_label = sig_text(pos["dir"])
 
     try:
-        ok, rounds, snap = T.execute(cfg, binance, pos["dir"], pos["expo"] or 0.0,
+        # 同 build_order_plan：敞口用「今天该用的」expo_now，和 btc_trade.main() 一致
+        ok, rounds, snap = T.execute(cfg, binance, pos["dir"],
+                                     pos.get("expo_now") or pos["expo"] or 0.0,
                                      price, bar_date, sig_label, live=True)
         out = []
         for rd in rounds:
@@ -1190,7 +1218,13 @@ def send_mail(cfg, subject, html):
     em = cfg["email"]
     if not em["enabled"]:
         return False, "邮件未启用（email.enabled = false）"
-    if not em["sender"] or not em["password"] or not em["to"]:
+    # to 偶尔会被手改成一个字符串而不是列表：", ".join("a@b.com") 会拆成
+    # "a, @, b, ., c, o, m"，收件人全是乱字符号。这里统一规整成列表。
+    to = em["to"]
+    if isinstance(to, str):
+        to = [x.strip() for x in to.replace(";", ",").split(",") if x.strip()]
+        em["to"] = to
+    if not em["sender"] or not em["password"] or not to:
         return False, "邮件配置不完整（缺少 sender / password / to）"
 
     msg = MIMEText(html, "html", "utf-8")
@@ -1449,7 +1483,19 @@ def main():
         except IndexError:
             html_out = os.path.join(HERE, "monitor_mail_preview.html")
 
-    cfg = load_config()
+    try:
+        cfg = load_config()
+    except Exception as e:
+        # 配置文件被手改坏（多了逗号、引号没闭合）时 json.load 会抛异常。
+        # 不接住的话用户只看到一段 traceback，而且邮件也不会发 —— 静默失联。
+        log("=" * 100)
+        log(" ✘ 配置文件读不出来：%s" % e)
+        log("   %s" % CONFIG_PATH)
+        log("   常见原因：JSON 语法错（多了/少了逗号、引号没闭合、末尾多一个逗号）。")
+        log("   可以用 https://json.cn 之类的在线校验器定位错行；修好后重跑即可。")
+        log("   （不要直接删掉它 —— 会丢掉的 API Key 和邮件设置，且默认配置与当前策略不完全一致）")
+        log("=" * 100)
+        return 2
     st = cfg["strategy"]
     warnings = []
 
@@ -1475,8 +1521,18 @@ def main():
 
     # ---- 数据 ----
     log("[1/6] 拉取行情（只用当日已收盘的 K 线）")
-    raw = load_bars(st["symbol"], force=refresh,
-                    max_age_h=float(st.get("cache_max_age_hours", 1)))
+    try:
+        raw = load_bars(st["symbol"], force=refresh,
+                        max_age_h=float(st.get("cache_max_age_hours", 1)))
+    except Exception as e:
+        # 只在「本地没有缓存 + 连不上币安」时发生。接住它，把话讲清楚：
+        # 否则用户看到一段 traceback，而且邮件也不会发。
+        log("=" * 100)
+        log(" ✘ 行情数据拿不到：%s" % e)
+        log("   本地没有可用缓存（data/BTCUSDT_1d.csv），网上也拉不下来。")
+        log("   等网络恢复后重跑，或加 --refresh 强制重新下载。")
+        log("=" * 100)
+        return 3
 
     # 本机时钟校准：closed_bars 用「本机现在」判断哪根已收盘。
     # 时钟要是快了几个小时，就会把还在交易的那根当成已收盘 —— 用半成品的
@@ -1792,7 +1848,16 @@ if __name__ == "__main__":
         sys.exit(main())
     except Exception:
         err = traceback.format_exc()
-        log("运行出错：")
+        log("")
+        log("=" * 100)
+        log(" ✘ 本次运行异常终止（邮件不会发出）。下面是原因：")
+        log("   常见于：配置文件被改坏、行情数据异常、依赖的 CSV 损坏。")
+        log("   先看这段日志的最后几行定位；改过 monitor_config.json 的话优先查它。")
+        log("-" * 100)
+        # ⚠ 必须快照：log() 会往 LOG_BUF 追加，直接遍历会把刚加的又遍历一遍 → 死循环
+        for ln in list(LOG_BUF):
+            log(ln)
+        log("-" * 100)
         log(err)
         try:
             with open(LOG_PATH, "a", encoding="utf-8") as f:
