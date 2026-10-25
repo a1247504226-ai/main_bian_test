@@ -547,21 +547,32 @@ def derive_position(bars, sig, cfg, tag, pending=False, next_bar=None, since=Non
 
     # ---- 当前持仓：优先用引擎里真实的那笔（止损后当天重开，成本价会变）----
     op = res.get("open")
+    entry_date = None
+    entry_today = False          # 是否「今天建仓」（信号在最后一根已收盘 K 线才确认）
     if op and op["dir"] == cur_sig and 0 <= op["entry_i"] < n:
         entry_i = op["entry_i"]
         entry_px = op["entry_px"]          # 引擎里已含滑点
+        entry_date = fdate(bars[entry_i]["t"])
     else:
-        # 回退：按信号连续段反推（老逻辑，正常情况下不会走到）
-        i = n - 1
-        while i > 0 and sig[i - 1] == cur_sig:
-            i -= 1
-        entry_i = min(i + 1, n - 1)
-        entry_px = bars[entry_i]["open"]
-        entry_px = entry_px * (1 + E.SLIP) if cur_sig > 0 else entry_px * (1 - E.SLIP)
+        # 回退：引擎期末状态与当前信号不一致（期末空仓 / 持仓方向与信号相反）——
+        # 这一笔就是「今天」这根 K 线开盘才成交的，成本价 = 今天的开盘价（含滑点）。
+        # 覆盖两种情况：① 信号在最后一根已收盘 K 线才确认，今天建仓；
+        #             ② 空头在最后一根被止损打掉、信号没变，今天按信号重进。
+        # ⚠ 老代码按「信号连续段起点」反推建仓日：情况①会算成昨天的开盘价
+        #   （实测 2026-10-25：邮件 81148.85 vs 应 80847.70，止损价跟着错 316 点）；
+        #   情况②更糟——会翻出历史上信号段起点那根的价格，成本价/开户日期全错。
+        nb_px = (next_bar or {}).get("open") or cur_px
+        entry_px = nb_px * (1 + E.SLIP) if cur_sig > 0 else nb_px * (1 - E.SLIP)
+        entry_date = fdate(next_bar["t"]) if next_bar else fdate(bars[-1]["t"] + E.DAY_MS)
+        entry_i = n - 1          # 仅供下方索引；今天建仓的权益/敞口按 n 取（见下方特判）
+        entry_today = True
 
-    expo, _ = exposure_at(bars, cfg, entry_i)
+    # 进场那天定名义：持仓中用「建仓那根」的敞口；今天建仓则用最后一根 ATR
+    # （= 引擎 expo_at(n)，和下单模块 target_of / 邮件 expo_now 同一个值）。
+    expo, _ = (exposure_at(bars, cfg, n) if entry_today
+               else exposure_at(bars, cfg, entry_i))
 
-    days = n - 1 - entry_i
+    days = max(n - 1 - entry_i, 0) if not entry_today else 0
 
     def _upnl(q, s):
         """净浮盈：现在平掉能拿到多少（扣手续费 / 资金费）"""
@@ -579,14 +590,15 @@ def derive_position(bars, sig, cfg, tag, pending=False, next_bar=None, since=Non
     upnl = _upnl(qty, cur_sig)
 
     # 全历史滚仓参考（2017 年起一路滚下来的那套，仅作「回测全程」对照）
-    j = entry_i - 1
+    # 今天建仓 → 引擎在第 n 根执行，可用权益 = eq[n-1]（最后一根收盘时的净值）
+    j = (n - 1) if entry_today else (entry_i - 1)
     eq_ref = eq[j] if (0 <= j < n and eq[j]) else E.CAPITAL
     comp_notional = eq_ref * expo * comp_scale
     comp_qty = comp_notional / entry_px if entry_px > 0 else 0.0
     comp_upnl = _upnl(comp_qty, cur_sig)
 
     out.update({
-        "entry_date": fdate(bars[entry_i]["t"]), "entry_px": entry_px,
+        "entry_date": entry_date, "entry_px": entry_px,
         "entry_i": entry_i,
         "qty": qty, "notional": notional, "expo": expo,
         "mkt_value": qty * cur_px, "upnl": upnl,
@@ -1117,7 +1129,7 @@ table{width:100%%;border-collapse:collapse;table-layout:fixed}
   <div style="color:%(muted)s;font-size:12.5px;margin-top:6px;line-height:1.6">
     标的 %(sym)s · 数据截至 <b>%(bar)s</b> 收盘（%(close).2f USDT）<br>
     <b>本金 %(base).0f USDT 起</b>（之后按权益滚仓，参与前的回测盈亏不计入）· 当前 <b>%(now_mult).2f 倍</b><br>
-    %(rule)s · 生成时间 %(gen)s</div>
+    %(rule)s · 生成时间 %(gen)s · 代码版本 %(ver)s</div>
 </div>
 
 <div class="card">
@@ -1166,6 +1178,9 @@ table{width:100%%;border-collapse:collapse;table-layout:fixed}
 </div></body></html>""" % {
         "banner": banner, "muted": C_MUTED, "sym": sym,
         "bar": res["bar_date"], "close": res["close"], "gen": fdt(),
+        # 代码版本 = 本文件的最后修改时间：换机器/换副本后一眼能看出
+        # 这封邮件是哪个版本生成的（多台机器跑同一策略时分不清就会扯皮）
+        "ver": time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(__file__))),
         "pending_note": (
             ("<b>⚠ 当前这笔你还没有参与</b>（%s 开的%s），所以它的浮盈<b>不计入</b>账户现值，"
              "账户就是本金 <b>%.0f USDT</b>；等信号翻转后按本金进场，从那一笔开始计入，"
