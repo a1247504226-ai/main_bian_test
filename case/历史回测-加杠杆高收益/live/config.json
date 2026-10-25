@@ -10,6 +10,7 @@
   "cooldown_bars": 24,
   "fee": 0.0005,
   "slip": 0.0003,
+  "daily_email_hour": 8,
   "email": {
     "enabled": true,
     "sender": "a1247504226@163.com",

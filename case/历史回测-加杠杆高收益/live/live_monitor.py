@@ -33,9 +33,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CFG_PATH = os.path.join(HERE, "config.json")
 STATE_PATH = os.path.join(HERE, "state.json")
 LOG_PATH = os.path.join(HERE, "monitor.log")
+RECENT_PATH = os.path.join(HERE, "recent_trades.json")
 CST = datetime.timezone(datetime.timedelta(hours=8))
 
-BINANCE = ["https://api.binance.com", "https://data-api.binance.vision",
+# data-api.binance.vision 是币安官方公开行情镜像，通常比 api.binance.com 更稳，放第一位
+BINANCE = ["https://data-api.binance.vision", "https://api.binance.com",
            "https://api1.binance.com", "https://api2.binance.com"]
 MS = {"1h": 3600_000, "4h": 4 * 3600_000, "1d": 86400_000}
 
@@ -67,7 +69,39 @@ def load_state():
             pass
     return {"mode": "flat", "entry_price": 0.0, "entry_time": 0,
             "stop_price": 0.0, "cooldown_until": 0, "equity": 0.0,
-            "trades": 0, "last_email": 0}
+            "trades": 0, "last_email": 0, "trade_log": []}
+
+
+def _seed_trade_log():
+    """首次运行时用 recent_trades.json（回测最近几笔）作为交易记录种子。"""
+    try:
+        with io.open(RECENT_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return []
+
+
+def _log_close(s, dir_, entry_px, entry_t, exit_px, exit_t, why, ret_pct):
+    """把一笔已平仓交易记入 trade_log（保留最近 20 笔）。"""
+    log = s.setdefault("trade_log", [])
+    log.append({"dir": dir_, "entry_px": entry_px, "entry_t": entry_t,
+                "exit_px": exit_px, "exit_t": exit_t, "why": why, "ret_pct": ret_pct})
+    if len(log) > 20:
+        del log[:-20]
+
+
+def _action_tag(s, want):
+    """标题用的动作标签：需开空/需开多/需平仓/无需操作·继续持有/无需操作·空仓观望。"""
+    mode = s.get("mode", "flat")
+    if mode in ("long", "short") and want == mode:
+        return "无需操作·继续持有"
+    if mode in ("long", "short") and want != mode:
+        return "需平仓"
+    if mode == "flat" and want == "long":
+        return "需开多"
+    if mode == "flat" and want == "short":
+        return "需开空"
+    return "无需操作·空仓观望"
 
 
 def save_state(s):
@@ -244,11 +278,12 @@ def send_email(cfg, subject, body, html=False):
         try:
             if use_ssl:
                 ctx = ssl.create_default_context()
-                with smtplib.SMTP_SSL(server, port, timeout=25, context=ctx) as s:
+                with smtplib.SMTP_SSL(server, port, timeout=25, context=ctx,
+                                      local_hostname="localhost") as s:
                     s.login(sender, pwd)
                     s.sendmail(sender, recipients, msg.encode("utf-8"))
             else:
-                with smtplib.SMTP(server, port, timeout=25) as s:
+                with smtplib.SMTP(server, port, timeout=25, local_hostname="localhost") as s:
                     s.starttls()
                     s.login(sender, pwd)
                     s.sendmail(sender, recipients, msg.encode("utf-8"))
@@ -262,6 +297,22 @@ def send_email(cfg, subject, body, html=False):
 
 def fmt(v, d=2):
     return f"{v:,.{d}f}"
+
+
+def _today_action(s, want, price, snap, cfg):
+    """给出一句话「今日操作」建议。"""
+    mode = s.get("mode", "flat")
+    st = {"long": "做多", "short": "做空", "flat": "空仓"}
+    if mode in ("long", "short") and want == mode:
+        return f"继续持有{st[mode]}，止损 {fmt(s.get('stop_price', 0))}"
+    if mode in ("long", "short") and want != mode:
+        return f"平{st[mode]}（趋势反转），转为{st.get(want, '空仓')}"
+    if mode == "flat" and want in ("long", "short"):
+        d = 1 if want == "long" else -1
+        atr = snap.get("atr") or 0.0
+        stop = price - d * float(cfg.get("stop_atr", 8.0)) * atr
+        return f"开{st[want]}：入场≈{fmt(price)}，止损≈{fmt(stop)}"
+    return "空仓观望，暂无信号"
 
 
 def _build_email_html(now, price, snap, s, want, lev, eq, events, cfg):
@@ -284,6 +335,11 @@ def _build_email_html(now, price, snap, s, want, lev, eq, events, cfg):
     ]
     if s.get("stop_price"):
         summary.append(("止损价", f"{fmt(s['stop_price'])}（距现价 {abs(price / s['stop_price'] - 1) * 100:.2f}%）"))
+    elif s.get("mode", "flat") == "flat" and want in ("long", "short") and snap.get("atr"):
+        # 空仓但有信号：直接给出「若按此方向开仓」的入场价与止损价
+        _d = 1 if want == "long" else -1
+        _stop = price - _d * float(cfg.get("stop_atr", 8.0)) * snap["atr"]
+        summary.append((f"待开仓（{_st(want)}）", f"入场≈{fmt(price)}，止损≈{fmt(_stop)}"))
     if s.get("cooldown_until", 0) > now:
         left = (s["cooldown_until"] - now) / MS[snap["st_iv"]]
         summary.append(("冷却中", f"还剩 {left:.0f} 根 {snap['st_iv']}"))
@@ -304,10 +360,36 @@ def _build_email_html(now, price, snap, s, want, lev, eq, events, cfg):
                     f"<td style='{tdr};color:{color}'>{ret_txt}</td>"
                     f"<td style='{tdr}'>{fmt(e)}</td></tr>")
 
+    # 最近 3 笔交易（trade_log 末 3 笔，倒序）
+    log = s.get("trade_log") or []
+    recent_html = ""
+    if log:
+        rrows = ""
+        for t in list(reversed(log[-3:])):
+            d = "多" if t.get("dir") in ("long", 1) else "空"
+            rp = float(t.get("ret_pct", 0.0))
+            rc = "#c0392b" if rp >= 0 else "#1e8449"
+            et = datetime.datetime.fromtimestamp(t["entry_t"] / 1000, CST).strftime("%m-%d %H:%M") if t.get("entry_t") else "—"
+            xt = datetime.datetime.fromtimestamp(t["exit_t"] / 1000, CST).strftime("%m-%d %H:%M") if t.get("exit_t") else "—"
+            rrows += (f"<tr><td style='{td}'>{d}</td><td style='{td}'>{et}</td>"
+                      f"<td style='{tdr}'>{fmt(t.get('entry_px', 0))}</td>"
+                      f"<td style='{td}'>{xt}</td><td style='{tdr}'>{fmt(t.get('exit_px', 0))}</td>"
+                      f"<td style='{td}'>{t.get('why', '')}</td>"
+                      f"<td style='{tdr};color:{rc}'>{rp:+.2f}%</td></tr>")
+        recent_html = (
+            "<h4 style='margin:10px 0 6px'>最近 3 笔交易</h4>"
+            "<table style='border-collapse:collapse;font-size:13px'>"
+            f"<tr><th style='{th}'>方向</th><th style='{th}'>入场时间</th>"
+            f"<th style='{th};text-align:right'>入场价</th>"
+            f"<th style='{th}'>出场时间</th><th style='{th};text-align:right'>出场价</th>"
+            f"<th style='{th}'>原因</th><th style='{th};text-align:right'>收益</th></tr>{rrows}</table>")
+
     return (
         "<div style=\"font-family:'Microsoft YaHei',Arial,sans-serif;color:#222;font-size:13px\">"
-        "<h3 style='margin:0 0 10px'>BTC 趋势策略 · 信号通知</h3>"
+        f"<h3 style='margin:0 0 10px'>BTC 趋势策略 · 信号通知（{lev:g}x 合约）</h3>"
+        f"<div style='background:#eef7ff;border-left:4px solid #0b5fff;padding:8px 12px;margin-bottom:12px;font-size:14px'><b>今日操作：</b>{_today_action(s, want, price, snap, cfg)}</div>"
         f"<table style='border-collapse:collapse;font-size:13px;margin-bottom:14px'>{sum_html}</table>"
+        f"{recent_html}"
         "<h4 style='margin:10px 0 6px'>本次动作</h4>"
         "<table style='border-collapse:collapse;font-size:13px'>"
         f"<tr><th style='{th}'>动作</th><th style='{th}'>方向</th>"
@@ -376,13 +458,22 @@ def step(cfg, force_email=False, provider=None, price_provider=None):
     s = load_state()
     if not s.get("equity"):
         s["equity"] = float(cfg.get("initial_equity", 1000))
+    if not s.get("trade_log"):
+        s["trade_log"] = _seed_trade_log()
     sym = cfg.get("symbol", "BTCUSDT")
     st_iv = cfg.get("signal_timeframe", "1h")
+
+    # ---- 每日定时邮件：到达 daily_email_hour 点（默认 8 点，任务在 :02 跑）时，
+    #      无论有没有信号都发一封「今日操作」；last_daily 保证一天只发一次 ----
+    _now_local = datetime.datetime.now()
+    _daily_hour = int(cfg.get("daily_email_hour", 8))
+    _today = _now_local.strftime("%Y-%m-%d")
+    is_daily = (_now_local.hour == _daily_hour) and (s.get("last_daily") != _today)
 
     # ---- 快速路径：没有新收盘的 1h K 线、且当前空仓/无待执行动作 -> 直接返回 ----
     # 这样即使计划任务每 1~2 分钟跑一次，也只在「小时线收盘后」才真正干活，
     # 不会浪费请求；有持仓时仍然每轮检查止损。
-    if not force_email and provider is None:
+    if not force_email and not is_daily and provider is None:
         try:
             probe = klines(sym, st_iv, 2, provider=provider)
             last_closed = probe[-1]["t"]
@@ -435,6 +526,8 @@ def step(cfg, force_email=False, provider=None, price_provider=None):
             ret = d * (px / s["entry_price"] - 1.0) * lev - cost * lev
             eq *= (1 + ret)
             events.append(("TREND", mode, px, ret, eq))
+            _log_close(s, mode, s.get("entry_price", 0.0), s.get("entry_time", 0),
+                       px, now, "趋势失效", ret * 100)
             s.update({"mode": "flat", "entry_price": 0.0, "stop_price": 0.0,
                       "cooldown_until": now + cd_ms})
             mode = "flat"
@@ -471,6 +564,8 @@ def step(cfg, force_email=False, provider=None, price_provider=None):
             ret = d * (fill / s["entry_price"] - 1.0) * lev - cost * lev
             eq *= (1 + ret)
             events.append(("STOP", mode, fill, ret, eq))
+            _log_close(s, mode, s.get("entry_price", 0.0), s.get("entry_time", 0),
+                       fill, now, "止损", ret * 100)
             s.update({"mode": "flat", "cooldown_until": now + cd_ms,
                       "entry_price": 0.0, "stop_price": 0.0})
             mode = "flat"
@@ -491,18 +586,23 @@ def step(cfg, force_email=False, provider=None, price_provider=None):
     s["trades"] = int(s.get("trades", 0)) + sum(1 for e in events if e[0] == "ENTER")
     s["last_run"] = int(time.time())
     s["last_price"] = price
+    if is_daily:
+        s["last_daily"] = _today
     save_state(s)
     # 心跳日志：每轮都写一行，便于确认计划任务确实跑过
     log(f"本轮完成：应有状态 {want}，当前持仓 {s['mode']}，价格 {fmt(price)}，"
         f"权益 {fmt(eq)} USDT" + (f"，发生 {len(events)} 个事件" if events else ""))
 
-    # ---- 3) 推送（HTML 表格邮件） ----
-    if events or force_email:
-        if events:
-            subj = "BTC策略信号：" + "；".join(
+    # ---- 3) 推送（HTML 表格邮件；每日 8 点无论有无信号都发） ----
+    if events or force_email or is_daily:
+        lev_txt = f"{lev:g}x 合约"
+        if is_daily:
+            subj = f"BTC策略·今日操作（{lev_txt}）：{_action_tag(s, want)}"
+        elif events:
+            subj = f"BTC策略信号（{lev_txt}）：" + "；".join(
                 {"ENTER": "开仓", "STOP": "止损", "TREND": "趋势失效平仓"}[e[0]] for e in events)
         else:
-            subj = "BTC策略信号：状态播报"
+            subj = f"BTC策略信号（{lev_txt}）：状态播报"
         html_body = _build_email_html(now, price, snap, s, want, lev, eq, events, cfg)
         send_email(cfg, subj, html_body, html=True)
     return s, snap, events
@@ -520,7 +620,8 @@ def main():
     cfg = load_cfg()
 
     if args.test_email:
-        ok = send_email(cfg, "BTC策略监测器 测试邮件",
+        lev_txt = f"{float(cfg.get('leverage', 2.0)):g}x 合约"
+        ok = send_email(cfg, f"BTC策略监测器 测试邮件（{lev_txt}）",
                         "如果你收到这封邮件，说明邮件推送配置正确。\n"
                         f"发送时间 {datetime.datetime.now(CST):%Y-%m-%d %H:%M:%S} CST")
         raise SystemExit(0 if ok else 1)
