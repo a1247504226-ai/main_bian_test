@@ -9,11 +9,11 @@ rem
 rem  What it does
 rem    1. asks for administrator rights (needed to write a scheduled task)
 rem    2. auto-detects the daily-check .bat sitting in this same folder
-rem    3. registers a daily task that runs it at 08:05 local time
+rem    3. registers a daily task that runs it at 08:02 local time
 rem    4. verifies the task and offers a test run
 rem
 rem  Usage
-rem    just double-click it                        -> install at 08:05
+rem    just double-click it                        -> install at 08:02
 rem    or from a command prompt:  install 09:30    -> install at 09:30
 rem    (passing a time also works: drag nothing, just call it with an argument)
 rem
@@ -27,7 +27,7 @@ rem ============================================================================
 
 set "TASKNAME=BTC_Strategy_DailyCheck"
 set "RUNAT=%~1"
-if "%RUNAT%"=="" set "RUNAT=08:05"
+if "%RUNAT%"=="" set "RUNAT=08:02"
 
 rem ---------------------------------------------------------------- elevation
 net session >nul 2>&1
@@ -107,7 +107,7 @@ schtasks /Query /TN "%TASKNAME%" /FO LIST | findstr /i "TaskName Next Status"
 rem ---- pin the advanced settings ---------------------------------------------
 rem  The defaults schtasks writes vary between Windows builds.  Set the ones we
 rem  actually care about explicitly, so the behaviour is the same everywhere:
-rem    StartWhenAvailable  -> if 08:05 was missed (PC asleep / off), run on wake
+rem    StartWhenAvailable  -> if 08:02 was missed (PC asleep / off), run on wake
 rem    ExecutionTimeLimit  -> kill a hung run after 1 hour
 rem    MultipleInstances   -> never run two copies at once
 rem  If PowerShell is unavailable we just carry on - the task already exists.

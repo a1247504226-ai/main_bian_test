@@ -18,14 +18,14 @@ table{width:100%;border-collapse:collapse;table-layout:fixed}
 <body>
 <div class="wrap" style="max-width:680px;margin:0 auto;padding:20px 14px 40px">
 
-<div class="banner" style="background:#eef3f8;border-left:5px solid #2471a3;border-radius:0 10px 10px 0;padding:13px 16px;margin-bottom:14px"><div style="color:#1b4f72;font-size:15px;font-weight:700">空仓中 · 本轮无需操作</div><div style="color:#33607f;font-size:12.5px;margin-top:6px;line-height:1.65">当前空仓，你没有实际持仓，这笔盈亏<b>不计入账户</b> —— 账户现值就是本金 <b>1000 USDT</b>。等下一笔信号出现时按本金 1000 USDT 进场，从那一笔开始计入，之后每笔按当时账户权益滚仓。</div></div>
+<div class="banner" style="background:#eef7f0;border-left:5px solid #1e8449;border-radius:0 10px 10px 0;padding:13px 16px;margin-bottom:14px"><div style="color:#14532d;font-size:15px;font-weight:700">仓位不变，无需操作</div><div style="color:#3d6b4f;font-size:12.5px;margin-top:6px;line-height:1.65">当前策略 做空</div></div>
 
 <div style="background:#fff;border-radius:12px;padding:16px 18px">
   <div style="font-size:18px;font-weight:800;color:#1c2833">BTC 日线趋势策略 · 每日检测</div>
   <div style="color:#66788a;font-size:12.5px;margin-top:6px;line-height:1.6">
-    标的 BTCUSDT · 数据截至 <b>2026-10-23</b> 收盘（81189.43 USDT）<br>
+    标的 BTCUSDT · 数据截至 <b>2026-10-24</b> 收盘（80888.16 USDT）<br>
     <b>本金 1000 USDT 起</b>（之后按权益滚仓，参与前的回测盈亏不计入）· 当前 <b>1.00 倍</b><br>
-    多头走现货 · 空头走合约 1× 逐仓 · SMA50 只约束多头（收盘价在均线下方时不开多、空头照做） · 生成时间 2026-10-24 16:05:20</div>
+    多头走现货 · 空头走合约 1× 逐仓 · SMA50 只约束多头（收盘价在均线下方时不开多、空头照做） · 生成时间 2026-10-25 16:25:02 · 代码版本 2026-10-25 16:23</div>
 </div>
 
 <div class="card">
@@ -36,7 +36,7 @@ table{width:100%;border-collapse:collapse;table-layout:fixed}
     <tr><th style="text-align:left">策略</th><th style="text-align:center">持仓</th>
         <th style="text-align:right">成本价</th><th style="text-align:right">现价</th>
         <th style="text-align:right">浮动盈亏</th></tr>
-    <tr><td style="padding:11px 4px;border-bottom:1px solid #eef1f5;font-size:13px">当前信号（空仓中）</td><td style="padding:11px 4px;border-bottom:1px solid #eef1f5;text-align:center;font-size:13px;color:#66788a">空仓</td><td colspan="3" style="padding:11px 4px;border-bottom:1px solid #eef1f5;text-align:center;color:#8a9aab;font-size:12.5px">当前无持仓</td></tr>
+    <tr><td style="padding:11px 4px;border-bottom:1px solid #eef1f5;font-size:13px">当前策略</td><td style="padding:11px 4px;border-bottom:1px solid #eef1f5;text-align:center;font-size:13px;font-weight:700;color:#1e8449">做空</td><td style="padding:11px 4px;border-bottom:1px solid #eef1f5;text-align:right;font-size:12.5px">80847.71</td><td style="padding:11px 4px;border-bottom:1px solid #eef1f5;text-align:right;font-size:12.5px">80888.16</td><td style="padding:11px 4px;border-bottom:1px solid #eef1f5;text-align:right;font-size:12.5px;white-space:nowrap"><span style="color:#1e8449;font-weight:700">-0.90</span><br><span style="font-size:11.5px"><span style="color:#1e8449;font-weight:700">-0.1%</span></span></td></tr>
   </table>
   <div style="color:#8a9aab;font-size:11.5px;margin-top:9px;line-height:1.65">
     成本价 = 信号翻转后次日开盘成交价（含滑点）；名义 = 届时账户权益 × 敞口比例；
@@ -44,21 +44,21 @@ table{width:100%;border-collapse:collapse;table-layout:fixed}
   </div>
 </div>
 
-<div style="background:#fff;border-radius:12px;padding:14px 16px;margin-top:12px"><div style="font-size:14px;font-weight:700;color:#1c2833;margin-bottom:9px">混合载体 · 双均线 10/30</div><table role="presentation" style="width:100%;border-collapse:collapse;font-size:13.5px"><tr><td style="padding:4px 0;color:#66788a;width:46%">本金</td><td style="padding:4px 0">1000 USDT（空仓中，全额在手）</td></tr><tr><td style="padding:4px 0;color:#66788a">账户现值<span style="font-size:11.5px">（起算 + 滚仓）</span></td><td style="padding:4px 0;font-weight:700">1000.00 USDT（1.00 倍）<div style="font-size:11px;font-weight:400;color:#8a9aab;margin-top:3px"></div></td></tr><tr><td style="padding:4px 0;color:#66788a">↳ 回测全程参考</td><td style="padding:4px 0;color:#8a9aab;font-size:12.5px">滚仓 162620 USDT（162.6 倍）· 固定本金 9949 USDT（9.9 倍）</td></tr><tr><td style="padding:4px 0;color:#66788a">参与状态</td><td style="padding:4px 0;color:#1b4f72"><b>空仓 · 尚未参与</b><div style="font-size:11px;font-weight:400;color:#8a9aab;margin-top:3px;line-height:1.5">当前空仓，没有持仓可算；账户现值 = 本金 1000 USDT，下一笔信号起计入，之后滚仓</div></td></tr></table></div>
+<div style="background:#fff;border-radius:12px;padding:14px 16px;margin-top:12px"><div style="font-size:14px;font-weight:700;color:#1c2833;margin-bottom:9px">混合载体 · 双均线 10/30 <span style="font-weight:400;color:#1e8449;font-size:12.5px">· 合约 1× 逐仓</span></div><table role="presentation" style="width:100%;border-collapse:collapse;font-size:13.5px"><tr><td style="padding:4px 0;color:#66788a;width:46%">成本价（入场价）</td><td style="padding:4px 0;font-weight:700">80847.71 USDT</td></tr><tr><td style="padding:4px 0;color:#66788a">止损价<span style="font-size:11.5px">（涨到此价市价买回）</span></td><td style="padding:4px 0;font-weight:700;color:#c0392b">84890.09 USDT<span style="font-weight:400;color:#8a9aab;font-size:12px">　距现价 +4.95%</span></td></tr><tr><td style="padding:4px 0;color:#66788a">最新收盘价</td><td style="padding:4px 0">80888.16 USDT</td></tr><tr><td style="padding:4px 0;color:#66788a">持仓数量</td><td style="padding:4px 0">0.012369 BTC</td></tr><tr><td style="padding:4px 0;color:#66788a">入场名义（权益×敞口）</td><td style="padding:4px 0">1000.00 USDT（1000 × 1.00× 仓位比例）</td></tr><tr><td style="padding:4px 0;color:#66788a">当前市值</td><td style="padding:4px 0">1000.50 USDT</td></tr><tr><td style="padding:4px 0;color:#66788a">浮动盈亏</td><td style="padding:4px 0"><span style="color:#1e8449;font-weight:700">-0.90</span> USDT（<span style="color:#1e8449;font-weight:700">-0.1%</span>）</td></tr><tr><td style="padding:4px 0;color:#66788a">已持有</td><td style="padding:4px 0">0 天（自 2026-10-25）</td></tr><tr><td style="padding:4px 0;color:#66788a">账户现值<span style="font-size:11.5px">（起算 + 滚仓）</span></td><td style="padding:4px 0;font-weight:700">999.10 USDT（1.00 倍）<div style="font-size:11px;font-weight:400;color:#8a9aab;margin-top:3px;line-height:1.5">本金 1,000 + 浮盈 -0.90</div></td></tr><tr><td style="padding:4px 0;color:#66788a">↳ 回测全程参考</td><td style="padding:4px 0;color:#8a9aab;font-size:12.5px">滚仓 162620 USDT（162.6 倍）· 固定本金 9948 USDT（9.9 倍）</td></tr><tr><td style="padding:4px 0;color:#66788a">爆仓价 / 安全余量</td><td style="padding:4px 0">161695.41 USDT / <b>99.77 pp</b></td></tr></table></div>
 <div style="background:#fff;border-radius:12px;padding:14px 16px;margin-top:12px"><div style="font-size:14px;font-weight:700;color:#1c2833;margin-bottom:8px">最近 3 笔已平仓<span style="font-weight:400;font-size:12px;color:#8a9aab">（回测历史，不计入上方账户 · 金额按<b>每笔 1,000 U 本金</b>折算；若按滚仓口径，这 3 笔合计 12,776 U）</span></div><table role="presentation" style="width:100%;border-collapse:collapse;table-layout:fixed"><colgroup><col style="width:48%"><col style="width:18%"><col style="width:34%"></colgroup><tr><th style="padding:6px 4px;text-align:left;font-size:12px;color:#66788a">持仓期 / 成本→出场</th><th style="padding:6px 4px;text-align:center;font-size:12px;color:#66788a">方向</th><th style="padding:6px 4px;text-align:right;font-size:12px;color:#66788a">盈亏(U)</th></tr><tr><td style="padding:8px 4px;border-bottom:1px solid #eef1f5;font-size:12.5px">2026-08-08 → 2026-08-13<div style="color:#8a9aab;font-size:11.5px">64955.66 → 63448.25</div></td><td style="padding:8px 4px;border-bottom:1px solid #eef1f5;font-size:12.5px;text-align:center;color:#c0392b">做多</td><td style="padding:8px 4px;border-bottom:1px solid #eef1f5;font-size:12.5px;text-align:right;white-space:nowrap"><span style="color:#1e8449;font-weight:700">-25.18</span><div style="color:#8a9aab;font-size:10.5px;font-weight:400;margin-top:2px">滚仓 -3,779</div></td></tr><tr><td style="padding:8px 4px;border-bottom:1px solid #eef1f5;font-size:12.5px">2026-08-13 → 2026-08-19<span style="color:#8a4b00;font-size:10.5px;font-weight:700;background:#fdf0e3;border-radius:3px;padding:1px 4px;margin-left:4px">止损</span><div style="color:#8a9aab;font-size:11.5px">63448.25 → 66653.97</div></td><td style="padding:8px 4px;border-bottom:1px solid #eef1f5;font-size:12.5px;text-align:center;color:#1e8449">做空</td><td style="padding:8px 4px;border-bottom:1px solid #eef1f5;font-size:12.5px;text-align:right;white-space:nowrap"><span style="color:#1e8449;font-weight:700">-49.47</span><div style="color:#8a9aab;font-size:10.5px;font-weight:400;margin-top:2px">滚仓 -7,181</div></td></tr><tr><td style="padding:8px 4px;border-bottom:1px solid #eef1f5;font-size:12.5px">2026-08-20 → 2026-10-23<div style="color:#8a9aab;font-size:11.5px">69369.45 → 81375.38</div></td><td style="padding:8px 4px;border-bottom:1px solid #eef1f5;font-size:12.5px;text-align:center;color:#c0392b">做多</td><td style="padding:8px 4px;border-bottom:1px solid #eef1f5;font-size:12.5px;text-align:right;white-space:nowrap"><span style="color:#c0392b;font-weight:700">+170.90</span><div style="color:#8a9aab;font-size:10.5px;font-weight:400;margin-top:2px">滚仓 +23,735</div></td></tr></table></div>
-<div style="background:#fff;border-radius:12px;padding:14px 16px;margin-top:12px;font-size:13.5px;color:#3d566e"><div style="font-size:14px;font-weight:700;color:#1c2833;margin-bottom:8px">执行计划</div><b>演练模式（不会真实下单）</b><ul style="margin:8px 0 8px 18px;padding:0"><li style="margin:5px 0">当前空仓，本轮无需操作。下一笔信号出现时按本金 1000 USDT × 届时敞口（现在算约 1.00×，上限 1.00×）进场，从那一笔开始计入账户，之后每笔按当时账户权益滚仓。</li><li style="margin:5px 0">若下一笔是做空，止损价 = 届时成本价 × 1.05（逆行 5% 市价买回）；真开空那天邮件会直接给出具体价格，照着挂止损市价单即可。</li></ul><div style="color:#8a9aab;font-size:12.5px;margin-top:4px">未配置币安 API Key → 跳过仓位核对，只给目标方向。</div></div>
+<div style="background:#fff;border-radius:12px;padding:14px 16px;margin-top:12px;font-size:13.5px;color:#3d566e"><div style="font-size:14px;font-weight:700;color:#1c2833;margin-bottom:8px">执行计划</div><b>演练模式（不会真实下单）</b><ul style="margin:8px 0 8px 18px;padding:0"><li style="margin:5px 0">目标：做空（合约 1× 逐仓）</li><li style="margin:5px 0">参考成本价 80847.71，当前 80888.16，浮动盈亏 -0.90 USDT（-0.1%）</li><li style="margin:5px 0">应持 0.012369 BTC（名义 1000.00 USDT，敞口 1.00×）</li><li style="margin:5px 0">【要挂的止损单】方向：买入平空 · 触发价 84890.09 · 类型：止损市价单（成本价 80847.71 × 1.05 = 84890.09，即逆行 5%）</li></ul><div style="color:#8a9aab;font-size:12.5px;margin-top:4px">未配置币安 API Key → 跳过仓位核对，只给目标方向。</div></div>
 
 
 <div style="color:#8a9aab;font-size:11.5px;margin-top:20px;line-height:1.75">
   <b>关于「账户现值」：</b><br>
   · <b>本邮件采用「从现在起算 + 滚仓」</b>：本金就是 <b>1000 USDT</b>，
-  本金 1,000 + 当前浮盈 = 账户现值，当前 <b>1000.00 USDT（1.00 倍）</b>。
+  本金 1,000 + 当前浮盈 = 账户现值，当前 <b>999.10 USDT（1.00 倍）</b>。
   参与之前的历史回测盈亏<b>不计入</b>这个数字 —— 那是回测数据，不是你的实盘。<br>
-  · 下一笔进场时：名义 = 届时账户权益 <b>1,000 U</b> × 届时敞口（按现在算约 1.00×，上限 1.00×）。<br>
-  <b>⚠ 你还没有参与</b>：当前空仓，账户就是本金 <b>1000 USDT</b>；下一笔信号出现时按本金进场，从那一笔开始计入，之后每笔按当时账户权益滚仓。<br>
+  · 这一笔的仓位：名义 = 本金 <b>1,000 U</b> × 敞口 1.00× = <b>1,000.00 USDT</b>（数量 0.012369 BTC）。<br>
+  
   · <b>「回测全程参考」</b>（仅供了解这套策略长期跑下来什么水平）：
   若从 2017-08 就用 1000 U 一路跟着做 ——
-  <b>固定本金</b>（每笔都按 1000 U 开仓）终值 9949 USDT（9.9 倍）；
+  <b>固定本金</b>（每笔都按 1000 U 开仓）终值 9948 USDT（9.9 倍）；
   <b>滚仓</b>（每笔按当时账户权益开仓、利润滚入下一笔）终值 162620 USDT（162.6 倍）。
   两者收益率完全相同，滚仓只是把绝对金额放大了 16.3 倍。<br>
   · <b>滚仓怎么执行</b>：每笔都按「当时账户权益 × 敞口 1.00×」下单，
@@ -66,7 +66,7 @@ table{width:100%;border-collapse:collapse;table-layout:fixed}
   中途要能扛住 -36.8% 回撤才拿得住。<br><br>
   仓位规则：波动率目标 3.0%/日，敞口上限 1.00×；SMA50 只约束多头（收盘价在均线下方时不开多、空头照做）。<br>
   <b>止损规则</b>：空头逆行 5% 即市价买回平仓（止损单），多头不设止损；其余靠信号反转出场。<br>
-  历史参考：2017-08 至今（9.18 年）胜率 31%，盈亏比 4.2，最大回撤 -36.8%，最长水下 430 天。<br>
+  历史参考：2017-08 至今（9.19 年）胜率 31%，盈亏比 4.2，最大回撤 -36.8%，最长水下 430 天。<br>
   空头腿固定 1× 逐仓（价格逆行 +100.0% 即爆仓；历史最深逆行 -22.9%）；多头腿不上杠杆。<br>
   <b>本邮件是回测规则的机械信号，不构成投资建议。</b>加密资产波动极大，请自行判断并控制风险。
 </div>

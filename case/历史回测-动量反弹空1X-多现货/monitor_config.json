@@ -11,7 +11,7 @@
     "server": "smtp.163.com",
     "port": 465,
     "use_ssl": true,
-    "max_retries": 3,
+    "max_retries": 6,
     "strategy_label": "BTC动量策略 · SMA50过滤多头 1×做空"
   },
   "binance": {

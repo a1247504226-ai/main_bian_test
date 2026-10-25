@@ -300,8 +300,8 @@ def load_bars(symbol, force=False, max_age_h=1.0):
 
     注意这里用的是 E.cache_is_stale()，除了「太旧」，它还会挡住一种更隐蔽的坏数据：
     最后一根日线在它收盘之前就被写进了缓存，那根的 close 是半成品。
-    定时任务是 08:05 本地 = 00:05 UTC，正好在 UTC 换日后 5 分钟 ——
-    如果上一次是前一天 23:30 UTC 左右手动跑的，缓存只有 0.6 小时，
+    定时任务是 08:02 本地 = 00:02 UTC，正好在 UTC 换日后 2 分钟 ——
+    如果上一次是前一天 23:30 UTC 左右手动跑的，缓存只有半小时，
     按「小时数」判断算新鲜，但里面那根的收盘价其实是 23:30 的价格。
     """
     path = os.path.join(E.DATA_DIR, "%s_1d.csv" % symbol)
@@ -314,14 +314,37 @@ def load_bars(symbol, force=False, max_age_h=1.0):
             log("      使用本地缓存（%.2f 小时前更新，阈值 %.1f 小时）" % (age, max_age_h))
             return E.load(symbol)
         log("      本地缓存需要更新：%s" % why)
-    try:
-        return E.ensure_data(symbol, refresh=True)
-    except Exception as e:
-        if os.path.exists(path):
-            log("      ⚠ 拉取失败（%s），回退到 %.2f 小时前的本地缓存 —— 数据可能不是最新"
-                % (e, age or -1))
-            return E.load(symbol)
-        raise
+    # 网络拉取：失败、或「最新已收盘日线还没出来」都重试。
+    # ⚠ 只在发邮件之前重试，绝不重跑整个脚本（bat 层重跑会导致重复发信）。
+    # 为什么要等新日线：08:02 本地 = 00:02 UTC，紧贴日线收盘（00:00 UTC）仅 2 分钟，
+    # 币安偶尔还没把这根结算完，这时拉到的是「昨天那根」—— 信号会错一天。
+    now_ms = int(time.time() * 1000)
+    expect_t = (now_ms // E.DAY_MS) * E.DAY_MS - E.DAY_MS   # 最新已收盘日线应有的开盘时间
+    last_err = None
+    got = None
+    for attempt in range(1, 7):
+        try:
+            got = E.ensure_data(symbol, refresh=True)
+        except Exception as e:
+            got, last_err = None, "%s: %s" % (type(e).__name__, e)
+        if got:
+            closed = [b for b in got if b["t"] + E.DAY_MS <= now_ms]
+            if closed and closed[-1]["t"] >= expect_t:
+                return got                      # 新日线已到，正常返回
+            last_err = ("最新已收盘日线仍是 %s（应为 %s）"
+                        % (E.fdate(closed[-1]["t"]) if closed else "无", E.fdate(expect_t)))
+        if attempt < 6:
+            wait = min(10.0 * attempt, 30.0)
+            log("      行情未就绪（%s），%.0f 秒后重试（第 %d/6 次）..." % (last_err, wait, attempt))
+            time.sleep(wait)
+    if got:
+        log("      ⚠ 新日线仍未就绪，继续用已拿到的数据（截止 %s）" % E.fdate(got[-1]["t"]))
+        return got
+    if os.path.exists(path):
+        log("      ⚠ 拉取失败（%s），回退到 %.2f 小时前的本地缓存 —— 数据可能不是最新"
+            % (last_err, age or -1))
+        return E.load(symbol)
+    raise RuntimeError("行情数据拿不到：%s" % last_err)
 
 
 # ==============================================================================
@@ -510,6 +533,7 @@ def derive_position(bars, sig, cfg, tag, pending=False, next_bar=None, since=Non
         # 主口径：从现在起算 + 滚仓（参与前的历史已平仓不计入，账户 = 本金 + 参与后已实现 + 当前浮盈）
         # pending=True（本轮尚未参与）时，当前这笔的浮盈不计入账户，账户就是本金
         "pending": bool(pending),
+        "entry_today": False,                  # 是否「今天开盘才建仓」（供风控选对峰值窗口）
         "realized_since": realized_since,      # 参与后已平仓的累计盈亏（滚仓口径）
         "part_n": part_n,                      # 参与后已平仓的笔数
         "acc": acc,                            # 参与后的账户权益（滚仓口径，逐笔滚）
@@ -600,6 +624,7 @@ def derive_position(bars, sig, cfg, tag, pending=False, next_bar=None, since=Non
     out.update({
         "entry_date": entry_date, "entry_px": entry_px,
         "entry_i": entry_i,
+        "entry_today": entry_today,
         "qty": qty, "notional": notional, "expo": expo,
         "mkt_value": qty * cur_px, "upnl": upnl,
         "upnl_pct": (upnl / notional) if notional > 0 else 0.0,
@@ -629,13 +654,18 @@ def derive_position(bars, sig, cfg, tag, pending=False, next_bar=None, since=Non
     return out
 
 
-def short_risk(bars, sig, cfg, entry_px=None, entry_i=None):
+def short_risk(bars, sig, cfg, entry_px=None, entry_i=None, today_bar=None):
     """
     空头腿风控：L× 逐仓的爆仓线在 入场价 ×(1+1/L)。
     用本轮空头区间的最高价估算最大逆行与安全边际。
 
     entry_px / entry_i 传了就用它（止损后当天重开会改变成本价，
     按信号连续段反推会算出旧成本价，爆仓价和余量都会偏）。
+
+    today_bar：今天开盘才建仓时传「当前未收盘那根」K 线。此时持仓区间只有今天，
+    峰值必须取今天这根的高点 —— 不能取上一根已收盘 K 线的高点（那是建仓之前的行情，
+    会把入场前的价格误当成持仓期间的最大逆行；实测 2026-10-25 邮件把 10-24 的
+    81213.64 当成「期间最高」，而 10-25 实际高点只有 80917.26）。
     """
     lev = float(cfg["binance"]["leverage"])
     sig = regime_long(bars, sig, cfg["strategy"].get("regime_ma", 0))
@@ -649,7 +679,11 @@ def short_risk(bars, sig, cfg, entry_px=None, entry_i=None):
         entry_i = min(i + 1, len(bars) - 1)
     if entry_px is None:
         entry_px = bars[entry_i]["open"]
-    peak = max(b["high"] for b in bars[entry_i:])
+    if today_bar is not None and entry_px and entry_px > 0:
+        # 今天建仓：持仓区间 = 今天这根，峰值取它的高点（没有就退回成本价）
+        peak = max(today_bar.get("high") or entry_px, entry_px)
+    else:
+        peak = max(b["high"] for b in bars[entry_i:])
     adverse = 1.0 - peak / entry_px
     return {"entry_date": fdate(bars[entry_i]["t"]), "entry_px": entry_px,
             "peak": peak, "adverse": adverse, "margin": adverse + line,
@@ -1610,8 +1644,9 @@ def main():
 
     # ---- 持仓与盈亏 ----
     log("[3/6] 推演当前持仓（成本价 / 现价 / 浮动盈亏）")
+    nb = raw[len(bars)] if len(raw) > len(bars) else None
     pos = derive_position(bars, sig, cfg, "当前策略", pending=pending,
-                          next_bar=(raw[len(bars)] if len(raw) > len(bars) else None),
+                          next_bar=nb,
                           since=state.get("participate_from"))
     _lev = float(cfg["binance"]["leverage"])
     log("      配置：多头现货 · 空头合约 %d× 逐仓（爆仓线 %+.1f%%）· %s"
@@ -1701,7 +1736,8 @@ def main():
     # ---- 风控 ----
     log("[5/6] 风控检查")
     sr = short_risk(bars, sig, cfg, entry_px=pos.get("entry_px"),
-                    entry_i=pos.get("entry_i"))
+                    entry_i=pos.get("entry_i"),
+                    today_bar=(nb if pos.get("entry_today") else None))
     if sr:
         # 用 pos 里的真实成本价（止损重开后 sr 按信号段推的会偏）
         _ep = pos.get("entry_px") or sr["entry_px"]

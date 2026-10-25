@@ -1,0 +1,25 @@
+{
+  "symbol": "BTCUSDT",
+  "signal_timeframe": "1h",
+  "filter_timeframe": "4h",
+  "ema_fast": 50,
+  "ema_slow": 200,
+  "leverage": 2.0,
+  "initial_equity": 1000,
+  "stop_atr": 8.0,
+  "cooldown_bars": 24,
+  "fee": 0.0005,
+  "slip": 0.0003,
+  "email": {
+    "enabled": true,
+    "sender": "a1247504226@163.com",
+    "password": "XKCINXNMOMMDCAFI",
+    "to": [
+      "1247504226@qq.com"
+    ],
+    "server": "smtp.163.com",
+    "port": 465,
+    "use_ssl": true,
+    "max_retries": 3
+  }
+}

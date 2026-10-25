@@ -194,15 +194,15 @@ def fetch_klines(symbol, start_ms):
         url = "%s?symbol=%s&interval=1d&startTime=%d&limit=1000" % (API_BASE, symbol, t)
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         data = None
-        for attempt in range(6):
+        for attempt in range(10):
             try:
                 with opener.open(req, timeout=30) as r:
                     data = json.loads(r.read().decode())
                 break
             except Exception as e:
-                if attempt == 5:
+                if attempt == 9:
                     raise RuntimeError("拉取 %s 失败：%s" % (symbol, e))
-                time.sleep(1.5 * (attempt + 1))
+                time.sleep(min(1.5 * (attempt + 1), 8.0))
         if not data:
             break
         rows.extend(data)

@@ -137,7 +137,9 @@ def bt(bars, sig, cap_long=1.0, cap_short=1.0, vt=M.VT, atr_n=14, k_atr=0.0,
             blocked = False
             if pos != 0:
                 close_pos(i, o * (1 - slip) if pos > 0 else o * (1 + slip))
-            if tgt != 0:
+            # 与主引擎一致：权益已经归零（爆仓吃光保证金）不许再开新仓，
+            # 否则会用负权益算出负名义，凭空造出一笔反向幽灵仓位。
+            if tgt != 0 and eq_ref > 0:
                 open_pos(i, o * (1 + slip) if tgt > 0 else o * (1 - slip), tgt, eq_ref)
 
         # ATR 跟踪止损（只保护已盈利的仓位）

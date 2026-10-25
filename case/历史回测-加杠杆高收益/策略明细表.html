@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>BTC 趋势策略 · 策略明细表</title>
+<style>
+body{font-family:"Microsoft YaHei",Arial,sans-serif;margin:28px;color:#1a1a1a;background:#fff;max-width:960px}
+h1{font-size:22px;margin:0 0 4px}
+h2{font-size:16px;margin:26px 0 10px;padding-left:9px;border-left:4px solid #0b5fff}
+.sub{color:#666;font-size:13px;margin-bottom:8px}
+table{border-collapse:collapse;width:100%;font-size:13.5px;margin-top:6px}
+th,td{border:1px solid #e3e6e8;padding:8px 11px;vertical-align:top}
+th{background:#f0f3f6;text-align:left;font-weight:600;width:150px}
+tr:nth-child(even) td{background:#fafbfc}
+code{background:#f2f4f6;padding:1px 5px;border-radius:4px;font-family:Consolas,monospace;font-size:12.5px}
+.tag{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;color:#fff}
+.long{background:#c0392b}.short{background:#1e8449}.flat{background:#888}
+.warn{background:#fff6e5;border:1px solid #ffd591;border-radius:8px;padding:12px 16px;margin-top:14px;font-size:13px;line-height:1.7}
+</style>
+</head>
+<body>
+<h1>BTC 趋势策略 · 策略明细表</h1>
+<div class="sub">4h 定方向 + 1h 止损 · 2x 满仓复利 · 数据：币安 BTCUSDT 现货 2017-08 ~ 2026-10</div>
+
+<h2>一、核心规则</h2>
+<table>
+<tr><th>交易标的</th><td>BTCUSDT（现货或永续）</td></tr>
+<tr><th>信号周期</th><td><b>4 小时</b>——每根 4h K 线收盘后重新判定一次方向</td></tr>
+<tr><th>趋势指标</th><td>4h <code>EMA50</code> 与 <code>EMA200</code>（用收盘价计算）</td></tr>
+<tr><th>做多条件 <span class="tag long">多</span></th><td><code>EMA50 &gt; EMA200</code> 且 <code>收盘价 &gt; EMA200</code></td></tr>
+<tr><th>做空条件 <span class="tag short">空</span></th><td><code>EMA50 &lt; EMA200</code> 且 <code>收盘价 &lt; EMA200</code></td></tr>
+<tr><th>空仓条件 <span class="tag flat">空仓</span></th><td>以上都不满足（均线缠绕 / 价格在均线之间）</td></tr>
+<tr><th>入场执行</th><td>信号在 4h 收盘确认后，于<b>下一根 1h 开盘价</b>成交（多单 +滑点、空单 −滑点）——避免用收盘价成交的前视偏差</td></tr>
+<tr><th>止损</th><td>入场价 − 方向 × <b>8 × ATR(14)</b>（1h）<br>多单止损在下方，空单止损在上方</td></tr>
+<tr><th>止损检查频率</th><td><b>每小时一次</b>：用「已收盘 1h 的高低点 + 正在形成那根的高低点 + 实时价」判断；<br>若跳空越过止损，按<b>跳空那根的开盘价</b>成交（比止损价更差，更真实）</td></tr>
+<tr><th>趋势失效离场</th><td>4h 状态反转（多转非多 / 空转非空）→ <b>下一根 1h 开盘</b>平仓</td></tr>
+<tr><th>冷却期</th><td>被止损后，冷却 <b>24 根 1h</b> 才允许再进场（防止在震荡里连续挨打）</td></tr>
+<tr><th>止盈</th><td><b>不设固定止盈</b>——趋势跟随，让利润奔跑（回测证明固定止盈在 2x 下会归零）</td></tr>
+<tr><th>杠杆</th><td><b>2x</b>（<code>config.json</code> 的 <code>leverage</code> 可改）</td></tr>
+<tr><th>仓位</th><td>名义仓位 = <b>权益 × 2</b>，100% 权益作保证金（满仓复利，不留现金）</td></tr>
+<tr><th>成本</th><td>手续费 0.05% + 滑点 0.03%，<b>双边计</b>，随杠杆放大</td></tr>
+<tr><th>运行时间</th><td><b>每小时 :02</b>（即 K 线收盘后 2 分钟）自动运行；信号只在 4h 收盘时变，止损每小时查</td></tr>
+</table>
+
+<h2>二、一笔交易的完整生命周期</h2>
+<table>
+<tr><th>时间点</th><td>发生什么</td></tr>
+<tr><th>① 4h K 线收盘（如 12:00）</th><td>用该 4h 收盘价判定：EMA50 与 EMA200 关系 + 收盘价位置 → 得到「应有方向」（多/空/空仓）</td></tr>
+<tr><th>② 下一根 1h 开盘（如 13:00）</th><td>若方向变化且不在冷却期 → 按开盘价入场（多单加滑点）</td></tr>
+<tr><th>③ 持仓期间每小时（:02）</th><td>检查止损：最低/最高价是否触及 8×ATR 止损线；触及则平仓，并进入 24h 冷却</td></tr>
+<tr><th>④ 某次 4h 收盘状态反转</th><td>下一根 1h 开盘平仓（趋势失效），不做反向，等下一次信号</td></tr>
+<tr><th>⑤ 平仓后</th><td>权益按「本笔收益率 × 杠杆 − 成本」复利更新；记录一笔到信号明细表</td></tr>
+</table>
+
+<h2>三、风控与必须知道的风险</h2>
+<div class="warn">
+<b>胜率仅 21.9%</b>：10 笔约 8 笔小亏，全靠少数几笔大趋势赚回来（趋势策略的典型特征，心理上很难扛）。<br>
+<b>最大回撤 −77.5%（2x）</b>：历史上账户曾从高点回撤近八成，大多数人扛不住会割在底部。<br>
+<b>爆仓线</b>：2x 约 −50% 价格反向才爆仓；而止损在约 4%~8% 波动就触发，正常行情下止损先于爆仓。极端跳空可能穿透止损，亏损会大于 8×ATR。<br>
+<b>理论值</b>：491x 是历史复利回测（含手续费/滑点，未计资金费与大资金冲击），<b>不代表未来</b>；2021 年至今这段只再贡献约 7.7x。
+</div>
+
+<div class="sub" style="margin-top:22px">配套文件：<code>信号明细表.csv / .html</code>（逐笔 270 笔交易，从 1000U 起）· <code>live/操作手册.md</code>（部署）</div>
+</body>
+</html>
