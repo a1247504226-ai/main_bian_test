@@ -333,6 +333,10 @@ def _build_email_html(now, price, snap, s, want, lev, eq, events, cfg):
         ("纸上权益（从1000U滚仓）",
          f"起始 {fmt(float(cfg.get('initial_equity', 1000)))}U → 当前 {fmt(eq)}U（{eq / float(cfg.get('initial_equity', 1000)):.2f}x）"),
     ]
+    if s.get("mode") in ("long", "short") and s.get("entry_price"):
+        _et = (datetime.datetime.fromtimestamp(s.get("entry_time", 0) / 1000, CST).strftime("%m-%d %H:%M")
+               if s.get("entry_time") else "—")
+        summary.append((f"持仓入场（{_st(s['mode'])}）", f"{fmt(s['entry_price'])}　{_et} 建仓"))
     if s.get("stop_price"):
         summary.append(("止损价", f"{fmt(s['stop_price'])}（距现价 {abs(price / s['stop_price'] - 1) * 100:.2f}%）"))
     elif s.get("mode", "flat") == "flat" and want in ("long", "short") and snap.get("atr"):
@@ -384,18 +388,25 @@ def _build_email_html(now, price, snap, s, want, lev, eq, events, cfg):
             f"<th style='{th}'>出场时间</th><th style='{th};text-align:right'>出场价</th>"
             f"<th style='{th}'>原因</th><th style='{th};text-align:right'>收益</th></tr>{rrows}</table>")
 
+    # 只有本轮真的发生了动作（开仓/止损/趋势失效）才显示「本次动作」，否则整节不出现
+    if events:
+        ev_html = (
+            "<h4 style='margin:10px 0 6px'>本次动作</h4>"
+            "<table style='border-collapse:collapse;font-size:13px'>"
+            f"<tr><th style='{th}'>动作</th><th style='{th}'>方向</th>"
+            f"<th style='{th};text-align:right'>成交价</th>"
+            f"<th style='{th};text-align:right'>本笔收益</th>"
+            f"<th style='{th};text-align:right'>权益(U)</th></tr>{ev_rows}</table>")
+    else:
+        ev_html = ""
+
     return (
         "<div style=\"font-family:'Microsoft YaHei',Arial,sans-serif;color:#222;font-size:13px\">"
         f"<h3 style='margin:0 0 10px'>BTC 趋势策略 · 信号通知（{lev:g}x 合约）</h3>"
         f"<div style='background:#eef7ff;border-left:4px solid #0b5fff;padding:8px 12px;margin-bottom:12px;font-size:14px'><b>今日操作：</b>{_today_action(s, want, price, snap, cfg)}</div>"
         f"<table style='border-collapse:collapse;font-size:13px;margin-bottom:14px'>{sum_html}</table>"
         f"{recent_html}"
-        "<h4 style='margin:10px 0 6px'>本次动作</h4>"
-        "<table style='border-collapse:collapse;font-size:13px'>"
-        f"<tr><th style='{th}'>动作</th><th style='{th}'>方向</th>"
-        f"<th style='{th};text-align:right'>成交价</th>"
-        f"<th style='{th};text-align:right'>本笔收益</th>"
-        f"<th style='{th};text-align:right'>权益(U)</th></tr>{ev_rows}</table>"
+        f"{ev_html}"
         "<p style='color:#888;font-size:12px;margin-top:12px'>"
         "纸上权益从 1000U 起、按本机实时信号滚仓（与历史回测的 491x 无关）。"
         "仅为策略信号，不构成投资建议；实际仓位请自行决定。</p></div>")

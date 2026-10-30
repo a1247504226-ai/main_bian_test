@@ -1,0 +1,53 @@
+{
+ "mode": "flat",
+ "entry_price": 0.0,
+ "entry_time": 1793023200000,
+ "stop_price": 0.0,
+ "cooldown_until": 1793376000000,
+ "equity": 944.1063686415016,
+ "trades": 1,
+ "last_email": 0,
+ "trade_log": [
+  {
+   "dir": "long",
+   "entry_px": 82094.35,
+   "entry_t": 1792324800000,
+   "exit_px": 81178.19,
+   "exit_t": 1792339200000,
+   "why": "趋势失效",
+   "ret_pct": -1.28
+  },
+  {
+   "dir": "long",
+   "entry_px": 82163.07,
+   "entry_t": 1792468800000,
+   "exit_px": 81567.38,
+   "exit_t": 1792483200000,
+   "why": "趋势失效",
+   "ret_pct": -0.89
+  },
+  {
+   "dir": "long",
+   "entry_px": 83272.69,
+   "entry_t": 1792573200000,
+   "exit_px": 81750.01,
+   "exit_t": 1792670400000,
+   "why": "趋势失效",
+   "ret_pct": -1.99
+  },
+  {
+   "dir": "short",
+   "entry_px": 79678.729208,
+   "entry_t": 1793023200000,
+   "exit_px": 81778.01,
+   "exit_t": 1793289600000,
+   "why": "趋势失效",
+   "ret_pct": -5.5893631358498475
+  }
+ ],
+ "last_bar_t": 1793332800000,
+ "last_filter_bar": 1793332800000,
+ "last_run": 1793336524,
+ "last_price": 78294.76,
+ "last_daily": "2026-10-30"
+}
