@@ -1,10 +1,10 @@
 {
- "mode": "flat",
- "entry_price": 0.0,
- "entry_time": 1793023200000,
- "stop_price": 0.0,
- "cooldown_until": 1793376000000,
- "equity": 944.1063686415016,
+ "mode": "short",
+ "entry_price": 77558.74539400001,
+ "entry_time": 1793491200000,
+ "stop_price": 79580.60684901288,
+ "cooldown_until": 0,
+ "equity": 1000.0,
  "trades": 1,
  "last_email": 0,
  "trade_log": [
@@ -34,20 +34,11 @@
    "exit_t": 1792670400000,
    "why": "趋势失效",
    "ret_pct": -1.99
-  },
-  {
-   "dir": "short",
-   "entry_px": 79678.729208,
-   "entry_t": 1793023200000,
-   "exit_px": 81778.01,
-   "exit_t": 1793289600000,
-   "why": "趋势失效",
-   "ret_pct": -5.5893631358498475
   }
  ],
- "last_bar_t": 1793332800000,
- "last_filter_bar": 1793332800000,
- "last_run": 1793336524,
- "last_price": 78294.76,
- "last_daily": "2026-10-30"
+ "last_run": 1793520123,
+ "last_price": 78004.0,
+ "last_daily": "2026-11-01",
+ "last_bar_t": 1793516400000,
+ "last_filter_bar": 1793505600000
 }

@@ -324,7 +324,7 @@ def _build_email_html(now, price, snap, s, want, lev, eq, events, cfg):
     th = td + "background:#f0f3f6;font-weight:600;text-align:left;"
     tdr = td + "text-align:right;"
     summary = [
-        ("时间 (CST)", datetime.datetime.fromtimestamp(now / 1000, CST).strftime("%Y-%m-%d %H:%M")),
+        ("时间（北京时间）", datetime.datetime.fromtimestamp(now / 1000, CST).strftime("%Y-%m-%d %H:%M")),
         ("BTC 价格", f"{fmt(price)} USDT"),
         ("4h EMA50 / EMA200", f"{fmt(snap['ema_fast'])} / {fmt(snap['ema_slow'])}"),
         ("应有状态", _st(want)),
@@ -337,6 +337,10 @@ def _build_email_html(now, price, snap, s, want, lev, eq, events, cfg):
         _et = (datetime.datetime.fromtimestamp(s.get("entry_time", 0) / 1000, CST).strftime("%m-%d %H:%M")
                if s.get("entry_time") else "—")
         summary.append((f"持仓入场（{_st(s['mode'])}）", f"{fmt(s['entry_price'])}　{_et} 建仓"))
+        _d = 1 if s["mode"] == "long" else -1
+        _upnl_pct = _d * (price / s["entry_price"] - 1) * lev * 100
+        _upnl_usdt = eq * _d * (price / s["entry_price"] - 1) * lev
+        summary.append(("浮动盈亏（持有中）", f"{_upnl_pct:+.2f}%　{_upnl_usdt:+,.2f} U"))
     if s.get("stop_price"):
         summary.append(("止损价", f"{fmt(s['stop_price'])}（距现价 {abs(price / s['stop_price'] - 1) * 100:.2f}%）"))
     elif s.get("mode", "flat") == "flat" and want in ("long", "short") and snap.get("atr"):
