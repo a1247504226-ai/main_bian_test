@@ -315,8 +315,8 @@ def _today_action(s, want, price, snap, cfg):
     return "空仓观望，暂无信号"
 
 
-def _build_email_html(now, price, snap, s, want, lev, eq, events, cfg):
-    """把信号整理成 HTML 表格邮件正文。"""
+def _build_email_html(now, price, snap, s, want, lev, eq, events, cfg, gap_h=0.0):
+    """把信号整理成 HTML 表格邮件正文。gap_h=距上次成功运行的小时数（用于中断告警）。"""
     def _st(v):
         return {"long": "做多", "short": "做空", "flat": "空仓"}.get(v, v)
 
@@ -353,6 +353,17 @@ def _build_email_html(now, price, snap, s, want, lev, eq, events, cfg):
         summary.append(("冷却中", f"还剩 {left:.0f} 根 {snap['st_iv']}"))
     sum_html = "".join(
         f"<tr><td style='{th}'>{k}</td><td style='{td}'>{v}</td></tr>" for k, v in summary)
+
+    # 中断告警：距上次成功运行超过 2 小时 -> 顶部黄条提示（漏跑会让止损失真）
+    alert_html = ""
+    if gap_h >= 2.0:
+        _lr = (datetime.datetime.fromtimestamp(s.get("last_run", 0), CST).strftime("%m-%d %H:%M")
+               if s.get("last_run") else "未知")
+        alert_html = (
+            "<div style='background:#fff3cd;border-left:4px solid #d39e00;padding:8px 12px;"
+            "margin-bottom:12px;font-size:13px;color:#7a5c00'>"
+            f"<b>⚠️ 监测中断约 {gap_h:.0f} 小时</b>（上次成功运行 {_lr}）——"
+            "期间可能漏掉止损或开平仓信号，持仓与权益可能已与实际不符，请留意。</div>")
 
     ev_rows = ""
     for kind, m, px, ret, e in events:
@@ -408,6 +419,7 @@ def _build_email_html(now, price, snap, s, want, lev, eq, events, cfg):
         "<div style=\"font-family:'Microsoft YaHei',Arial,sans-serif;color:#222;font-size:13px\">"
         f"<h3 style='margin:0 0 10px'>BTC 趋势策略 · 信号通知（{lev:g}x 合约）</h3>"
         f"<div style='background:#eef7ff;border-left:4px solid #0b5fff;padding:8px 12px;margin-bottom:12px;font-size:14px'><b>今日操作：</b>{_today_action(s, want, price, snap, cfg)}</div>"
+        f"{alert_html}"
         f"<table style='border-collapse:collapse;font-size:13px;margin-bottom:14px'>{sum_html}</table>"
         f"{recent_html}"
         f"{ev_html}"
@@ -471,6 +483,8 @@ def equity_of(cfg, s):
 
 def step(cfg, force_email=False, provider=None, price_provider=None):
     s = load_state()
+    # 距上次成功运行的小时数：必须在 save_state 更新 last_run 之前算，供邮件中断告警用
+    gap_h = (time.time() - s["last_run"]) / 3600.0 if s.get("last_run") else 0.0
     if not s.get("equity"):
         s["equity"] = float(cfg.get("initial_equity", 1000))
     if not s.get("trade_log"):
@@ -483,7 +497,11 @@ def step(cfg, force_email=False, provider=None, price_provider=None):
     _now_local = datetime.datetime.now()
     _daily_hour = int(cfg.get("daily_email_hour", 8))
     _today = _now_local.strftime("%Y-%m-%d")
-    is_daily = (_now_local.hour == _daily_hour) and (s.get("last_daily") != _today)
+    # 补发窗口：过了 daily_email_hour 就允许发，直到「当天真的发成功」为止。
+    # 08:02 那轮若失败（电脑没开 / SMTP 超时 / 任务没触发），09:02 及之后会自动补发，
+    # 不会像旧逻辑那样因为 hour!=8 就整天静默。
+    _email_on = bool(cfg.get("email", {}).get("enabled"))
+    is_daily = _email_on and (_now_local.hour >= _daily_hour) and (s.get("last_daily") != _today)
 
     # ---- 快速路径：没有新收盘的 1h K 线、且当前空仓/无待执行动作 -> 直接返回 ----
     # 这样即使计划任务每 1~2 分钟跑一次，也只在「小时线收盘后」才真正干活，
@@ -601,14 +619,13 @@ def step(cfg, force_email=False, provider=None, price_provider=None):
     s["trades"] = int(s.get("trades", 0)) + sum(1 for e in events if e[0] == "ENTER")
     s["last_run"] = int(time.time())
     s["last_price"] = price
-    if is_daily:
-        s["last_daily"] = _today
     save_state(s)
     # 心跳日志：每轮都写一行，便于确认计划任务确实跑过
     log(f"本轮完成：应有状态 {want}，当前持仓 {s['mode']}，价格 {fmt(price)}，"
         f"权益 {fmt(eq)} USDT" + (f"，发生 {len(events)} 个事件" if events else ""))
 
-    # ---- 3) 推送（HTML 表格邮件；每日 8 点无论有无信号都发） ----
+    # ---- 3) 推送（HTML 表格邮件；每日 8 点起、当天未发成功则补发） ----
+    sent_daily = False
     if events or force_email or is_daily:
         lev_txt = f"{lev:g}x 合约"
         if is_daily:
@@ -618,8 +635,12 @@ def step(cfg, force_email=False, provider=None, price_provider=None):
                 {"ENTER": "开仓", "STOP": "止损", "TREND": "趋势失效平仓"}[e[0]] for e in events)
         else:
             subj = f"BTC策略信号（{lev_txt}）：状态播报"
-        html_body = _build_email_html(now, price, snap, s, want, lev, eq, events, cfg)
-        send_email(cfg, subj, html_body, html=True)
+        html_body = _build_email_html(now, price, snap, s, want, lev, eq, events, cfg, gap_h)
+        sent_daily = send_email(cfg, subj, html_body, html=True)
+    # 只有「每日邮件真的发出去了」才标记当天已发；发失败就不标记，下一轮继续补发
+    if is_daily and sent_daily:
+        s["last_daily"] = _today
+        save_state(s)
     return s, snap, events
 
 
