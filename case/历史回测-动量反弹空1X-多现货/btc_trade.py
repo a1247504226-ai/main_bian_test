@@ -183,8 +183,19 @@ def claim_lock():
 
 
 def release_lock():
+    """
+    只删「自己创建的」锁。
+
+    ⚠ 不能无条件删：如果本进程跑超过 LOCK_STALE_SEC 被判成僵尸锁、另一个进程
+      接管了它，本进程结束时若无条件删文件，就会把**别人的锁**删掉 ——
+      于是第三个进程能进来，和第二个并发下单 = 双倍仓位。
+    """
     try:
-        if os.path.exists(LOCK_PATH):
+        if not os.path.exists(LOCK_PATH):
+            return
+        with open(LOCK_PATH, encoding="utf-8") as f:
+            content = f.read()
+        if ("pid=%d " % os.getpid()) in content or content.startswith("pid=%d " % os.getpid()):
             os.remove(LOCK_PATH)
     except Exception:
         pass
@@ -246,8 +257,16 @@ class Binance:
         self.fut = b["testnet_futures_base"] if self.testnet else b["futures_base"]
         self.key = (b.get("api_key") or "").strip()
         self.secret = (b.get("api_secret") or "").strip()
-        self.symbol = b["symbol"]
-        self.base = self.symbol.replace("USDT", "")
+        self.symbol = str(b["symbol"]).strip().upper()
+        # 本策略只做 USDT 本位（BTCUSDT 这种）。
+        # ⚠ 用 replace("USDT","") 有隐患：填了 BTCUSDC 或 BTCUSDT_251226 时
+        #   replace 不生效 / 截错，base 会变成错的资产名 → 查余额拿到 0 →
+        #   目标仓位静默算成 0（或者按错的资产算）。宁可这里直接拒绝。
+        if not self.symbol.endswith("USDT") or len(self.symbol) <= 4:
+            raise RuntimeError(
+                "binance.symbol 必须是 USDT 本位交易对（形如 BTCUSDT），当前是 %r。"
+                "本策略只支持 USDT 计价的合约，请改正后再跑。" % self.symbol)
+        self.base = self.symbol[:-4]
         # 代理：留空 = 不走代理（默认，和行情下载保持一致）；
         # 需要科学上网才能连币安的机器上填 http://127.0.0.1:7890
         proxy = (b.get("proxy") or "").strip()
@@ -332,7 +351,10 @@ class Binance:
     @staticmethod
     def _retryable(msg):
         """这个错误重试一次有没有意义（只对幂等的 GET 用）。"""
-        if "HTTP 5" in msg or "HTTP 429" in msg or "HTTP 418" in msg:
+        # IP 已被封禁（418 / "banned until"）：重试只会**延长**封禁时间，必须立刻停下。
+        if "HTTP 418" in msg or "banned until" in msg:
+            return False
+        if "HTTP 5" in msg or "HTTP 429" in msg:
             return True
         for k in ("-1003", "-1001", "-1007", "timed out", "timeout",
                   "URLError", "Connection", "网络错误"):
@@ -346,7 +368,9 @@ class Binance:
             if self._offset is None:
                 self.sync_time()
             params["timestamp"] = int(time.time() * 1000) + (self._offset or 0)
-            params["recvWindow"] = 5000
+            # 10000ms（币安上限 60000）：本机时钟常常差十几秒，5 秒窗口太窄，
+            # 网络抖动一下就会 -1021。放大到 10 秒，配合 sync_time 的偏移修正更稳。
+            params["recvWindow"] = 10000
             qs = urllib.parse.urlencode(params)
             sig = hmac.new(self.secret.encode(), qs.encode(), hashlib.sha256).hexdigest()
             qs = qs + "&signature=" + sig
@@ -419,7 +443,9 @@ class Binance:
     # 不要再单独暴露「只读现货 USDT」的方法，否则又会有人拿它当权益用。
     def futures_position(self, symbol=None):
         sym = symbol or self.symbol
-        data = self._request("GET", self.fut, "/fapi/v1/positionRisk",
+        # ⚠ 必须是 v2：/fapi/v1/positionRisk 已废弃，测试网会直接返回
+        #   {"code":-5000,"msg":"Path ... Method GET is invalid"}（主网可能还兼容，别依赖）。
+        data = self._request("GET", self.fut, "/fapi/v2/positionRisk",
                              {"symbol": sym}, signed=True)
         active = [p for p in data if abs(to_float(p.get("positionAmt"))) > 0]
         # 双向持仓模式（Hedge Mode）下会同时返回多单和空单两条，本脚本按单向逻辑处理，
@@ -459,7 +485,9 @@ class Binance:
                     cache = json.load(f)
             except Exception:
                 cache = {}
-        ck = "%s:%s" % (market, self.symbol)
+        # ⚠ 缓存 key 必须带 testnet 标识：实盘和测试网的 stepSize / minNotional 可能不同，
+        #   共用一份缓存会让「先跑实盘、再切测试网」时按错的精度下单（-1013 / -1111）。
+        ck = "%s:%s:%s" % ("test" if self.testnet else "live", market, self.symbol)
         hit = cache.get(ck) or {}
         if hit and (time.time() - to_float(hit.get("_at"))) < 86400:
             return hit
@@ -574,7 +602,18 @@ class Binance:
 # ==============================================================================
 def snapshot(bnc, price):
     """读账户，算出权益、可用资金、现有仓位。"""
-    bal = bnc.spot_balances()
+    try:
+        bal = bnc.spot_balances()
+    except Exception as e:
+        # 币安测试网的现货（testnet.binance.vision）和合约（testnet.binancefuture.com）
+        # 是**两套完全独立的系统**：只申请合约 key 时现货接口会 401，域名本身也常常连不上。
+        # 双腿都走合约时现货账户本来就该是空的，所以测试网降级成「现货为空」；
+        # 实盘则必须抛出 —— 否则会漏算现货里的 USDT，让目标仓位偏小。
+        if not getattr(bnc, "testnet", False):
+            raise
+        bal = {}
+        M.log("      ⚠ 测试网读现货账户失败（%s）→ 按现货为空处理" % e)
+        M.log("        （测试网的现货与合约是两套独立系统，只有合约 key 时查不到现货，属正常）")
     btc = bal.get(bnc.base, {"free": 0.0, "locked": 0.0, "total": 0.0})
     usdt = bal.get("USDT", {"free": 0.0, "locked": 0.0, "total": 0.0})
     fut = bnc.futures_position()
@@ -657,9 +696,13 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now, resize=None):
                     r_fut["min_qty"], bnc.symbol, r_fut["min_notional"]))
 
     target_notional = equity * expo
-    target_spot_qty = target_notional / price if target_dir > 0 else 0.0
-    sf = M.short_size_factor(lev)
-    target_fut_qty = (target_notional * sf / price) if target_dir < 0 else 0.0
+    sf = M.short_size_factor(lev, expo)
+    # 多头走合约（E.LONG_ON_FUT）时两条腿都在合约账户；
+    # 只有「多头现货」模式才买现货。敞口 >1 时必须走合约 —— 现货买不到超过权益的量。
+    want_fut_dir = target_dir if (target_dir < 0 or E.LONG_ON_FUT) else 0
+    want_spot_dir = target_dir if (target_dir > 0 and not E.LONG_ON_FUT) else 0
+    target_spot_qty = (target_notional / price) if want_spot_dir > 0 else 0.0
+    target_fut_qty = (target_notional * sf / price) if want_fut_dir != 0 else 0.0
 
     # ---- 持仓期间不调仓（回测口径）----
     # 回测引擎只在「进场那根」按 权益×敞口 定名义，之后整段持有不再动。
@@ -667,23 +710,32 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now, resize=None):
     # 实测会把 162.62× 打成 55.97×。所以只要同方向已经有仓位，就把目标设成「现有仓位」，
     # 让下面的差额逻辑自然判定「已对齐」—— 只保留方向翻转/清仓的判断。
     if not resize and target_dir != 0:
-        if target_dir > 0 and snap["spot_qty"] > 0:
+        if want_spot_dir > 0 and snap["spot_qty"] > 0:
             target_spot_qty = snap["spot_qty"]
             target_notional = target_spot_qty * price
-        elif target_dir < 0 and snap["fut_amt"] < 0:
+        elif want_fut_dir != 0 and snap["fut_amt"] != 0 and \
+                (snap["fut_amt"] > 0) == (want_fut_dir > 0):
+            # 同方向已有合约仓位 → 沿用进场时的名义（多头合约、空头都走这里）
             target_fut_qty = abs(snap["fut_amt"])
             target_notional = target_fut_qty * price
 
     if resize:
         notes.append("账户权益 %.2f USDT × 敞口 %.2f× = 目标名义 %.2f USDT"
                      % (equity, expo, target_notional))
-    elif target_dir != 0 and (snap["spot_qty"] > 0 or snap["fut_amt"] < 0):
+    elif target_dir != 0 and (
+            (want_spot_dir > 0 and snap["spot_qty"] > 0) or
+            (want_fut_dir != 0 and snap["fut_amt"] != 0 and
+             (snap["fut_amt"] > 0) == (want_fut_dir > 0))):
         notes.append("持仓期间不调仓：沿用进场时的名义 %.2f USDT"
                      "（今天若重新进场会用 权益 %.2f × 敞口 %.2f× = %.2f USDT）"
                      % (target_notional, equity, expo, equity * expo))
     else:
         notes.append("账户权益 %.2f USDT × 敞口 %.2f× = 目标名义 %.2f USDT（今天进场，按此定仓）"
                      % (equity, expo, target_notional))
+    if want_fut_dir != 0 and lev > 0:
+        notes.append("目标占用保证金 ≈ %.2f USDT（名义 ÷ %d×，占权益 %.0f%%）"
+                     % (target_notional / lev, lev,
+                        (target_notional / lev / equity * 100) if equity else 0.0))
 
     # 预演余额：平仓/卖出所得都会改变可用资金
     proj_spot_usdt = snap["usdt_free"]
@@ -693,7 +745,11 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now, resize=None):
     # ---------- 1) 先平反向腿 ----------
     have_fut = snap["fut_amt"]
 
-    if have_fut != 0 and target_dir >= 0:
+    # 平掉的条件：① 目标空仓；② 现有合约腿与目标方向相反；
+    #             ③ 「多头现货」模式下目标做多（合约腿一律平掉，改回现货）。
+    _need_close = (have_fut != 0 and
+                   (want_fut_dir == 0 or (have_fut > 0) != (want_fut_dir > 0)))
+    if _need_close:
         q = abs(have_fut)
         # 平空 = 买入，平多 = 卖出。以前这里恒写 BUY，遇到「合约多头」时
         # reduceOnly 买单会被币安直接拒掉（-2022 ReduceOnly Order is rejected）。
@@ -701,6 +757,8 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now, resize=None):
         bad, why = qty_problem(q, price, r_fut, min_notional_cfg)
         if bad:
             notes.append("合约持仓 %+.3f 想平掉，但%s → 跳过（请在币安手动平仓）。" % (have_fut, why))
+            # 平不掉就绝不能继续往下开反向仓 —— 否则会变成「多空双开」
+            return acts, notes
         else:
             acts.append({"kind": "fut_close", "market": "futures", "side": side,
                          "qty": q, "qty_str": fmt_qty(q, r_fut["step"]),
@@ -714,8 +772,15 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now, resize=None):
                     else q * price / max(lev, 1) + snap["fut_upnl"])
         proj_fut_avail += max(released, 0.0)
         have_fut = 0
+        if want_fut_dir != 0:
+            # 还要反向开仓 → 本轮只平，下一轮再开。
+            # 刚平完就 set_margin_type / 开新仓，可能撞上交易所仓位状态还没刷新（-4168），
+            # 结果是「平了但没开成」，虽然下一轮能补，但会多一次裸露风险。
+            notes.append("已平仓，下一轮对账再开%s头（最多 3 轮）。"
+                         % ("多" if want_fut_dir > 0 else "空"))
+            return acts, notes
 
-    if snap["spot_qty"] > 0 and target_dir <= 0:
+    if snap["spot_qty"] > 0 and want_spot_dir == 0:
         # 卖「可用」而不是「总量」：有挂单/冻结时卖总量会被拒（余额不足）
         q = snap["spot_free"]
         if snap["spot_qty"] - q > 1e-9:
@@ -735,7 +800,7 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now, resize=None):
             proj_spot_usdt += q * price * (1.0 - fee_buffer)
 
     # ---------- 2) 建目标腿 ----------
-    if target_dir > 0:
+    if want_spot_dir > 0:
         diff = target_spot_qty - snap["spot_qty"]
         diff_notional = abs(diff) * price
         # 容忍度：差额小于「目标名义 × tol」且小于最小下单额 → 不动
@@ -793,93 +858,138 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now, resize=None):
                              "text": "现货减仓 %.6f %s（≈ %.2f USDT）"
                                      % (q, bnc.base, q * price)})
 
-    elif target_dir < 0:
-        if have_fut > 0:
-            # 账户里是合约多头，与目标空头相反 → 先平掉，下一轮再开空
-            q = have_fut
-            notes.append("⚠ 账户里是合约多头 %.3f，与目标空头相反 → 本轮先平掉。" % q)
-            acts.append({"kind": "fut_close", "market": "futures", "side": "SELL",
-                         "qty": q, "qty_str": fmt_qty(q, r_fut["step"]),
-                         "notional": q * price,
-                         "text": "平合约多头 %.3f（reduceOnly 市价卖出）" % q})
-            notes.append("平掉后重新对账再决定是否开空（最多 3 轮）。")
+    if want_fut_dir != 0:
+        _long = want_fut_dir > 0
+        _side_open = "BUY" if _long else "SELL"
+        _side_close = "SELL" if _long else "BUY"
+        _dtxt = "多" if _long else "空"
+
+        if have_fut != 0 and (have_fut > 0) != _long:
+            # 理论上第 1 步已经平掉；留个保险，避免同一轮里既平又开
+            notes.append("⚠ 合约持仓 %+.3f 与目标%s头方向相反 → 本轮先平仓，下一轮再开。"
+                         % (have_fut, _dtxt))
             return acts, notes
 
         if have_fut == 0:
-            # 开空需要合约账户里有保证金：不够就从现货划转。
-            # 按「实际要开的量」算（target_fut_qty 已含 1% 保证金缓冲），
-            # 不能按 target_notional 算 —— 1× 下那会把现货余额整锅搬走，还多搬。
+            # 开仓需要合约账户里有保证金：不够就从现货划转。
+            # 按「实际要开的量」算（target_fut_qty 已含保证金缓冲），
+            # 不能按 target_notional 算 —— 否则会把现货余额整锅搬走，还多搬。
             # ⚠ 先按 stepSize 取整再算，否则会把「取整后被砍掉的那一截」也划过去，
             #   白白留在合约账户里（1000 U 账户开 0.002 曾划 248 却只用到 200）。
             _want_round = float(fmt_qty(target_fut_qty, r_fut["step"])) or target_fut_qty
             need_margin = (_want_round * price) / lev / (1.0 - fee_buffer)
             if proj_fut_avail < need_margin and proj_spot_usdt > 0:
-                move = min(need_margin - proj_fut_avail, proj_spot_usdt)
-                if move >= min_move:
-                    acts.append({"kind": "transfer_in", "market": "transfer",
-                                 "side": "<-", "qty": move, "qty_str": "%.2f" % move,
-                                 "notional": move,
-                                 "text": "划转 %.2f USDT：现货账户 → 合约账户（开空要保证金）"
-                                         % move})
-                    proj_fut_avail += move
-                    proj_spot_usdt -= move
+                if getattr(bnc, "testnet", False):
+                    # 测试网根本没有划转接口，生成动作只会得到一个必然失败的单
+                    notes.append("⚠ 测试网不支持「现货 ⇄ 合约」划转：请到合约测试网直接领取虚拟 USDT"
+                                 "（当前合约可用 %.2f，需要 %.2f）。"
+                                 % (proj_fut_avail, need_margin))
                 else:
-                    notes.append("现货 USDT 仅 %.2f，不足 1 USDT 起划，跳过划转。"
-                                 % proj_spot_usdt)
+                    move = min(need_margin - proj_fut_avail, proj_spot_usdt)
+                    if move >= min_move:
+                        acts.append({"kind": "transfer_in", "market": "transfer",
+                                     "side": "<-", "qty": move, "qty_str": "%.2f" % move,
+                                     "notional": move,
+                                     "text": "划转 %.2f USDT：现货账户 → 合约账户（开%s要保证金）"
+                                             % (move, _dtxt)})
+                        proj_fut_avail += move
+                        proj_spot_usdt -= move
+                    else:
+                        notes.append("现货 USDT 仅 %.2f，不足 1 USDT 起划，跳过划转。"
+                                     % proj_spot_usdt)
 
             avail = proj_fut_avail
             max_notional = avail * lev * (1.0 - fee_buffer)
-            # 注意必须取 min：以前写成 want = max_notional/price，在
-            # 「可用略小于目标」时反而会把仓位开到 0.998×，吃掉 1% 的保证金缓冲，
-            # 1× 逐仓下会直接因为「保证金不足」被拒单。
+            # 必须取 min：写成 want = max_notional/price 会在「可用略小于目标」时
+            # 把仓位开到 0.998×，吃掉保证金缓冲，满仓时直接被拒单。
             want = min(target_fut_qty, max_notional / price)
             if max_notional < target_notional:
                 notes.append("合约可用保证金 %.2f USDT 只够开 %.2f USDT 名义（目标 %.2f），按可用截断。"
                              % (avail, max_notional, target_notional))
             bad, why = qty_problem(want, price, r_fut, min_notional_cfg)
             if bad:
-                notes.append("可用保证金不足，开不出最小空头仓位（%s）→ 跳过。" % why)
+                notes.append("可用保证金不足，开不出最小%s头仓位（%s）→ 跳过。" % (_dtxt, why))
             else:
                 want = float(fmt_qty(want, r_fut["step"]))
                 acts.append({"kind": "fut_setup", "market": "futures", "side": "-",
                              "qty": 0.0, "qty_str": "0", "notional": 0.0,
                              "text": "设置 %s 为 %s 逐仓 %d×"
                                      % (bnc.symbol, b["margin_type"], lev)})
-                acts.append({"kind": "fut_open", "market": "futures", "side": "SELL",
+                acts.append({"kind": "fut_open", "market": "futures", "side": _side_open,
                              "qty": want, "qty_str": fmt_qty(want, r_fut["step"]),
                              "notional": want * price,
-                             "text": "开合约空头 %.3f %s（市价卖出，逐仓 %d×）"
-                                     % (want, bnc.symbol, lev)})
+                             "text": "开合约%s头 %.3f %s（市价%s，逐仓 %d×，占用保证金 ≈ %.2f USDT）"
+                                     % (_dtxt, want, bnc.symbol,
+                                        "买入" if _long else "卖出", lev,
+                                        want * price / lev)})
                 if sf < 1.0:
-                    notes.append("已按 %.0f%% 缩量留保证金缓冲（1× 逐仓会占满保证金）。"
+                    notes.append("已按 %.1f%% 缩量留保证金缓冲（满仓时保证金会占满）。"
                                  % (sf * 100))
         else:
-            # 已有空头：只在明显偏离时调整
+            # 已有同向合约仓位：只在明显偏离时调整
             have = abs(have_fut)
             diff = target_fut_qty - have
             if abs(diff) * price < max(target_notional * tol, r_fut["min_notional"],
                                        min_notional_cfg):
-                notes.append("合约空头 %.3f 已接近目标 %.3f，不动。" % (have, target_fut_qty))
+                notes.append("合约%s头 %.3f 已接近目标 %.3f，不动。"
+                             % (_dtxt, have, target_fut_qty))
             elif diff > 0:
+                # 加仓：先确认杠杆对，再确认钱够。
+                # ⚠ 改杠杆会改变保证金占用：1× 满仓的仓位改成 2× 会释放一半保证金，
+                #   不先改就直接加仓，会因「保证金不足」被拒单。
+                _cur_lev = int(snap.get("fut_lev") or 0)
+                if _cur_lev and _cur_lev != lev:
+                    # 只改杠杆，不动保证金模式 —— 有持仓时币安会拒绝改 marginType（-4168）
+                    acts.append({"kind": "fut_leverage", "market": "futures", "side": "-",
+                                 "qty": 0.0, "qty_str": "0", "notional": 0.0,
+                                 "text": "调整 %s 杠杆 %d× → %d×（保证金占用随之变化）"
+                                         % (bnc.symbol, _cur_lev, lev)})
+                    # 改杠杆后现有仓位的保证金 = 现有名义 ÷ 新杠杆
+                    proj_fut_avail = max(snap["fut_wallet"] - have * price / lev, 0.0)
+                need_m = (diff * price) / lev / (1.0 - fee_buffer)
+                if proj_fut_avail < need_m and proj_spot_usdt > 0:
+                    if getattr(bnc, "testnet", False):
+                        notes.append("⚠ 测试网不支持「现货 ⇄ 合约」划转：请到合约测试网直接领取虚拟 USDT"
+                                     "（当前合约可用 %.2f，需要 %.2f）。"
+                                     % (proj_fut_avail, need_m))
+                    else:
+                        move = min(need_m - proj_fut_avail, proj_spot_usdt)
+                        if move >= min_move:
+                            acts.append({"kind": "transfer_in", "market": "transfer",
+                                         "side": "<-", "qty": move, "qty_str": "%.2f" % move,
+                                         "notional": move,
+                                         "text": "划转 %.2f USDT：现货账户 → 合约账户（%s头加仓要保证金）"
+                                                 % (move, _dtxt)})
+                            proj_fut_avail += move
+                            proj_spot_usdt -= move
+                        else:
+                            notes.append("现货 USDT 仅 %.2f，不足 1 USDT 起划，跳过划转。"
+                                     % proj_spot_usdt)
+                if proj_fut_avail < need_m:
+                    _cap_qty = proj_fut_avail * lev * (1.0 - fee_buffer) / price
+                    notes.append("合约可用 %.2f USDT 不足加仓所需保证金 %.2f → 只加到可用上限 %.6f。"
+                                 % (proj_fut_avail, need_m, _cap_qty))
+                    diff = min(diff, _cap_qty)
                 bad, why = qty_problem(diff, price, r_fut, min_notional_cfg)
                 if bad:
-                    notes.append("空头需要加仓 %.6f，但%s → 跳过。" % (diff, why))
+                    notes.append("%s头需要加仓 %.6f，但%s → 跳过。" % (_dtxt, diff, why))
                 else:
-                    acts.append({"kind": "fut_add", "market": "futures", "side": "SELL",
+                    acts.append({"kind": "fut_add", "market": "futures", "side": _side_open,
                                  "qty": diff, "qty_str": fmt_qty(diff, r_fut["step"]),
                                  "notional": diff * price,
-                                 "text": "空头加仓 %.3f %s（≈ %.2f USDT）"
-                                         % (diff, bnc.symbol, diff * price)})
+                                 "text": "%s头加仓 %.3f %s（≈ %.2f USDT，占用保证金 ≈ %.2f）"
+                                         % (_dtxt, diff, bnc.symbol, diff * price,
+                                            diff * price / lev)})
             else:
                 q = -diff
                 bad, why = qty_problem(q, price, r_fut, min_notional_cfg)
                 if bad:
-                    notes.append("空头需要减仓 %.6f，但%s → 跳过。" % (q, why))
+                    notes.append("%s头需要减仓 %.6f，但%s → 跳过。" % (_dtxt, q, why))
                 else:
-                    acts.append({"kind": "fut_reduce", "market": "futures", "side": "BUY",
+                    acts.append({"kind": "fut_reduce", "market": "futures", "side": _side_close,
                                  "qty": q, "qty_str": fmt_qty(q, r_fut["step"]),
                                  "notional": q * price,
-                                 "text": "空头减仓 %.3f %s（reduceOnly）" % (q, bnc.symbol)})
+                                 "text": "%s头减仓 %.3f %s（reduceOnly）" % (_dtxt, q, bnc.symbol)})
 
     # ---------- 3) 目标空仓 ----------
     if target_dir == 0:
@@ -899,13 +1009,20 @@ def run_action(bnc, act, cfg):
     b = cfg["binance"]
     kind = act["kind"]
     # 兜底：数量取整后为 0 的订单一定失败，宁可跳过也不要发出去
-    if kind != "fut_setup" and str(act.get("qty_str")) in ("", "0", "0.0"):
+    # （fut_setup / fut_leverage 不带数量，必须豁免，否则会被误杀）
+    if kind not in ("fut_setup", "fut_leverage") and \
+            str(act.get("qty_str")) in ("", "0", "0.0"):
         return False, "-", "数量取整后为 0，已跳过（避免无效订单）"
     try:
         if kind == "fut_setup":
             bnc.set_margin_type(b["margin_type"])
             bnc.set_leverage(b["leverage"])
             return True, "-", "已设置 %s 逐仓 %d×" % (b["margin_type"], int(b["leverage"]))
+
+        if kind == "fut_leverage":
+            # 只改杠杆。有持仓时不能改 marginType（币安 -4168），所以单独一条动作。
+            bnc.set_leverage(b["leverage"])
+            return True, "-", "已把杠杆调到 %d×" % int(b["leverage"])
 
         if kind in ("fut_close", "fut_reduce", "fut_add", "fut_open"):
             r = bnc.futures_market_order(
@@ -990,11 +1107,16 @@ def sync_stop_order(cfg, bnc, snap, price):
     amt = snap["fut_amt"]
     entry = snap["fut_entry"]
 
-    # 没有空头持仓（或不是空头）→ 全部撤掉，别留孤儿单
+    # 不是空头持仓（多头 / 空仓）→ 必须把「触发即全平」的条件单全部撤掉。
+    # ⚠ 不能留着：closePosition=true 在触发时是「全平当前持仓」，与挂单时的方向无关。
+    #   旧空头留下的 BUY 止损单如果留在多头仓位上，触发会把多头平掉。
+    #   代价是「你手动给多头挂的保护单也会被撤」—— 本策略多头不设止损（回测验证过
+    #   加了更差），所以这里以「不留能误平仓的孤儿单」优先。
     if amt >= 0 or entry <= 0:
         for o in stops:
             bnc.fut_cancel(o["orderId"])
-            acts.append("撤销止损单 #%s（当前没有空头持仓）" % o["orderId"])
+            acts.append("撤销止损单 #%s（当前不是空头持仓；本策略只给空头挂止损）"
+                        % o["orderId"])
         return acts, notes
 
     want = entry * (1.0 + ss)
@@ -1069,6 +1191,18 @@ def _execute(cfg, bnc, target_dir, expo, price, bar_date, sig_label,
 
     for rd in range(1, max_rounds + 1):
         snap = snapshot(bnc, price)
+        # 权益为 0 / 负数 = 账户空了或被强平，绝不能按「权益×敞口」去算仓位
+        # （会算出 0 或负的目标，看起来像「已对齐」而静默通过）。
+        if snap["equity"] <= 0:
+            M.log("")
+            M.log("      ✘ 账户权益为 %.2f USDT（USDT/现货/合约都没有余额）→ 无法计算目标仓位，停止。"
+                  % snap["equity"])
+            tst["last_run"] = M.fdt()
+            tst["last_bar"] = bar_date
+            tst["last_error"] = "账户权益为 0"
+            save_trade_state(tst)
+            return False, rounds + [{"round": rd, "actions": [],
+                                     "notes": ["账户权益为 0，无法计算目标仓位"]}], snap
         acts, notes = build_actions(cfg, bnc, snap, target_dir, expo, sig_label,
                                     resize=resize)
 
@@ -1086,6 +1220,18 @@ def _execute(cfg, bnc, target_dir, expo, price, bar_date, sig_label,
             rounds.append({"round": rd, "actions": [], "notes": notes})
             if rd == 1:
                 _sync_stop(snap)
+                # 即使没有任何动作也要刷新状态：否则「每天持仓不动」时
+                # last_run / last_bar 永远停在很久以前，--status 会误报成「很久没跑」。
+                tst["last_run"] = M.fdt()
+                tst["last_bar"] = bar_date
+                tst["last_signal"] = sig_label
+                tst["last_target_dir"] = target_dir
+                tst["last_expo"] = expo
+                tst["last_equity"] = snap["equity"]
+                tst["last_spot_qty"] = snap["spot_qty"]
+                tst["last_fut_amt"] = snap["fut_amt"]
+                tst["last_rounds"] = len(rounds)
+                save_trade_state(tst)
                 return True, rounds, snap
             break
 
@@ -1109,6 +1255,12 @@ def _execute(cfg, bnc, target_dir, expo, price, bar_date, sig_label,
             if not ok:
                 append_trade_log(log_rows)
                 M.log("      ✘ 有动作失败，立即停止（避免半个仓位）。请检查后重跑。")
+                # 失败也要落一次状态：否则 --status 会一直显示「上次运行」是很久以前，
+                # 让人误以为脚本没跑。last_live_bar 故意不写 —— 这一根没执行成功。
+                tst["last_run"] = M.fdt()
+                tst["last_bar"] = bar_date
+                tst["last_error"] = "%s 失败：%s" % (a["kind"], detail)
+                save_trade_state(tst)
                 return False, rounds + [{"round": rd, "actions": acts, "notes": notes,
                                          "failed": detail}], snap
 
@@ -1186,13 +1338,18 @@ def show_status(cfg, bnc, bar_date, sig_label, target_dir, expo, price):
     if _holding and not _resize:
         M.log("  持仓期间不调仓：沿用进场时的名义（回测口径）。"
               "要让每天都对齐敞口，把 binance.resize_on_drift 改成 true。")
-    if target_dir > 0:
+    _sf_now = M.short_size_factor(cfg["binance"]["leverage"], expo)
+    if target_dir > 0 and E.LONG_ON_FUT:
+        M.log("  目标：合约多头 %.3f %s（当前 %+.3f）· 占用保证金 ≈ %.2f USDT"
+              % (snap["equity"] * expo * _sf_now / price, bnc.symbol, snap["fut_amt"],
+                 snap["equity"] * expo * _sf_now / max(cfg["binance"]["leverage"], 1)))
+    elif target_dir > 0:
         M.log("  目标：现货持有 %.6f %s（当前 %.6f）"
               % (snap["equity"] * expo / price, bnc.base, snap["spot_qty"]))
     elif target_dir < 0:
-        M.log("  目标：合约空头 %.3f %s（当前 %+.3f）"
-              % (snap["equity"] * expo * M.short_size_factor(cfg["binance"]["leverage"]) / price,
-                 bnc.symbol, snap["fut_amt"]))
+        M.log("  目标：合约空头 %.3f %s（当前 %+.3f）· 占用保证金 ≈ %.2f USDT"
+              % (snap["equity"] * expo * _sf_now / price, bnc.symbol, snap["fut_amt"],
+                 snap["equity"] * expo * _sf_now / max(cfg["binance"]["leverage"], 1)))
     else:
         M.log("  目标：空仓（当前现货 %.6f / 合约 %+.3f）"
               % (snap["spot_qty"], snap["fut_amt"]))
@@ -1205,6 +1362,10 @@ def main():
     force = "--force" in argv
     status_only = "--status" in argv
     testnet_override = True if "--testnet" in argv else None
+    # --rebalance：**一次性**把持仓名义对齐到「今日权益 × 今日敞口」。
+    # 只用于「改了 vt / 敞口上限之后，把旧仓位拉到新目标」这种一次性动作。
+    # 千万不要日常跑 —— 每日再平衡实测会把复利终值砍掉一大半（见 resize_on_drift 说明）。
+    rebalance = True if "--rebalance" in argv else None
 
     cfg = M.load_config()
     b = cfg["binance"]
@@ -1216,7 +1377,15 @@ def main():
 
     # ---- 闸门检查 ----
     enabled = bool(b.get("enabled"))
-    bnc = Binance(cfg, testnet_override)
+    try:
+        bnc = Binance(cfg, testnet_override)
+    except Exception as e:
+        # 交易对填错 / 配置非法 → 直接退出，绝不用错值去查账户和下单
+        M.log("")
+        M.log("  ✘ 初始化失败：%s" % e)
+        M.log("")
+        M.log("=" * 100)
+        return 6
 
     M.log("")
     M.log("【前置检查】")
@@ -1226,8 +1395,14 @@ def main():
     M.log("  %s 命令行 --live %s" % ("✔" if live_flag else "✘",
                                      "已加" if live_flag else "未加"))
     M.log("  连接目标：%s" % bnc.endpoint_label())
-    M.log("  空头杠杆：%d× 逐仓（下单量系数 %.2f）"
-          % (int(b["leverage"]), M.short_size_factor(b["leverage"])))
+    M.log("  杠杆：%d× 逐仓 · %s（下单量系数随敞口变化）"
+          % (int(b["leverage"]),
+             "双腿均走合约" if E.LONG_ON_FUT else "多头现货 / 空头合约"))
+    M.log("  波动率目标 %.1f%% · 敞口上限 %.2f×"
+          % (float(st["vt"]) * 100, float(st["exposure_cap"])))
+    if rebalance:
+        M.log("  ⚠ --rebalance：本次会把持仓名义强制对齐到「今日权益 × 今日敞口」")
+        M.log("     （一次性动作，改完 vt / 敞口上限后用它把旧仓位拉到新目标；不要日常跑）")
 
     # ---- 网络预检 ----
     # 只探时间接口：不需要 key、不需要权限。通不了就一定下不了单，
@@ -1260,6 +1435,14 @@ def main():
     raw = M.load_bars(st["symbol"], force=False,
                       max_age_h=float(st.get("cache_max_age_hours", 1)))
     bars = M.closed_bars(raw)
+    if not bars:
+        # 一根已收盘日线都没有（数据异常 / 首次运行没拉到）→ 绝不能靠猜下单
+        M.log("")
+        M.log("  ✘ 没有可用的「已收盘」日线（行情数据异常）→ 停止，不下单。")
+        M.log("    可加 --refresh 重拉行情后再试。")
+        M.log("")
+        M.log("=" * 100)
+        return 7
     fast, slow = st["primary_set"]
     sig = M.regime_long(bars, E.sig_ema_cross(bars, fast, slow),
                         st.get("regime_ma", 0))
@@ -1271,6 +1454,29 @@ def main():
     M.log("  最新已收盘：%s  收盘 %.2f USDT" % (bar_date, price))
     M.log("  均线 EMA %d/%d · 日波动 %.2f%% · 信号 %s · 目标敞口 %.2f×"
           % (fast, slow, dvol * 100, sig_label, expo))
+
+    # ---- 下单前的两道硬闸（和 btc_monitor 一致，直接跑本脚本时也不能漏）----
+    # 少了这两道，缓存损坏 / 拉到错价时会按错价算数量 → 可能开出巨单。
+    # --status 只读不写，允许看，不拦。
+    if not status_only:
+        _ref30 = sum(b["close"] for b in bars[-30:]) / float(min(30, len(bars)))
+        if _ref30 > 0 and (price / _ref30 > 5.0 or price / _ref30 < 0.2):
+            M.log("")
+            M.log("  ✘ 价格异常：最新收盘 %.2f 与近 30 日均价 %.2f 相差 %.1f 倍，"
+                  "疑似数据错位 → 拒绝下单。" % (price, _ref30, price / _ref30))
+            M.log("    请先确认行情数据正常（可加 --refresh 重拉），再重跑。")
+            M.log("")
+            M.log("=" * 100)
+            return 4
+        _lag = (time.time() * 1000.0 - bars[-1]["t"]) / 86400000.0
+        if _lag > M.STALE_BAR_DAYS:
+            M.log("")
+            M.log("  ✘ 行情不是最新的：最新已收盘日线是 %s，距今 %.1f 天（阈值 %.1f）→ 拒绝下单。"
+                  % (bar_date, _lag, M.STALE_BAR_DAYS))
+            M.log("    多半是网络拉取一直失败、只能读本地旧缓存。可加 --refresh 重拉后再试。")
+            M.log("")
+            M.log("=" * 100)
+            return 5
 
     # ---- 只读模式 ----
     if status_only:
@@ -1292,16 +1498,16 @@ def main():
         if not bnc.has_keys():
             M.log("")
             M.log("  ⚠ 没有 API Key，无法读取真实账户，只能给目标方向：")
-            M.log("    目标：%s · 名义 %.2f USDT × 敞口 %.2f×"
-                  % (sig_label, float(st.get("base_capital_usdt", 1000.0)), expo))
-            M.log("    （按本金 %.0f USDT 估算，实际以账户余额为准）"
-                  % float(st.get("base_capital_usdt", 1000.0)))
+            _base_est = float(st.get("base_capital_usdt", 1000.0))
+            M.log("    目标：%s · 权益 %.2f USDT × 敞口 %.2f× = 名义 %.2f USDT"
+                  % (sig_label, _base_est, expo, _base_est * expo))
+            M.log("    （按本金 %.0f USDT 估算，实际以账户余额为准）" % _base_est)
             M.log("")
             M.log("=" * 100)
             return 0
         # 有 key 但未开启 → 读账户做演练对账
         ok, rounds, snap = execute(cfg, bnc, target_dir, expo, price,
-                                   bar_date, sig_label, live=False)
+                                   bar_date, sig_label, live=False, resize=rebalance)
         M.log("")
         M.log("=" * 100)
         return 0
@@ -1321,7 +1527,7 @@ def main():
         M.log("【真实下单】")
         ok, rounds, snap = execute(cfg, bnc, target_dir, expo, price,
                                    bar_date, sig_label, live=True, force=force,
-                                   lock=False)   # 本函数已持有锁
+                                   lock=False, resize=rebalance)   # 本函数已持有锁
         M.log("")
         M.log("【执行后账户】")
         M.log("  现货 %.8f %s（%.2f USDT）· USDT 可用 %.2f"

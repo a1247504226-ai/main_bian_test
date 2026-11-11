@@ -8,7 +8,7 @@
    2) 用唯一一套规则跑完整回测：
         · 信号  双均线 EMA 10/30，收盘确认、次日开盘成交
         · 过滤  SMA50 只约束多头（收盘价在均线下方时不开多，空头照做）
-        · 载体  多头走现货（不付资金费）· 空头走合约 1× 逐仓（保留做空保护）
+        · 载体  双腿均走合约 2× 逐仓（付资金费）；long_leg="spot" 则多头走现货（旧方案）
         · 仓位  波动率目标 3%/日，敞口上限 1.0×
    3) 输出回测数据到 ./回测结果/ 目录（CSV，Excel 可直接打开）
       并在控制台打印可读汇总
@@ -54,18 +54,26 @@ DATA_DIR = os.path.join(HERE, "data")
 OUT_DIR = os.path.join(HERE, "回测结果")
 
 CAPITAL = 1000.0            # 本金（USDT）
-VT = 0.03                   # 波动率目标 3%/日
-EXPOSURE_CAP = 1.0          # 名义敞口上限（相对权益）
-SPOT_FEE = 0.001            # 现货手续费 0.1%
-FUT_FEE = 0.0004            # 合约手续费 0.04%
+VT = 0.06                   # 波动率目标 6%/日（仓位的总旋钮）
+EXPOSURE_CAP = 2.0          # 名义敞口上限（相对权益）
+SPOT_FEE = 0.001            # 现货手续费 0.1%（仅 long_leg="spot" 时用）
+# 合约手续费：币安 U 本位 VIP0 是 Maker 0.02% / Taker 0.05%，开 BNB 抵扣再降 10%。
+# 本策略全部市价单 = Taker，所以按 0.05% 算（不假设 BNB 抵扣，偏保守）。
+FUT_FEE = 0.0005            # 合约手续费 0.05%（Taker VIP0）
 SLIP = 0.0005               # 单边滑点 0.05%
-FUNDING_D = 0.0003          # 资金费 0.03%/日
+FUNDING_D = 0.0003          # 资金费 0.03%/日（8 小时一次 × 3）
 WARMUP = 60                 # 预热期（前 60 根不出信号）
-LEVERAGE = 1.0              # 合约杠杆（空头腿；名义仓位与杠杆无关，只影响爆仓线。1× = 逆行 100% 才爆）
+LEVERAGE = 2.0              # 合约杠杆。不影响名义仓位，只影响保证金占用与爆仓线。
+                            # ⚠ 必须 ≥ EXPOSURE_CAP，否则敞口开不出去（引擎会缩到 权益×L）
 REGIME_MA = 50              # 只约束多头的趋势过滤：收盘价 > SMA(50) 才允许做多；0 = 关闭
 PRIMARY_SET = (10, 30)      # 双均线参数（快线, 慢线）
 ATR_N = 14                  # ATR 窗口（波动率目标的输入）
 SHORT_STOP = None           # 空头固定止损（None = 关闭；0.05 = 逆行 5% 平仓）
+# 多头腿的载体：False = 现货（不付资金费，但买不了超过本金的量）；
+#                  True  = 合约（付资金费，但敞口可以 >1，代价是有爆仓线）。
+# ⚠ 必须与 EXPOSURE_CAP 自洽：cap > 1 时只能是 True —— 现货买不到超过权益的量，
+#   否则会算出负的现金余额（等于凭空借钱买币）。
+LONG_ON_FUT = True
 LONG_STOP = None            # 多头固定止损（默认关闭，实测不划算，见使用说明）
 PARAM_SETS = [(8, 24), (10, 30), (12, 36), (15, 45), (20, 60)]
 DAY_MS = 86400000
@@ -79,6 +87,15 @@ CFG_SOURCE = "内置默认值（没找到 monitor_config.json）"
 LOG_BUF = []
 
 
+# ---- 跨平台输出编码 ----
+# Linux cron 的 LANG 常常是 C / POSIX（ASCII），中文会抛 UnicodeEncodeError。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+
 def log(msg=""):
     """跨平台安全打印（Windows 控制台编码兜底），同时缓存用于落盘。"""
     s = str(msg)
@@ -86,7 +103,11 @@ def log(msg=""):
     try:
         sys.stdout.write(s + "\n")
     except UnicodeEncodeError:
-        sys.stdout.write(s.encode("utf-8", "replace").decode("utf-8") + "\n")
+        enc = getattr(sys.stdout, "encoding", None) or "ascii"
+        try:
+            sys.stdout.write(s.encode(enc, "replace").decode(enc, "replace") + "\n")
+        except Exception:
+            pass
     sys.stdout.flush()
 
 
@@ -121,7 +142,7 @@ def _apply_monitor_config():
     现在统一成：以 monitor_config.json 为唯一来源，回测跟着它走。
     """
     global VT, EXPOSURE_CAP, WARMUP, REGIME_MA, LEVERAGE, CAPITAL
-    global PRIMARY_SET, ATR_N, CFG_SOURCE, SHORT_STOP, LONG_STOP
+    global PRIMARY_SET, ATR_N, CFG_SOURCE, SHORT_STOP, LONG_STOP, LONG_ON_FUT
     if not os.path.exists(CFG_PATH):
         return
     try:
@@ -167,12 +188,30 @@ def _apply_monitor_config():
 
     SHORT_STOP = _stop(s, "short_stop", SHORT_STOP)
     LONG_STOP = _stop(s, "long_stop", LONG_STOP)
+    # 多头载体：config 里 long_leg="fut" 或 long_on_fut=true 都认（前者更直观）
+    _ll = s.get("long_leg")
+    if isinstance(_ll, str):
+        LONG_ON_FUT = _ll.strip().lower() in ("fut", "futures", "contract", "合约")
+    _lof = s.get("long_on_fut")
+    if _lof is not None:
+        try:
+            LONG_ON_FUT = bool(_lof)
+        except (TypeError, ValueError):
+            pass
     ps = s.get("primary_set")
     if isinstance(ps, (list, tuple)) and len(ps) == 2:
         try:
             PRIMARY_SET = (int(ps[0]), int(ps[1]))
         except (TypeError, ValueError):
             pass
+    # ---- 防呆：配置自洽性（两条都是「静默跑错」的坑）----
+    if EXPOSURE_CAP > 1.0 and not LONG_ON_FUT:
+        LONG_ON_FUT = True
+        log("  ⚠ exposure_cap=%.2f > 1 但 long_leg=spot → 已自动改为合约多头"
+            "（现货买不到超过权益的量）" % EXPOSURE_CAP)
+    if LEVERAGE < EXPOSURE_CAP:
+        log("  ⚠ leverage=%.1f < exposure_cap=%.1f → 敞口会被保证金卡在 %.1f×，"
+            "请把 binance.leverage 提到 ≥ %.1f" % (LEVERAGE, EXPOSURE_CAP, LEVERAGE, EXPOSURE_CAP))
     CFG_SOURCE = "monitor_config.json（与每日检测同一口径）"
 
 
@@ -508,7 +547,7 @@ def trade_stats(trades):
 
 
 # ==============================================================================
-# 4. 引擎：混合载体（多头走现货、空头走合约 1× 逐仓）★ 唯一方案
+# 4. 引擎：混合载体（多头可选现货/合约，空头走合约）★ 唯一方案
 # ==============================================================================
 def _check_args(capital, L, atr_n, vt, exposure_cap, warmup):
     """拦住会算出除零或 NaN 的参数。
@@ -535,13 +574,17 @@ def backtest_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE, spot_fee=SPOT_FEE,
                     fut_fee=FUT_FEE, slip=SLIP, funding_d=FUNDING_D, sizing="vol",
                     vt=VT, exposure_cap=EXPOSURE_CAP, atr_n=ATR_N, warmup=WARMUP,
                     cooldown_after_liq=0, allow_short=True, short_stop=SHORT_STOP,
-                    long_stop=LONG_STOP, stop_reentry="immediate"):
+                    long_stop=LONG_STOP, stop_reentry="immediate",
+                    long_on_fut=LONG_ON_FUT):
     """
     short_stop / long_stop：固定百分比止损（默认 None = 不设，只用信号反转出场）。
         short_stop=0.05 → 空头逆行 5% 平仓；long_stop=0.05 → 多头下跌 5% 平仓。
     stop_reentry：止损后怎么再入场
         "immediate"  = 下一根开盘按信号重新进场（止损基准随之重置，即滚动止损）
         "wait_signal"= 等信号先翻转再进场（同一段行情只止损一次，更贴近手工交易）
+    long_on_fut：多头腿走合约（True）还是现货（False，默认）。
+        True 时多头也按「保证金 = 名义/L」占用、每天付资金费、有爆仓线（入场×(1-1/L)）。
+        敞口 >1 时必须是 True —— 现货买不到超过权益的量。
     """
     _check_args(capital, L, atr_n, vt, exposure_cap, warmup)
     n = len(bars)
@@ -562,11 +605,11 @@ def backtest_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE, spot_fee=SPOT_FEE,
 
     def close_pos(i, px, reason):
         nonlocal eq, pos, units, entry_px, margin, fund_acc, entry_i
-        if pos > 0:                                     # 现货平仓
+        if pos > 0 and not long_on_fut:                 # 现货平仓
             pnl = units * px * (1 - spot_fee) - units * entry_px * (1 + spot_fee)
             eq += units * px * (1 - spot_fee)
             leg = "spot"
-        else:                                           # 合约平仓
+        else:                                           # 合约平仓（空头 / 合约多头）
             pnl = units * (px - entry_px) * pos - units * px * fut_fee - fund_acc
             eq += pnl
             leg = "fut"
@@ -578,10 +621,11 @@ def backtest_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE, spot_fee=SPOT_FEE,
     def open_pos(i, px, direction, eq_ref):
         nonlocal eq, pos, units, entry_px, margin, fund_acc, entry_i
         notional = eq_ref * expo_at(i)
-        if direction > 0:
+        if direction > 0 and not long_on_fut:
             units, entry_px, margin = notional / px, px, 0.0
             eq = eq - notional - notional * spot_fee
         else:
+            # 合约（空头 / 合约多头）：占用保证金 = 名义/L，不够就自动缩到 eq×L
             m = notional / L
             if m > eq:
                 m, notional = eq, eq * L
@@ -606,9 +650,9 @@ def backtest_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE, spot_fee=SPOT_FEE,
             else:
                 stopped_dir = 0
         prev_c = bars[i - 1]["close"]
-        if pos > 0:
+        if pos > 0 and not long_on_fut:
             eq_ref = eq + units * prev_c
-        elif pos < 0:
+        elif pos != 0:
             eq_ref = eq + units * (prev_c - entry_px) * pos - fund_acc
         else:
             eq_ref = eq
@@ -644,8 +688,22 @@ def backtest_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE, spot_fee=SPOT_FEE,
                 elif h >= stop_px:
                     close_pos(i, stop_px * (1 + slip), "stop")
                     stopped_dir = -1
+        if pos > 0 and long_on_fut:
+            # 合约多头也有爆仓线（与空头对称：入场价 × (1 - 1/L)）。
+            # 逐仓下亏光保证金即强平，pnl = -margin。
+            liq_px = entry_px * (1 - 1.0 / L)
+            hit = l <= liq_px
+            if hit:
+                px = o if o <= liq_px else liq_px
+                eq -= margin
+                trades.append({"entry_i": entry_i, "exit_i": i, "dir": pos,
+                               "entry_px": entry_px, "exit_px": px,
+                               "pnl": -margin, "liq": True, "leg": "fut"})
+                liq_days.append(i)
+                block_until = i + cooldown_after_liq
+                pos, units, entry_px, margin, fund_acc, entry_i = 0, 0.0, 0.0, 0.0, 0.0, -1
         if pos > 0 and long_stop:
-            # 多头固定止损（现货，无爆仓风险，纯粹限制单笔亏损）。
+            # 多头固定止损（无爆仓风险时纯粹限制单笔亏损）。
             stop_px = entry_px * (1 - long_stop)
             if o <= stop_px:
                 close_pos(i, o * (1 - slip), "stop")
@@ -653,11 +711,12 @@ def backtest_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE, spot_fee=SPOT_FEE,
             elif l <= stop_px:
                 close_pos(i, stop_px * (1 - slip), "stop")
                 stopped_dir = 1
-        if pos < 0:
+        if pos < 0 or (pos > 0 and long_on_fut):
+            # 资金费：空头收、多头合约付（pos 带符号，同一行公式自动处理方向）
             fund_acc += pos * units * c * funding_d
-        if pos > 0:
+        if pos > 0 and not long_on_fut:
             eq_now = eq + units * c
-        elif pos < 0:
+        elif pos != 0:
             eq_now = eq + units * (c - entry_px) * pos - fund_acc
         else:
             eq_now = eq
@@ -687,7 +746,8 @@ def backtest_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE, spot_fee=SPOT_FEE,
 def audit_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE, spot_fee=SPOT_FEE,
                  fut_fee=FUT_FEE, slip=SLIP, funding_d=FUNDING_D, vt=VT,
                  exposure_cap=EXPOSURE_CAP, atr_n=ATR_N, warmup=WARMUP,
-                 short_stop=SHORT_STOP, long_stop=LONG_STOP):
+                 short_stop=SHORT_STOP, long_stop=LONG_STOP,
+                 long_on_fut=LONG_ON_FUT):
     """
     完全独立地重新实现一遍混合载体逻辑（不调用 backtest_hybrid），
     逐笔比对交易点与成交价，并比对权益曲线。
@@ -709,15 +769,15 @@ def audit_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE, spot_fee=SPOT_FEE,
         o, h, l, c = bars[i]["open"], bars[i]["high"], bars[i]["low"], bars[i]["close"]
         tgt = sig[i - 1]                       # 只用上一根收盘的信息
         pc = bars[i - 1]["close"]
-        eqref = (eq + units * pc) if pos > 0 else (
-            eq + units * (pc - epx) * pos - fund if pos < 0 else eq)
+        eqref = ((eq + units * pc) if (pos > 0 and not long_on_fut) else
+                 (eq + units * (pc - epx) * pos - fund if pos != 0 else eq))
         dvol = a[i - 1] / pc if not math.isnan(a[i - 1]) else 0.05
         expo = min(exposure_cap, vt / dvol) if dvol > 0 else exposure_cap
         can_open = eqref > 0                   # 与引擎一致：归零后不再开新仓
         if tgt != pos:
             if pos != 0:
                 px = o * (1 - slip) if pos > 0 else o * (1 + slip)
-                if pos > 0:
+                if pos > 0 and not long_on_fut:
                     eq = eq + units * px * (1 - spot_fee)
                 else:
                     eq = eq + units * (px - epx) * pos - units * px * fut_fee - fund
@@ -726,7 +786,7 @@ def audit_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE, spot_fee=SPOT_FEE,
             if tgt != 0 and can_open:
                 px = o * (1 + slip) if tgt > 0 else o * (1 - slip)
                 notional = eqref * expo
-                if tgt > 0:
+                if tgt > 0 and not long_on_fut:
                     units, epx = notional / px, px
                     eq = eq - notional - notional * spot_fee
                 else:
@@ -754,6 +814,13 @@ def audit_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE, spot_fee=SPOT_FEE,
                     eq = eq + units * (fp - epx) * pos - units * fp * fut_fee - fund
                     tr.append((ei, i, pos, epx, fp))
                     pos, units, epx, margin, fund, ei = 0, 0.0, 0.0, 0.0, 0.0, -1
+        if pos > 0 and long_on_fut:            # 合约多头爆仓线：入场价 × (1 - 1/L)
+            lp = epx * (1 - 1.0 / L)
+            if l <= lp:
+                px = o if o <= lp else lp
+                eq -= margin
+                tr.append((ei, i, pos, epx, px))
+                pos, units, epx, margin, fund, ei = 0, 0.0, 0.0, 0.0, 0.0, -1
         if pos > 0 and long_stop:
             sp = epx * (1 - long_stop)
             fp = o * (1 - slip) if o <= sp else (sp * (1 - slip) if l <= sp else None)
@@ -761,10 +828,15 @@ def audit_hybrid(bars, sig, capital=CAPITAL, L=LEVERAGE, spot_fee=SPOT_FEE,
                 eq = eq + units * fp * (1 - spot_fee)
                 tr.append((ei, i, pos, epx, fp))
                 pos, units, epx, margin, fund, ei = 0, 0.0, 0.0, 0.0, 0.0, -1
-        if pos < 0:
+        if pos < 0 or (pos > 0 and long_on_fut):
             fund += pos * units * c * funding_d
-        eqs[i] = max(eq + (units * c if pos > 0 else
-                           (units * (c - epx) * pos - fund if pos < 0 else 0)), 0.0)
+        if pos > 0 and not long_on_fut:
+            _mtm = units * c
+        elif pos != 0:
+            _mtm = units * (c - epx) * pos - fund
+        else:
+            _mtm = 0.0
+        eqs[i] = max(eq + _mtm, 0.0)
     return eqs, tr
 
 
@@ -888,7 +960,8 @@ def main():
     refresh = "--refresh" in sys.argv
     hr()
     log(" BTC 日线趋势策略 · 当前方案回测")
-    log(" 载体：多头走现货 · 空头走合约 %d× 逐仓" % int(LEVERAGE))
+    log(" 载体：%s" % ("双腿均走合约 %d× 逐仓" % int(LEVERAGE) if LONG_ON_FUT
+                       else "多头走现货 · 空头走合约 %d× 逐仓" % int(LEVERAGE)))
     log(" 过滤：SMA%d 只约束多头（收盘价在均线下方时不开多，空头照做）" % REGIME_MA)
     log(" 本金 %.0f USDT | 波动率目标 %.0f%%/日 | 敞口上限 %.1f× | 滑点 %.2f%%"
         % (CAPITAL, VT * 100, EXPOSURE_CAP, SLIP * 100))
@@ -1424,8 +1497,9 @@ def main():
     log(" 一句话总结：")
     log("   1) 信号：双均线 EMA %d/%d，收盘确认、次日开盘成交，无未来函数" % PRIMARY_SET)
     log("   2) 过滤：SMA%d 只约束多头 —— 价格在均线下方时不开多，空头照做" % REGIME_MA)
-    log("   3) 载体：多头走现货（省资金费）、空头走合约 %d× 逐仓（保留做空保护）"
-        % int(LEVERAGE))
+    log("   3) 载体：%s" % ("双腿均走合约 %d× 逐仓（付资金费）" % int(LEVERAGE)
+                            if LONG_ON_FUT else
+                            "多头走现货（省资金费）、空头走合约 %d× 逐仓" % int(LEVERAGE)))
     log("   4) 结果：%.2f×（年化 %+.1f%%），最大回撤 %.1f%%，Calmar %.3f"
         % (st["final"], st["cagr"] * 100, st["mdd"] * 100, st["calmar"]))
     log("   5) 胜率仅 %.1f%%，靠盈亏比 %.2f 赚钱，必须能扛住连续 %d 笔亏损"

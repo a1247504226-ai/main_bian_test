@@ -1,0 +1,84 @@
+# ============ 环境开关 ============
+# testnet: true  → 币安测试网 https://testnet.binancefuture.com（虚拟资金，默认）
+# testnet: false → 币安主网   https://fapi.binance.com（真实资金）
+#
+# 也可以用命令行临时切换，不用改这里：
+#   python trader.py            # 走这里的设置（默认测试网）
+#   python trader.py --testnet  # 强制测试网
+#   python trader.py --mainnet  # 切主网（需要 .env.bot 里的 BINANCE_MAINNET_API_KEY）
+testnet: true
+
+# dry_run=true 只打印不真下单。确认无误后再改 false 或命令行加 --live
+dry_run: true
+
+# ============ 下单 ============
+# 杠杆。2x = 保证金 50% 可撬动 100% 名义
+leverage: 2
+
+# 单笔保证金占账户权益比例（这才是你真正"拿多少钱去做这个仓"）
+# 0.50 = 每仓用一半权益做保证金 → 2x 下名义 100%
+# 注意：这样最多开 2 个仓（50% × 2 = 100% 保证金），没有缓冲
+# 想开更多仓就调小：0.30 → 3 仓，0.25 → 4 仓，0.15 → 6 仓
+margin_pct: 0.50
+
+# 开仓时立即挂的兜底止盈止损（等真实值到了再 amend 替换）
+provisional_sl_pct: 7.0
+provisional_tp_pct: 7.0
+
+# ============ 风控 ============
+# 杠杆上限（必须 >= 上面的 leverage，否则全部拒单）
+max_leverage: 2
+
+# 单笔名义敞口上限（名义/权益）。2x + margin 50% → 名义 100%
+max_position_pct: 1.00
+
+# 单笔保证金上限
+max_margin_pct: 0.50
+
+# 全部持仓保证金合计上限
+# 1.00 = 允许 50%×2 开满两仓；逐仓模式下每仓独立强平，互不影响
+max_total_margin_pct: 1.00
+
+# 最多同时持有几个仓
+max_open_positions: 2
+
+# 单币种累计名义敞口上限
+max_symbol_exposure_pct: 1.00
+
+# 当日亏损达 5% 停止开新仓
+daily_loss_limit_pct: 0.05
+
+# 连亏 3 笔熔断，需人工解除
+max_consecutive_losses: 3
+
+# 币安合约最小名义 5 USDT
+min_order_notional: 5.0
+
+# 交易对白名单，null 表示不限制
+allowed_symbols: null
+# allowed_symbols:
+#   - BTCUSDT
+#   - ETHUSDT
+#   - HBARUSDT
+
+# 信号文本含这些词就跳过不开仓
+# 这些票需要人工判断补仓时机/仓位大小，自动化跟不了
+skip_keywords:
+  - 轻仓
+  - 补仓
+
+# ============ TG 频道监听 ============
+# 申请步骤：手机登录 https://my.telegram.org → API development tools
+#          → 创建应用 → 拿 api_id（数字）和 api_hash（32位字符串）
+# 密钥也可以放 .env.bot 里（TG_API_ID / TG_API_HASH / TG_PHONE / TG_CHANNEL）
+tg_api_id: 0
+tg_api_hash: ""
+tg_phone: ""                    # 带国家码，如 +8613800138000
+tg_channel: ""                  # @频道用户名 / https://t.me/xxx / -100xxxxxxx
+tg_session: tg_session          # 登录后生成的 session 文件（别提交到 git）
+tpsl_ttl_sec: 90                # 止盈止损只收到一半时，等多少秒
+
+# ============ 运维 ============
+state_dir: state
+log_dir: logs
+health_port: 8080

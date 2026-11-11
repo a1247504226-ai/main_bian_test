@@ -1,243 +1,310 @@
-# -*- coding: utf-8 -*-
 """
-Telegram 策略信号解析器（修复版）
-================================
+TG 频道消息解析器
 
-输出结构与 signal_executor.py 的 handle_signal() 完全对齐：
+真实消息长这样（来自傲冠社区）：
+    #OGN    现价空（左侧摸顶，轻仓即可，预留好补仓位）
+    补仓：0,0294
+    止盈：0,0269-0,026-0,025
+    止损：0,0301
 
-    {
-        "type":   "OPEN" | "SET_TPSL" | "TP" | "CLOSE" | "CANCEL_ADD",
-        "symbol": "BTCUSDT" | None,      # 不带币对时为 None，交给执行器走锚点逻辑
-        "side":   "LONG" | "SHORT" | None,
-        "add":    [float, ...],          # 补仓价
-        "tp":     [float, ...],          # 止盈价
-        "sl":     [float, ...],          # 止损价
-        "tp_level": 1 | 2 | 3 | None,
-    }
-
-相比原版的 4 处修复
--------------------
-1. 【致命】一条消息里「止盈 / 止损 / 补仓」三个冒号字段统一抽取后**合并**返回。
-   原版是「谁先命中谁 return」，于是同一条消息里的止损、补仓被静默丢弃：
-   真实日志里 72 条消息的止损、42 条消息的补仓凭空消失 → 止损裸奔。
-
-2. 【致命】营销战绩播报**前置过滤**。
-   原版会把「TP1  50x  +467.91%」「内部群多单TP2止盈拿下」当成真信号，
-   直接去平掉真实仓位。真实日志里 20 条战绩播报被误判成 TP。
-
-3. 【严重】补齐 CLOSE（离场/平仓/出局/清仓）与 CANCEL_ADD（出补仓）两类真实信号，
-   与执行器已支持的类型对齐。原版这两类共 34 条全部被丢弃。
-
-4. 【一般】币对合法性校验 + 兼容「NEAR/USDT」写法；排除「插破低点出局即可」
-   这类行情建议，避免把分析文当成平仓指令。
+难点：
+1. 止盈止损消息里【没有 symbol】，只能靠「最近一个待更新的开仓信号」匹配
+2. 止盈和止损经常分两条消息发，要缓存等齐
+3. 大量干扰消息（战绩、广告、行情分析、TP 触发通知）
+4. 欧洲小数逗号 0,425 → 0.425
 """
-
 import re
+from dataclasses import dataclass, field
+from typing import List, Optional
+
+# 事件类型
+OPEN = "OPEN"        # 开仓
+TPSL = "TPSL"        # 止盈止损（可能只有一半）
+CLOSE = "CLOSE"      # 明确要求离场
+IGNORE = "IGNORE"    # 忽略
+
+# 方向关键词
+SHORT_KEYS = ("现价空", "挂单空", "市价空", "限价空")
+LONG_KEYS = ("现价多", "挂单多", "市价多", "限价多")
+
+# 干扰词：出现这些说明是结果通知/广告，不是新信号
+NOISE_KEYS = (
+    "盈利反馈", "战绩", "恭喜", "上电视", "会员", "VIP", "内部群",
+    "名额", "活动", "点击此处", "私信", "小助理", "感谢信任",
+    "已翻倍", "已到达", "已抵达", "手动止盈", "减仓", "离场",
+    "带保本", "TP1", "TP2", "TP3", "浮盈", "小浮盈", "进场已",
+)
+
+SYMBOL_RE = re.compile(r"#([A-Z0-9]{2,15})")
+# 止盈：0.425-0.41-0.3925  /  止盈: 74500-73000
+TP_RE = re.compile(r"止盈\s*[：:]\s*([\d.,\-]+)")
+SL_RE = re.compile(r"止损\s*[：:]\s*([\d.,]+)")
+COMP_RE = re.compile(r"补仓\s*[：:]\s*([\d.,]+)")
+# 纯数字列表，如 "0.425-0.41-0.3925"
+NUM_LIST_RE = re.compile(r"^\s*([\d.,]+(?:\s*-\s*[\d.,]+)+)\s*$")
 
 
-class SignalParser:
+@dataclass
+class ParsedEvent:
+    kind: str
+    symbol: str = ""
+    direction: str = ""          # long / short
+    entry: Optional[float] = None
+    tp: Optional[float] = None
+    sl: Optional[float] = None
+    raw: str = ""
+    note: str = ""               # 解析说明，写日志用
 
-    # ---- 开仓：  #ETH 现价空 ---------------------------------------------
-    OPEN_RE = re.compile(
-        r"#\s*(?P<symbol>[A-Za-z0-9]{1,20})\s*"
-        r"(?:现价|市价)\s*"
-        r"(?P<side>多|空)",
-        re.I
-    )
+    def __repr__(self):
+        return (f"<{self.kind} {self.symbol} {self.direction} "
+                f"entry={self.entry} tp={self.tp} sl={self.sl}>")
 
-    # ---- 币对：优先 #BTC，回退 BTC/USDT ----------------------------------
-    SYMBOL_RE = re.compile(r"#\s*(?P<symbol>[A-Za-z0-9]{2,20})", re.I)
-    SLASH_SYMBOL_RE = re.compile(r"\b(?P<base>[A-Z0-9]{2,15})\s*/\s*USDT\b", re.I)
 
-    # ---- 冒号字段：止盈 / 止损 / 补仓 ------------------------------------
-    TP_RE = re.compile(r"^\s*止盈\s*[:：]\s*(?P<value>.+?)\s*$", re.I | re.M)
-    SL_RE = re.compile(r"^\s*止损\s*[:：]\s*(?P<value>.+?)\s*$", re.I | re.M)
-    ADD_RE = re.compile(r"^\s*补仓\s*[:：]\s*(?P<value>.+?)\s*$", re.I | re.M)
+def _clean(text: str) -> str:
+    """统一标点：全角转半角、欧洲小数逗号转点
 
-    # ---- 止盈事件：TP1 / TP2️⃣ / 手动TP3 ---------------------------------
-    TP_EVENT_RE = re.compile(
-        r"(?:手动\s*)?TP\s*(?P<level>[123])(?:️⃣)?(?:\s*止盈)?",
-        re.I
-    )
+    这一步很关键：频道经常用全角逗号写价格（0，0269），
+    不转换的话正则会截断成 0.0，止盈价直接算错。
+    """
+    t = text.replace("\u200b", "").replace("\ufeff", "")
+    t = t.replace("，", ",").replace("、", ",").replace("。", ".")
+    t = t.replace("：", ":").replace("；", ";")
+    # 数字之间的逗号当小数点：0,0269 → 0.0269
+    t = re.sub(r"(\d),(\d)", r"\1.\2", t)
+    return t
 
-    NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
 
-    # ---- 营销 / 战绩播报特征：命中即判为噪音，绝不当成交易信号 ------------
-    # 「50x」只有紧跟百分比（战绩格式 50x +467.91%）时才算噪音；
-    # 真实信号里的「杠杆：30X-50X」不能误杀，所以要求 x 后面必须跟 %。
-    MARKETING_RE = re.compile(
-        r"\d+\s*[xX]\s*[+\-]?\s*\d+(?:\.\d+)?\s*%"   # 50x +467.91%
-        r"|\+\s*\d+(?:\.\d+)?\s*%"                    # +467.91%
-        r"|收米|内部群|社区VIP|战绩|盈利反馈|上电视|止盈第\s*\d|跟单",
-    )
+def _to_float(s: str) -> Optional[float]:
+    try:
+        return float(s.strip().replace(",", "."))
+    except (ValueError, AttributeError):
+        return None
 
-    # ---- 战绩播报里的「现价多单 25x +257%」格式 --------------------------
-    # 真实开仓是「#VELVET 现价多」（没有「单」字），
-    # 播报是「#LAUSDT 现价多单 25x +257,10%🚀」。
-    # 这条规则必须在 OPEN 分支之前生效，否则每一条战绩播报都会真的市价开一次仓。
-    OPEN_NOISE_RE = re.compile(
-        r"(?:现价|市价)\s*[多空]\s*单[^\n]{0,40}?"
-        r"(?:\d+\s*[xX]\b|[+\-]\s*\d+(?:[.,]\d+)?\s*%)"
-    )
 
-    # ---- 真实平仓 / 撤补仓 ------------------------------------------------
-    CLOSE_RE = re.compile(r"离场|平仓|出局|清仓|全平")
-    # 「插破低点出局即可」「可以等等回调」是行情建议，不是平仓指令
-    CLOSE_NOISE_RE = re.compile(r"可以等等|给机会|可以尝试|即可尝试|像要(?:做多|做空)")
-    CANCEL_ADD_RE = re.compile(r"出补仓|取消补仓|撤补仓|撤销补仓")
+def _parse_num_list(s: str) -> List[float]:
+    """'0.425-0.41-0.3925' → [0.425, 0.41, 0.3925]"""
+    out = []
+    for part in re.split(r"-", s):
+        v = _to_float(part)
+        if v is not None:
+            out.append(v)
+    return out
 
-    # ==================================================================
-    @classmethod
-    def numbers(cls, text):
-        """从文本里抽取数字，兼容 Telegram 的逗号小数点写法（0,108）。"""
-        if not text:
-            return []
+
+def extract_symbol(text: str) -> str:
+    """取第一个像样的 #SYMBOL"""
+    for m in SYMBOL_RE.finditer(text):
+        sym = m.group(1).upper()
+        if sym in ("USDT", "TP1", "TP2", "TP3", "SL", "VIP"):
+            continue
+        return sym
+    return ""
+
+
+def extract_symbol_near_direction(text: str) -> str:
+    """取「方向词最近」的币种
+
+    消息里常顺带提到别的币（#BTCUSDT 现价空，参考 #ETHUSDT 走势），
+    按位置取最近的那个才不会开错仓。
+    """
+    for key in SHORT_KEYS + LONG_KEYS:
+        p = text.find(key)
+        if p < 0:
+            continue
+        before = text[:p]
+        ms = [m for m in SYMBOL_RE.finditer(before)
+              if m.group(1).upper() not in ("USDT", "TP1", "TP2", "TP3", "SL", "VIP")]
+        if ms:
+            return ms[-1].group(1).upper()
+        m = SYMBOL_RE.search(text[p:])
+        if m and m.group(1).upper() not in ("USDT", "TP1", "TP2", "TP3", "SL", "VIP"):
+            return m.group(1).upper()
+    return ""
+
+
+def normalize_symbol(sym: str) -> str:
+    """BTC → BTCUSDT（币安合约统一加 USDT）
+
+    其他计价货币直接拒绝，避免拼成 BTCUSDCUSDT 这种不存在的交易对
+    """
+    if not sym:
+        return ""
+    s = sym.upper()
+    if s.endswith("USDT"):
+        return s
+    if s.endswith(("USDC", "BUSD")):
+        return ""       # 非 USDT 本位，不接
+    return s + "USDT"
+
+
+def detect_direction(text: str) -> str:
+    """返回 long / short / 空字符串
+
+    同时出现多空关键词时返回空 —— 宁可漏单，不能猜错方向反向开仓
+    """
+    has_short = any(k in text for k in SHORT_KEYS)
+    has_long = any(k in text for k in LONG_KEYS)
+    if has_short and has_long:
+        return ""
+    if has_short:
+        return "short"
+    if has_long:
+        return "long"
+    return ""
+
+
+def is_noise(text: str) -> bool:
+    return any(k in text for k in NOISE_KEYS)
+
+
+def parse(text: str) -> ParsedEvent:
+    """解析一条消息"""
+    raw = text
+    t = _clean(text).strip()
+    if not t:
+        return ParsedEvent(IGNORE, raw=raw, note="空消息")
+
+    direction = detect_direction(t)
+    symbol = extract_symbol_near_direction(t) or extract_symbol(t)
+
+    # 消息里顺带提到别的币是常态，只记一笔，不跳过（避免误伤正常信号）
+    all_syms = [s.upper() for s in SYMBOL_RE.findall(t)
+                if s.upper() not in ("USDT", "TP1", "TP2", "TP3", "SL", "VIP")]
+    multi_note = ""
+    if direction and len(set(all_syms)) > 1:
+        multi_note = f"消息含多币种 {sorted(set(all_syms))}，已取 {symbol}"
+
+    tp_m = TP_RE.search(t)
+    sl_m = SL_RE.search(t)
+    comp_m = COMP_RE.search(t)
+
+    # ---------- 1. 开仓信号：必须有 symbol + 方向 ----------
+    if symbol and direction:
+        norm = normalize_symbol(symbol)
+        if not norm:
+            # 非 USDT 本位（BTCUSDC/BTCBUSD 之类），不接
+            return ParsedEvent(IGNORE, raw=raw,
+                               note=f"{symbol} 不是 USDT 本位合约，跳过")
+        ev = ParsedEvent(OPEN, symbol=norm,
+                         direction=direction, raw=raw, note=multi_note)
+        # 少数情况开仓消息里直接带了止盈止损
+        if tp_m:
+            nums = _parse_num_list(tp_m.group(1))
+            if nums:
+                ev.tp = nums[0]
+        if sl_m:
+            ev.sl = _to_float(sl_m.group(1))
+        if comp_m:
+            ev.entry = _to_float(comp_m.group(1))
+            ev.note = "补仓价作入场参考"
+        return ev
+
+    # ---------- 2. 止盈止损：有冒号+数字，且不是结果通知 ----------
+    if (tp_m or sl_m) and not is_noise(t):
+        # 战绩统计消息形如「获利：24单 止损：4单」，真实价格不会带「单」字。
+        # 不拦的话止损价会被解析成 4.0，等于把止损设在 4 美元（形同裸奔）
+        if re.search(r"[\d.,]+\s*单", t):
+            return ParsedEvent(IGNORE, raw=raw, note="战绩统计消息，不是价格")
+        # 少数消息会带币种名（#BTCUSDT 止盈：...），有的话就带上，匹配更准
+        ev = ParsedEvent(TPSL, symbol=normalize_symbol(symbol) if symbol else "", raw=raw)
+        if tp_m:
+            nums = _parse_num_list(tp_m.group(1))
+            if nums:
+                ev.tp = nums[0]
+        if sl_m:
+            ev.sl = _to_float(sl_m.group(1))
+        if ev.tp is not None or ev.sl is not None:
+            return ev
+
+    # ---------- 3. 纯数字列表（上一行是 symbol 的拆分消息）----------
+    m = NUM_LIST_RE.match(t)
+    if m:
+        return ParsedEvent(IGNORE, raw=raw, note="裸数字列表，缺上下文")
+
+    # ---------- 4. 明确离场 ----------
+    if symbol and ("离场" in t or "全平" in t or "止损离场" in t):
+        return ParsedEvent(CLOSE, symbol=normalize_symbol(symbol), raw=raw)
+
+    return ParsedEvent(IGNORE, raw=raw, note="非信号消息")
+
+
+# ----------------------------------------------------------------------
+class TPSLBuffer:
+    """止盈和止损经常分两条发，这里缓存等齐
+
+    匹配策略：频道一次只推一个信号，所以分配给「最早的一个待更新仓位」。
+    """
+
+    def __init__(self, ttl_sec: int = 90):
+        self.ttl = ttl_sec
+        self._buf = {}   # symbol -> {"tp":x, "sl":y, "ts":time}
+
+    def feed(self, ev: ParsedEvent, target_symbol: str, now: float):
+        if not target_symbol:
+            return None
+        b = self._buf.setdefault(target_symbol, {"tp": None, "sl": None, "ts": now})
+        if ev.tp is not None:
+            b["tp"] = ev.tp
+        if ev.sl is not None:
+            b["sl"] = ev.sl
+        b["ts"] = now
+        if b["tp"] is not None and b["sl"] is not None:
+            out = dict(b)
+            self._buf.pop(target_symbol, None)
+            return out
+        return None
+
+    def flush_expired(self, now: float):
+        """返回超时但只有一半的数据，供告警"""
         out = []
-        for x in cls.NUMBER_RE.findall(text):
-            try:
-                out.append(float(x.replace(",", ".")))
-            except ValueError:
-                pass
+        for sym, b in list(self._buf.items()):
+            if now - b["ts"] > self.ttl:
+                out.append((sym, dict(b)))
+                self._buf.pop(sym, None)
         return out
 
-    @classmethod
-    def _norm_symbol(cls, raw):
-        """校验并规范化币对：只允许 [A-Z0-9]{1,20}（#G 也是合法币对），
-        不以 USDT 结尾则补后缀；非法字符一律返回 None。"""
-        if not raw:
-            return None
-        s = str(raw).upper()
-        if not re.fullmatch(r"[A-Z0-9]{1,20}", s):
-            return None
-        if not s.endswith("USDT"):
-            s += "USDT"
-        return s
+    def restore(self, symbol: str, tp=None, sl=None):
+        """amend 失败时把数据放回缓存，等 housekeeping 重试"""
+        if not symbol:
+            return
+        b = self._buf.get(symbol) or {"tp": None, "sl": None, "ts": time.time(), "retry": 0}
+        if tp is not None:
+            b["tp"] = tp
+        if sl is not None:
+            b["sl"] = sl
+        b["ts"] = time.time()
+        b["retry"] = b.get("retry", 0) + 1
+        self._buf[symbol] = b
 
-    @classmethod
-    def symbol(cls, text):
-        text = text or ""
-        m = cls.SYMBOL_RE.search(text)
-        if m:
-            return m.group("symbol").upper()
-        m = cls.SLASH_SYMBOL_RE.search(text)      # 回退：XXX/USDT
-        if m:
-            return m.group("base").upper() + "USDT"
-        return None
+    def ready(self):
+        """tp 和 sl 都齐了的，供重试"""
+        return {s: dict(b) for s, b in self._buf.items()
+                if b.get("tp") is not None and b.get("sl") is not None}
 
-    # ==================================================================
-    @classmethod
-    def parse_signal(cls, text):
-        if not text:
-            return None
-        text = text.strip()
+    def drop(self, symbol: str):
+        self._buf.pop(symbol, None)
 
-        # 1) OPEN ------------------------------------------------------
-        #    若同一条消息里还带了「止盈/止损/补仓」，一并带上，
-        #    执行器会直接用它开仓（比默认 ±7% 更准）；没有则留空走默认逻辑。
-        m = cls.OPEN_RE.search(text)
-        if m:
-            # 【致命】先拦战绩播报。营销消息里同样有「#XXX 现价多单 25x +144%」，
-            # 若直接返回 OPEN，执行器会真的去市价开仓 —— 真实日志里 9 条播报全中。
-            if cls.OPEN_NOISE_RE.search(text) or cls.MARKETING_RE.search(text):
-                return None
-            sym = cls._norm_symbol(m.group("symbol"))
-            if not sym:
-                return None
-            side = "LONG" if m.group("side") == "多" else "SHORT"
-            m_tp, m_sl, m_add = (cls.TP_RE.search(text), cls.SL_RE.search(text),
-                                 cls.ADD_RE.search(text))
-            return {"type": "OPEN", "symbol": sym, "side": side,
-                    "add": cls.numbers(m_add.group("value")) if m_add else [],
-                    "tp": cls.numbers(m_tp.group("value")) if m_tp else [],
-                    "sl": cls.numbers(m_sl.group("value")) if m_sl else [],
-                    "tp_level": None}
-
-        # 2) 营销 / 战绩播报统一前置过滤 -------------------------------
-        #    这类消息里常夹带「TP1」「离场」「成本离场」「补仓」等词，
-        #    若不在最前面拦掉，会被下面的 CLOSE / TP 规则误判成真信号。
-        if cls.MARKETING_RE.search(text):
-            return None
-
-        # 3) 冒号格式：三个字段一次性抽完再合并（关键修复） --------------
-        m_tp, m_sl, m_add = cls.TP_RE.search(text), cls.SL_RE.search(text), cls.ADD_RE.search(text)
-        tp = cls.numbers(m_tp.group("value")) if m_tp else []
-        sl = cls.numbers(m_sl.group("value")) if m_sl else []
-        add = cls.numbers(m_add.group("value")) if m_add else []
-        if tp or sl or add:
-            return {"type": "SET_TPSL", "symbol": cls._norm_symbol(cls.symbol(text)),
-                    "side": None, "add": add, "tp": tp, "sl": sl, "tp_level": None}
-
-        # 4) 离场 / 平仓（排除「出局即可」这类行情建议） -----------------
-        if cls.CLOSE_RE.search(text) and not cls.CLOSE_NOISE_RE.search(text):
-            return {"type": "CLOSE", "symbol": cls._norm_symbol(cls.symbol(text)),
-                    "side": None, "add": [], "tp": [], "sl": [], "tp_level": None}
-
-        # 5) 出补仓（撤销补仓单） ----------------------------------------
-        if cls.CANCEL_ADD_RE.search(text):
-            return {"type": "CANCEL_ADD", "symbol": cls._norm_symbol(cls.symbol(text)),
-                    "side": None, "add": [], "tp": [], "sl": [], "tp_level": None}
-
-        # 6) TP 事件（营销已在第 2 步拦掉） ------------------------------
-        m = cls.TP_EVENT_RE.search(text)
-        if m:
-            return {"type": "TP", "symbol": cls._norm_symbol(cls.symbol(text)),
-                    "side": None, "add": [], "tp": [], "sl": [],
-                    "tp_level": int(m.group("level"))}
-
-        return None
+    def pending(self):
+        return dict(self._buf)
 
 
-# ======================================================================
-# 自检：覆盖全部修复点，直接运行即可验证
-# ======================================================================
+# ----------------------------------------------------------------------
 if __name__ == "__main__":
-    P = SignalParser.parse_signal
-
-    # 1a) 开仓消息自带止盈止损补仓，价位不能丢
-    s = P("#ETH 现价空\n\n止盈：1.2255 1.295 1.35\n\n止损：1\n\n补仓：0.9")
-    assert s["type"] == "OPEN" and s["symbol"] == "ETHUSDT" and s["side"] == "SHORT", s
-    assert s["tp"] == [1.2255, 1.295, 1.35] and s["sl"] == [1.0] and s["add"] == [0.9], s
-
-    # 1b) 纯止盈止损消息（不带币对，靠执行器锚点匹配上一条下单）
-    s = P("止盈：1.2255 1.295 1.35\n\n止损：1\n\n补仓：0.9")
-    assert s["type"] == "SET_TPSL" and s["symbol"] is None, s
-    assert s["tp"] == [1.2255, 1.295, 1.35] and s["sl"] == [1.0] and s["add"] == [0.9], s
-
-    # 2) 逗号小数点 + 区间写法
-    s = P("止盈：0,01172-0,01205-0,012475\n\n止损：0,0105")
-    assert s["tp"] == [0.01172, 0.01205, 0.012475], s
-    assert s["sl"] == [0.0105], s
-
-    # 3) 营销战绩播报必须被丢弃（否则会平掉真实仓位）
-    assert P("🏆傲冠社区VIP内部群今日依旧空单瀑布收米💵💵  #CHIPUSDT  TP1  50x  +467.91%🚀") is None
-    assert P("#CYS   内部群多单TP2止盈拿下") is None
-    assert P("#AKE   没这大针的话，已经TP2收米了") is None
-
-    # 4) 真实 TP 不能被误杀
-    assert P("#VELVET   7个点了，手动TP1️⃣止盈减仓")["tp_level"] == 1
-    assert P("#SKYAI   TP1️⃣止盈已触发，涨幅10%📈")["tp_level"] == 1
-
-    # 5) CLOSE / CANCEL_ADD
-    s = P("#ETH   此单已离场")
-    assert s["type"] == "CLOSE" and s["symbol"] == "ETHUSDT", s
-    s = P("#GPS     分批进场后已回成本，出补仓")
-    assert s["type"] == "CANCEL_ADD" and s["symbol"] == "GPSUSDT", s
-
-    # 6) 单字符币对 #G、以及 NEAR/USDT 写法
-    s = P("#G    现价空 ( 波动大，1%-2%仓位即可 )")
-    assert s["type"] == "OPEN" and s["symbol"] == "GUSDT" and s["side"] == "SHORT", s
-    s = P("NEAR/USDT    挂单空 📉\n\n杠杆：30X-50X\n\n止盈：2.77-2.58\n\n止损：3.1")
-    assert s["type"] == "SET_TPSL" and s["symbol"] == "NEARUSDT", s
-
-    # 7) 行情建议（「出局即可」）不能当成平仓
-    assert P("#PONS  目前处于震荡箱体低位，可以等等回调，给机会即可尝试，插破低点出局即可") is None
-
-    # 8) 【致命】战绩播报里的「现价多单 25x +144%」绝不能被当成开仓
-    assert P("傲冠VIP内部群今日止盈第  3 单 💵💵\n\n#LAUSDT   现价多单  25x  +144.16%🚀\n\n每日从未缺席") is None
-    assert P("#LAUSDT   现价多单  25x  +257,10%🚀\n\n内部群收米不停，多单TP2止盈触发") is None
-    assert P("周末公开频道休息，内部群照旧发车，依旧止盈拿下\n\n#PUMPUSDT   现价空单   +308.59%🚀") is None
-    # 真实开仓「现价多」不能被误杀
-    assert P("#VELVET   现价多\n\n杠杆：30X-50X\n\n止盈：1.2-1.3\n\n止损：1.1")["type"] == "OPEN"
-    assert P("#ETH 现价空 ( 波动大，1%-2%仓位即可 )")["type"] == "OPEN"
-
-    print("signal_parser 自检通过 ✓  (15/15)")
+    cases = [
+        "#OGN    现价空（左侧摸顶，轻仓即可，预留好补仓位）",
+        "止盈：0,0269-0,026-0,025",
+        "止损：0,0301",
+        "#BTCUSDT   挂单空 📉",
+        "止盈：74500-73000-71500",
+        "止损：77500",
+        "#OGN    手动TP1止盈减仓拿下",
+        "#傲冠VIP群发会员做单盈利反馈 （11/02）🏆",
+        "恭喜会员盈利，感谢反馈，上电视咯",
+        "#UAI    现价多（波动大，轻仓即可）",
+        "补仓：0,0386",
+        "#BTCUSDT   现价空（预留好补仓位）",
+    ]
+    for c in cases:
+        e = parse(c)
+        print(f"{e.kind:7s} {e.symbol:12s} {e.direction:6s} "
+              f"tp={e.tp} sl={e.sl} entry={e.entry}  <- {c[:40]}")

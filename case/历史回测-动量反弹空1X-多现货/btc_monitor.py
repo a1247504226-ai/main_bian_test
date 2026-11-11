@@ -6,7 +6,8 @@ BTC 日线趋势策略 · 每日检测（邮件推送 + 可选币安下单）
 只跟踪**一套**策略（没有备选方案，也没有第二套参数）：
 
     双均线 EMA 10/30 + SMA50 只约束多头 + 波动率目标仓位
-    载体：多头走现货（不付资金费）、空头走合约 1× 逐仓
+    载体：多头走现货（不付资金费，敞口 ≤1）或合约（敞口可 >1，付资金费、有爆仓线）；
+          空头走合约 1× 逐仓。由 monitor_config.json 的 strategy.long_leg 决定。
 
 趋势过滤规则（strategy.regime_ma，默认 50，设 0 关闭）：
     收盘价 > SMA(50) 才允许做多；收盘价在均线下方时把做多信号置 0，**空头照做**。
@@ -141,18 +142,27 @@ C_UP = "#c0392b"      # 红 = 盈利
 C_DOWN = "#1e8449"    # 绿 = 亏损
 C_MUTED = "#66788a"
 
-MARGIN_BUFFER = 0.01  # 空头腿保证金缓冲：1× 逐仓会占满 100% 保证金，留 1% 否则交易所拒单
+MARGIN_BUFFER = 0.01  # 保证金缓冲：满仓时保证金会占满 100%，留 1% 否则交易所拒单
 
 
-def short_size_factor(lev):
+def short_size_factor(lev, expo=1.0):
     """
-    空头腿下单量系数：把名义敞口压到「保证金 + 手续费一定开得出来」的范围内。
+    下单量系数：把名义压到「保证金 + 手续费一定开得出来」的范围内。
 
-    1× 逐仓需要 100% 保证金（名义 = 权益），再加上手续费就超过账户余额，
-    交易所会以「保证金不足」直接拒单 —— 所以必须缩量留缓冲。
-    杠杆 ≥ 2× 时保证金占用 ≤ 50%，系数就是 1.0（不缩量）。
+    名义 = 权益 × expo，保证金 = 名义 / lev = 权益 × expo / lev。
+    要求保证金 ≤ 权益 × (1 - MARGIN_BUFFER)  →  expo/lev ≤ 1-buffer
+    所以系数 = min(1, lev × (1-buffer) / expo)。
+
+    几个关键点：
+      · lev=1, expo=1 → 0.99（1× 满仓会占满 100% 保证金，必须留 1%）
+      · lev=2, expo=2 → 0.99（2 倍仓位下保证金同样占满，仍需留 1%）
+      · lev=2, expo=1 → 1.0 （保证金只占 50%，不用缩）
     """
-    return min(1.0, float(lev) * (1.0 - MARGIN_BUFFER))
+    l = float(lev)
+    e = float(expo) if expo else 0.0
+    if e > 0:
+        return min(1.0, l * (1.0 - MARGIN_BUFFER) / e)
+    return min(1.0, l * (1.0 - MARGIN_BUFFER))
 
 
 # ==============================================================================
@@ -223,12 +233,29 @@ def save_state(st):
 LOG_BUF = []
 
 
-def log(msg=""):
-    LOG_BUF.append(str(msg))
+# ---- 跨平台输出编码 ----
+# Linux cron 的 LANG 常常是 C / POSIX（ASCII），中文日志会直接抛 UnicodeEncodeError
+# 把整个脚本打断。这里在入口处强制 UTF-8，比在每个 print 里兜底可靠得多。
+for _stream in (sys.stdout, sys.stderr):
     try:
-        print(msg)
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+
+def log(msg=""):
+    s = str(msg)
+    LOG_BUF.append(s)
+    try:
+        # flush=True：cron 把输出重定向到文件时是块缓冲，进程被 kill 会丢日志
+        print(s, flush=True)
     except UnicodeEncodeError:
-        print(str(msg).encode("utf-8", "replace").decode("utf-8", "replace"))
+        # 极端情况下终端仍不接受中文 → 转成 ASCII 转义，至少不让脚本崩
+        enc = getattr(sys.stdout, "encoding", None) or "ascii"
+        try:
+            print(s.encode(enc, "replace").decode(enc, "replace"), flush=True)
+        except Exception:
+            pass
 
 
 def fdate(ms):
@@ -385,7 +412,8 @@ def derive_position(bars, sig, cfg, tag, pending=False, next_bar=None, since=Non
     sig = regime_long(bars, sig, st.get("regime_ma", 0))   # 幂等：调用方已过滤也无妨
     res = E.backtest_hybrid(bars, sig, E.CAPITAL, L=lev,
                             exposure_cap=st["exposure_cap"], vt=st["vt"],
-                            atr_n=st["atr_n"], warmup=st["warmup"])
+                            atr_n=st["atr_n"], warmup=st["warmup"],
+                            long_on_fut=E.LONG_ON_FUT)
     eq = res["equity"]
     n = len(bars)
     cur_sig = sig[-1]
@@ -468,7 +496,8 @@ def derive_position(bars, sig, cfg, tag, pending=False, next_bar=None, since=Non
             try:
                 r2 = E.backtest_hybrid(vb, vs, E.CAPITAL, L=lev,
                                        exposure_cap=st["exposure_cap"], vt=st["vt"],
-                                       atr_n=st["atr_n"], warmup=st["warmup"])
+                                       atr_n=st["atr_n"], warmup=st["warmup"],
+                                       long_on_fut=E.LONG_ON_FUT)
                 if len(r2["trades"]) > len(res["trades"]):      # 确实新增了一笔才用
                     t = r2["trades"][-1]
                     j2 = t["entry_i"] - 1
@@ -543,13 +572,15 @@ def derive_position(bars, sig, cfg, tag, pending=False, next_bar=None, since=Non
         "comp_realized": comp_equity - base, "comp_equity": comp_equity,
         "comp_qty": 0.0, "comp_notional": 0.0, "comp_mkt_value": 0.0,
         "comp_upnl": 0.0, "comp_mult": (comp_equity / base) if base else 0.0,
-        "leg": ("现货" if cur_sig > 0 else
-                ("合约 %d× 逐仓" % int(lev) if cur_sig < 0 else "—")),
+        "leg": ("—" if cur_sig == 0 else
+                ("合约 %d× 逐仓%s" % (int(lev), "（多头）" if cur_sig > 0 else "（空头）")
+                 if (cur_sig < 0 or E.LONG_ON_FUT) else "现货")),
         "recent": recent[-3:],
         "just_closed": just_closed,
         "ref_expo": 0.0,
         "expo_now": 0.0,
         "stop_px": None, "stop_pct": 0.0, "short_stop": 0.0, "entry_i": None,
+        "liq_px": None, "margin": 0.0,
     }
 
     # 「今天要下单」该用的敞口 = 用最后一根已收盘 K 线的 ATR 算的那个，
@@ -600,9 +631,14 @@ def derive_position(bars, sig, cfg, tag, pending=False, next_bar=None, since=Non
 
     def _upnl(q, s):
         """净浮盈：现在平掉能拿到多少（扣手续费 / 资金费）"""
-        if s > 0:
+        if s > 0 and not E.LONG_ON_FUT:
+            # 现货多头：买卖各 0.1% 手续费，不付资金费
             return q * cur_px * (1 - E.SPOT_FEE) - q * entry_px * (1 + E.SPOT_FEE)
-        fg = q * cur_px * E.FUNDING_D * days          # 空头收资金费
+        fg = q * cur_px * E.FUNDING_D * days
+        if s > 0:
+            # 合约多头：付资金费（−fg）
+            return q * (cur_px - entry_px) - q * cur_px * E.FUT_FEE - fg
+        # 合约空头：收资金费（+fg）
         return q * (entry_px - cur_px) - q * cur_px * E.FUT_FEE + fg
 
     # ---- 当前持仓的仓位尺寸：滚仓口径 ----
@@ -626,6 +662,8 @@ def derive_position(bars, sig, cfg, tag, pending=False, next_bar=None, since=Non
         "entry_i": entry_i,
         "entry_today": entry_today,
         "qty": qty, "notional": notional, "expo": expo,
+        # 占用保证金：合约腿 = 名义/杠杆；现货多头不占保证金
+        "margin": (notional / lev) if (cur_sig < 0 or E.LONG_ON_FUT) else 0.0,
         "mkt_value": qty * cur_px, "upnl": upnl,
         "upnl_pct": (upnl / notional) if notional > 0 else 0.0,
         "hold_days": days,
@@ -651,6 +689,13 @@ def derive_position(bars, sig, cfg, tag, pending=False, next_bar=None, since=Non
     if cur_sig < 0 and _ss > 0 and entry_px > 0:
         out["stop_px"] = entry_px * (1.0 + _ss)
         out["stop_pct"] = (out["stop_px"] / cur_px - 1.0) if cur_px > 0 else 0.0
+
+    # ---- 爆仓线（只有合约腿才有；现货多头不存在爆仓）----
+    if cur_sig != 0 and entry_px > 0:
+        if cur_sig < 0:
+            out["liq_px"] = entry_px * (1.0 + 1.0 / lev)     # 空头：逆行 1/lev 爆
+        elif E.LONG_ON_FUT:
+            out["liq_px"] = entry_px * (1.0 - 1.0 / lev)     # 合约多头：下跌 1/lev 爆
     return out
 
 
@@ -687,7 +732,39 @@ def short_risk(bars, sig, cfg, entry_px=None, entry_i=None, today_bar=None):
     adverse = 1.0 - peak / entry_px
     return {"entry_date": fdate(bars[entry_i]["t"]), "entry_px": entry_px,
             "peak": peak, "adverse": adverse, "margin": adverse + line,
-            "liq_px": entry_px * (1 + line), "lev": lev}
+            "liq_px": entry_px * (1 + line), "lev": lev, "kind": "short"}
+
+
+def long_risk(bars, sig, cfg, entry_px=None, entry_i=None, today_bar=None):
+    """
+    合约多头腿风控：L× 逐仓的爆仓线在 入场价 ×(1 − 1/L)。
+    用本轮多头区间的最低价估算最大逆行与安全边际。
+
+    与 short_risk 完全对称：
+      · adverse = 1 − 最低价/入场价（正数 = 跌了多少）
+      · margin  = 1/L − adverse（还能再跌多少个百分点才爆仓）
+      · 现货多头不调用本函数（没有爆仓概念）
+    """
+    lev = float(cfg["binance"]["leverage"])
+    sig = regime_long(bars, sig, cfg["strategy"].get("regime_ma", 0))
+    line = 1.0 / lev
+    if sig[-1] <= 0:
+        return None
+    if entry_i is None:
+        i = len(bars) - 1
+        while i > 0 and sig[i - 1] > 0:
+            i -= 1
+        entry_i = min(i + 1, len(bars) - 1)
+    if entry_px is None:
+        entry_px = bars[entry_i]["open"]
+    if today_bar is not None and entry_px and entry_px > 0:
+        trough = min(today_bar.get("low") or entry_px, entry_px)
+    else:
+        trough = min(b["low"] for b in bars[entry_i:])
+    adverse = 1.0 - trough / entry_px
+    return {"entry_date": fdate(bars[entry_i]["t"]), "entry_px": entry_px,
+            "peak": trough, "adverse": adverse, "margin": line - adverse,
+            "liq_px": entry_px * (1 - line), "lev": lev, "kind": "long"}
 
 
 # ==============================================================================
@@ -834,6 +911,26 @@ def _money_cell(v):
 def _pct_cell(v):
     c = C_UP if v > 0 else (C_DOWN if v < 0 else C_MUTED)
     return '<span style="color:%s;font-weight:700">%s</span>' % (c, pct(v))
+
+
+def _code_version():
+    """
+    三个核心文件里「最新的那个」修改时间。
+
+    以前只标 btc_monitor.py，但影响结果的还有 btc_strategy.py（费率/波动率目标/引擎）
+    和 btc_trade.py（下单逻辑）—— 只标一个的话，两台机器版本不一致时看邮件底部会误判
+    「明明一样啊」，实际上策略参数已经不同了。
+    """
+    ts = []
+    for fn in ("btc_monitor.py", "btc_strategy.py", "btc_trade.py"):
+        p = os.path.join(HERE, fn)
+        try:
+            ts.append(os.path.getmtime(p))
+        except Exception:
+            pass
+    if not ts:
+        return "?"
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(max(ts)))
 
 
 def build_mail_html(res):
@@ -1016,12 +1113,24 @@ def build_mail_html(res):
                   '<div style="font-size:11px;font-weight:400;color:#8a9aab;margin-top:3px;line-height:1.5">'
                   '%s</div></td></tr>'
                   % (C_MUTED, "空仓 · 尚未参与" if pos["dir"] == 0 else "尚未参与", _sub))
-    if pos["dir"] < 0 and res.get("short_risk"):
+    if pos["dir"] != 0 and res.get("short_risk"):
         r = res["short_risk"]
+        _epx = pos.get("entry_px") or r["entry_px"]
+        _mv = abs(r["liq_px"] / _epx - 1) * 100 if _epx else 0.0
         # 用 += 而不是 =，否则「参与状态」那行会被覆盖掉（空头 + 未参与时会丢）
         extra += ('<tr><td style="padding:4px 0;color:%s">爆仓价 / 安全余量</td>'
-                  '<td style="padding:4px 0">%.2f USDT / <b>%.2f pp</b></td></tr>'
-                  % (C_MUTED, r["liq_px"], r["margin"] * 100))
+                  '<td style="padding:4px 0">%.2f USDT / <b>%.2f pp</b>'
+                  '<div style="font-size:11px;font-weight:400;color:#8a9aab;margin-top:3px;line-height:1.5">'
+                  '价格%s %.1f%% 即强制平仓（%d× 逐仓）</div></td></tr>'
+                  % (C_MUTED, r["liq_px"], r["margin"] * 100,
+                     "下跌" if r.get("kind") == "long" else "上涨", _mv, int(r["lev"])))
+    if pos["dir"] != 0 and pos.get("margin"):
+        _acc_ref = pos.get("acc") or pos["base"] or 0.0
+        extra += ('<tr><td style="padding:4px 0;color:%s">占用保证金</td>'
+                  '<td style="padding:4px 0">%.2f USDT（%.0f%% 权益 · %d× 逐仓）</td></tr>'
+                  % (C_MUTED, pos["margin"],
+                     (pos["margin"] / _acc_ref * 100) if _acc_ref else 0.0,
+                     int(pos.get("leverage", 1))))
 
     # ---------- 最近平仓 ----------
     def recent_table(p, title):
@@ -1205,7 +1314,7 @@ table{width:100%%;border-collapse:collapse;table-layout:fixed}
   仓位规则：波动率目标 %(vt_pct).1f%%/日，敞口上限 %(expocap).2f×；%(regime_txt)s。<br>
   <b>止损规则</b>：%(stop_txt)s。<br>
   历史参考：%(first_month)s 至今（%(span_years).2f 年）胜率 %(win_rate).0f%%，盈亏比 %(pl_ratio).1f，最大回撤 %(mdd_txt)s，最长水下 %(uw_txt)s。<br>
-  空头腿固定 %(lev)d× 逐仓（价格逆行 +%(liqline).1f%% 即爆仓；历史最深逆行 %(adv_txt)s）；多头腿不上杠杆。<br>
+  双腿均按合约 %(lev)d× 逐仓（价格逆行 %(liqline).1f%% 即爆仓；空头历史最深逆行 %(adv_txt)s）。<br>
   <b>本邮件是回测规则的机械信号，不构成投资建议。</b>加密资产波动极大，请自行判断并控制风险。
 </div>
 
@@ -1214,7 +1323,7 @@ table{width:100%%;border-collapse:collapse;table-layout:fixed}
         "bar": res["bar_date"], "close": res["close"], "gen": fdt(),
         # 代码版本 = 本文件的最后修改时间：换机器/换副本后一眼能看出
         # 这封邮件是哪个版本生成的（多台机器跑同一策略时分不清就会扯皮）
-        "ver": time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(__file__))),
+        "ver": _code_version(),
         "pending_note": (
             ("<b>⚠ 当前这笔你还没有参与</b>（%s 开的%s），所以它的浮盈<b>不计入</b>账户现值，"
              "账户就是本金 <b>%.0f USDT</b>；等信号翻转后按本金进场，从那一笔开始计入，"
@@ -1247,8 +1356,11 @@ table{width:100%%;border-collapse:collapse;table-layout:fixed}
         "liqline": 100.0 / float(cfg["binance"]["leverage"]),
         "regime_txt": regime_txt,
         "stop_txt": stop_txt,
-        "rule": "多头走现货 · 空头走合约 %d× 逐仓 · %s"
-                % (int(float(cfg["binance"]["leverage"])), regime_txt),
+        "rule": ("多头合约 %d× · 空头合约 %d× · %s" if E.LONG_ON_FUT
+                 else "多头走现货 · 空头走合约 %d× · %s")
+                % ((int(float(cfg["binance"]["leverage"])),) * 2 + (regime_txt,)
+                   if E.LONG_ON_FUT else
+                   (int(float(cfg["binance"]["leverage"])), regime_txt)),
         "closed_n": pos["closed_n"],
         "win_rate": pos["win_rate"] * 100.0,
         "pl_ratio": pos["pl_ratio"],
@@ -1318,8 +1430,10 @@ def send_mail(cfg, subject, html):
 
 def lock_dir():
     """本机公用的发信锁目录：同一台机器上所有策略副本都往这里写锁。"""
+    # Windows 用 %LOCALAPPDATA%；Linux/macOS 用 ~（不能用 /tmp —— 会被系统定期清理，
+    # 而且多用户机器上是共享的，锁会互相干扰）。
     base = (os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
-            or tempfile.gettempdir())
+            or os.path.expanduser("~") or tempfile.gettempdir())
     d = os.path.join(base, "BTC_Strategy")
     try:
         os.makedirs(d, exist_ok=True)
@@ -1397,6 +1511,10 @@ def release_mail_slot(path):
 
 def _ps(script):
     """跑一段 PowerShell，按 UTF-8 取回输出（避免中文乱码）。"""
+    if sys.platform != "win32":
+        # Linux / macOS 上没有 powershell：直接返回空，让 doctor 走「没找到」分支，
+        # 而不是抛 FileNotFoundError 把整个诊断打断。
+        return ""
     cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
            "[Console]::OutputEncoding=[Text.Encoding]::UTF8; " + script]
     try:
@@ -1546,6 +1664,17 @@ def main():
         log("=" * 100)
         return 2
     st = cfg["strategy"]
+
+    # 无人值守自动下单开关：定时任务注册的命令不带 --live（只发邮件），
+    # 想让它自己下单就把 binance.auto_live 改成 true。默认 false，安全优先。
+    # ⚠ 但「只读」参数（--no-mail / --dump-html）必须挡住 auto_live ——
+    #   否则用户只想看一眼（比如 --no-mail 检查数据），却真的开了仓。
+    if not live and bool((cfg.get("binance") or {}).get("auto_live")):
+        if no_mail or html_out:
+            log("  ℹ 本次带 --no-mail / --dump-html（只读），已忽略 binance.auto_live，不会下单")
+        else:
+            live = True
+            log("  ⚠ binance.auto_live = true → 本次按 --live 执行（会真实下单）")
     warnings = []
 
     if reset and os.path.exists(STATE_PATH):
@@ -1649,8 +1778,10 @@ def main():
                           next_bar=nb,
                           since=state.get("participate_from"))
     _lev = float(cfg["binance"]["leverage"])
-    log("      配置：多头现货 · 空头合约 %d× 逐仓（爆仓线 %+.1f%%）· %s"
-        % (int(_lev), 100.0 / _lev,
+    log("      配置：%s（爆仓线 %+.1f%%）· 波动率目标 %.1f%% · 敞口上限 %.2f× · %s"
+        % ("双腿合约 %d× 逐仓" % int(_lev) if E.LONG_ON_FUT else "多头现货 · 空头合约 %d× 逐仓" % int(_lev),
+           100.0 / _lev, float(cfg["strategy"]["vt"]) * 100,
+           float(cfg["strategy"]["exposure_cap"]),
            ("SMA%d 只约束多头" % int(rma)) if rma else "无均线过滤"))
     if pending:
         if pos["dir"] == 0:
@@ -1735,16 +1866,27 @@ def main():
 
     # ---- 风控 ----
     log("[5/6] 风控检查")
-    sr = short_risk(bars, sig, cfg, entry_px=pos.get("entry_px"),
-                    entry_i=pos.get("entry_i"),
-                    today_bar=(nb if pos.get("entry_today") else None))
+    _tb = (nb if pos.get("entry_today") else None)
+    if pos["dir"] > 0:
+        # 多头：只有走合约才有爆仓线；现货多头没有风控可查
+        sr = (long_risk(bars, sig, cfg, entry_px=pos.get("entry_px"),
+                        entry_i=pos.get("entry_i"), today_bar=_tb)
+              if E.LONG_ON_FUT else None)
+    else:
+        sr = short_risk(bars, sig, cfg, entry_px=pos.get("entry_px"),
+                        entry_i=pos.get("entry_i"), today_bar=_tb)
     if sr:
         # 用 pos 里的真实成本价（止损重开后 sr 按信号段推的会偏）
         _ep = pos.get("entry_px") or sr["entry_px"]
-        _liq = _ep * (1 + 1.0 / sr["lev"])
-        log("      空头腿：入场 %s @ %.2f，期间最高 %.2f，最大逆行 %s，爆仓价 %.2f"
-            % (pos.get("entry_date") or sr["entry_date"], _ep, sr["peak"],
-               pct(sr["adverse"]), _liq))
+        _liq = sr["liq_px"]
+        if sr["kind"] == "long":
+            log("      多头腿（合约）：入场 %s @ %.2f，期间最低 %.2f，最大逆行 %s，爆仓价 %.2f"
+                % (pos.get("entry_date") or sr["entry_date"], _ep, sr["peak"],
+                   pct(sr["adverse"]), _liq))
+        else:
+            log("      空头腿：入场 %s @ %.2f，期间最高 %.2f，最大逆行 %s，爆仓价 %.2f"
+                % (pos.get("entry_date") or sr["entry_date"], _ep, sr["peak"],
+                   pct(sr["adverse"]), _liq))
         if pos.get("stop_px"):
             log("      止损价 %.2f（逆行 %.0f%% 市价买回）—— 比爆仓价 %.2f 低 %.2f%%"
                 % (pos["stop_px"], pos["short_stop"] * 100, _liq,
@@ -1753,19 +1895,36 @@ def main():
             % (int(sr["lev"]), sr["margin"] * 100,
                "  ← 余量不足！" if sr["margin"] < 0.05 else ""))
         if sr["margin"] < 0.05:
-            warnings.append("空头腿距爆仓线仅 %.2f pp，请检查杠杆是否超过 %d×。"
-                            % (sr["margin"] * 100, int(sr["lev"])))
+            warnings.append("%s腿距爆仓线仅 %.2f pp，请检查杠杆是否超过 %d×。"
+                            % ("多" if sr["kind"] == "long" else "空",
+                               sr["margin"] * 100, int(sr["lev"])))
     else:
-        log("      当前非空头状态，无需爆仓检查")
+        log("      当前无合约持仓，无需爆仓检查")
     log("")
 
     # ---- 下单计划 ----
     import btc_trade as T
-    bnc = T.Binance(cfg)
+    # 配置非法（比如 symbol 不是 XXXUSDT）时 T.Binance() 会抛异常。
+    # 这里必须接住：不下单可以，但**邮件要照发**（带上警告），
+    # 否则用户只看到「脚本崩了」，根本不知道是配置写错了。
+    bnc = None
+    try:
+        bnc = T.Binance(cfg)
+    except Exception as e:
+        log("      ✘ 下单模块初始化失败：%s" % e)
+        log("        → 本次不下单，邮件照发。请检查 monitor_config.json 的 binance.symbol。")
+        warnings.append("⚠ 下单模块初始化失败（%s）→ 本次未下单。"
+                        "请检查 monitor_config.json 的 binance.symbol（必须是 XXXUSDT）。" % e)
     ref_price = bars[-1]["close"]
-    orders, notes = build_order_plan(pos, cfg, bnc, ref_price)
-    block_live = stale or price_anomaly
-    live_enabled = bool(cfg["binance"]["enabled"] and live and not block_live)
+    if bnc is None:
+        orders = ["✘ 下单模块初始化失败，本次不下单（详见警告）"]
+        notes = []
+        block_live = True
+    else:
+        orders, notes = build_order_plan(pos, cfg, bnc, ref_price)
+        block_live = stale or price_anomaly
+    live_enabled = bool(cfg["binance"]["enabled"] and live
+                        and not block_live and bnc is not None)
     if cfg["binance"]["enabled"] and live and block_live:
         log("[6/6] %s，已跳过真实下单（只给计划）"
             % ("数据滞后 %.1f 天" % lag_days if stale else "价格疑似错位"))

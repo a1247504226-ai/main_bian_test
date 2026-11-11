@@ -22,5 +22,16 @@
     "port": 465,
     "use_ssl": true,
     "max_retries": 3
+  },
+  "exchange": {
+    "enabled": true,
+    "testnet": true,
+    "api_key": "riufKUh5kdZNF0eOiHo2eLRPVXOFlPAxbVIdePgK3e0EIbeOmFqGIaryTTT0u9fb",
+    "api_secret": "FG6lfFCmNnG0ieStXhQ9QTfaM3ix1Pb5tLksdwvnwq8aUVSinGuzyH6ID2gZJQpO",
+    "leverage": 2.0,
+    "notional_usdt": 150,
+    "margin_type": "CROSSED",
+    "min_interval_sec": 1.0,
+    "comment": "testnet=True 时只连测试网；enabled=False 则完全不触发真实下单"
   }
 }

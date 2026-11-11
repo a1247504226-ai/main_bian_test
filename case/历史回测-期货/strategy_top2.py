@@ -877,6 +877,7 @@ def _track(rows, st, data_date):
         sym, mult, px = r["sym"], r["mult"], r["px"]
         ndir = r["sig"] if r["lots"] > 0 else 0
         nlot = r["lots"] if ndir else 0
+        rth = 0.0                      # 本品种本次兑现的盈亏（单独记，供邮件展示）
 
         o = old.get(sym) or {"dir": 0, "lots": 0, "entry_px": None, "entry_date": None}
         odir, oent, odat = o["dir"], o["entry_px"], o["entry_date"]
@@ -890,10 +891,12 @@ def _track(rows, st, data_date):
         if ndir == 0:
             ent, edat = None, None
             if odir and oent is not None and lots_known:
-                realized += (px - oent) * odir * olot * mult          # 平仓兑现
+                rth = (px - oent) * odir * olot * mult                  # 平仓兑现
+                realized += rth
         elif odir != ndir:
             if odir and oent is not None and lots_known:              # 反手先平旧仓
-                realized += (px - oent) * odir * olot * mult
+                rth = (px - oent) * odir * olot * mult
+                realized += rth
             ent, edat = px, data_date
         elif oent is None:                                             # 旧记录缺成本
             ent, edat = _rebuild_entry(sym, ndir) or (px, data_date)
@@ -903,7 +906,8 @@ def _track(rows, st, data_date):
         elif nlot < olot:                                              # 减仓 → 成本不变
             ent, edat = oent, odat
             if lots_known:
-                realized += (px - oent) * ndir * (olot - nlot) * mult
+                rth = (px - oent) * ndir * (olot - nlot) * mult
+                realized += rth
         else:
             ent, edat = oent, odat
 
@@ -914,16 +918,43 @@ def _track(rows, st, data_date):
         if ndir == odir and (not lots_known or nlot == olot):
             pass
         else:
+            # 【下单指令必须精确到「几笔、每笔多少手」】
+            # 以前只给一个最终手数，实测会误导：
+            #   平仓显示「0 手」（其实要平 1 手）
+            #   反手显示「1 手」（其实要先平 1 手再开 1 手，两笔）
+            #   加仓显示「2 手」（其实只加 1 手，看到 2 手会开成 3 手）
+            # 这里按变动类型拆成明确的操作清单。
+            open_txt = "开%s" % ("多" if ndir > 0 else "空")
+            # margin_released = 本次平掉/减掉的手数所释放的保证金。
+            # 平仓时 r["margin"] 是目标持仓（0），不能拿它当释放额 —— 会显示「释放 0」。
             if ndir == 0:
-                how = "%s → 平仓" % dir_txt(odir)
+                legs = [("平%s" % dir_txt(odir), olot)]
+                margin_after = 0.0
+                margin_released = olot * r["margin_per"]
             elif odir == 0:
-                how = "开%s仓" % ("多" if ndir > 0 else "空")
+                legs = [(open_txt, nlot)]
+                margin_after = r["margin"]
+                margin_released = 0.0
             elif ndir == -odir:
-                how = "%s → %s（反手）" % (dir_txt(odir), dir_txt(ndir))
+                legs = [("平%s" % dir_txt(odir), olot), (open_txt, nlot)]
+                margin_after = r["margin"]
+                margin_released = olot * r["margin_per"]
             elif nlot > olot:
-                how = "%s 加至 %d 手" % (dir_txt(ndir), nlot)
+                legs = [("加%s" % dir_txt(ndir), nlot - olot)]
+                margin_after = r["margin"]
+                margin_released = 0.0
             else:
-                how = "%s 减至 %d 手" % (dir_txt(ndir), nlot)
+                legs = [("减%s" % dir_txt(ndir), olot - nlot)]
+                margin_after = r["margin"]
+                margin_released = (olot - nlot) * r["margin_per"]
+
+            if len(legs) == 1:
+                how = "%s %d 手" % legs[0]
+                if ndir != 0 and ndir == odir:
+                    how += "（至 %d 手）" % nlot
+            else:
+                how = "先%s %d 手 → 再%s %d 手" % (
+                    legs[0][0], legs[0][1], legs[1][0], legs[1][1])
 
             if r["gap"] > CARRY_THR:
                 basis = "长期升水（contango），做空收展期收益"
@@ -941,7 +972,12 @@ def _track(rows, st, data_date):
                 reason = "carry 与趋势同时反向"
 
             c = dict(r)
-            c.update({"how": how, "reason": reason, "basis": basis})
+            c.update({"how": how, "reason": reason, "basis": basis,
+                      "legs": legs, "n_orders": len(legs),
+                      "order_lots": sum(x[1] for x in legs),
+                      "margin_after": margin_after,
+                      "margin_released": margin_released,
+                      "realized_this": rth})
             changes.append(c)
 
         # ── 浮动盈亏 ──────────────────────────────────────────────
@@ -1030,19 +1066,33 @@ def _build_mail(rows, changes, data_date, positions=None, pnl=None,
     tm = sum(r["margin"] for r in rows)
 
     # ── ① 本次变动表 ──
+    # 列：品种 / 操作 / 手数 / 参考价 / 变动后保证金
+    # 「手数」用 order_lots（本次真正要下的手数），不是目标持仓手数 ——
+    # 平仓时目标持仓是 0，直接用会显示「0 手」，用户不知道该平多少。
     ch_rows, ch_notes = [], {}
     for k, c in enumerate(changes):
         col = _COLOR[c["sig"]]
+        n_ord = c.get("n_orders", 1)
+        o_lots = c.get("order_lots", c["lots"])
+        m_after = c.get("margin_after", c["margin"])
+        if m_after <= 0:
+            m_txt = "释放 %s" % format(c.get("margin_released", c["margin"]), ",.0f")
+        else:
+            m_txt = format(m_after, ",.0f")
+        lots_txt = ("%d 手" % o_lots) if n_ord == 1 else ("%d 笔/%d 手" % (n_ord, o_lots))
         ch_rows.append([
             '<td style="%s"><b>%s</b> <span style="font-size:12px;color:#8a949e">%s</span></td>'
             % (_C_TD, c["name"], c["sym"]),
             '<td style="%s;color:%s;font-weight:700">%s</td>' % (_C_TD, col, c["how"]),
-            '<td style="%s">%d</td>' % (_C_NUM, c["lots"]),
+            '<td style="%s">%s</td>' % (_C_NUM, lots_txt),
             '<td style="%s">%s</td>' % (_C_NUM, format(c["px"], ",.1f")),
-            '<td style="%s">%s</td>' % (_C_NUM, format(c["margin"], ",.0f")),
+            '<td style="%s">%s</td>' % (_C_NUM, m_txt),
         ])
-        ch_notes[k] = "%s　·　日波动 %.2f%%　敞口 %.2fx" % (c["basis"], c["dvol"] * 100, c["expo"])
-    ch_tbl = _tbl(["品种", "操作", "手数", "现价", "保证金"],
+        note = "%s　·　日波动 %.2f%%　敞口 %.2fx" % (c["basis"], c["dvol"] * 100, c["expo"])
+        if c.get("realized_this"):
+            note += "　·　本次兑现 %s 元" % _money(c["realized_this"])
+        ch_notes[k] = note
+    ch_tbl = _tbl(["品种", "操作", "手数", "参考价", "保证金"],
                   ["28%", "18%", "12%", "20%", "22%"], ch_rows, ch_notes,
                   right=(2, 3, 4))
 
@@ -1098,8 +1148,15 @@ def _build_mail(rows, changes, data_date, positions=None, pnl=None,
              % (bar_bg, tag, data_date, format(EQUITY, ",.0f")))
 
     if changes:
-        h.append('<p style="%s;margin-top:18px">■ 本次需要操作（%d 项）</p>' % (P, len(changes)))
+        total_orders = sum(c.get("n_orders", 1) for c in changes)
+        h.append('<p style="%s;margin-top:18px">■ 本次需要操作（%d 项 / 共 %d 笔）</p>'
+                 % (P, len(changes), total_orders))
         h.append(ch_tbl)
+        # 下单要点：这几句是为了避免最常见的三种下错方式
+        h.append('<p style="%s;margin-top:4px">'
+                 '· 「参考价」是上一交易日收盘价，<b>不是限价</b>，开盘按市价成交即可<br>'
+                 '· 标注「2 笔」的（反手）必须<b>先平旧仓、再开新仓</b>，顺序不能反<br>'
+                 '· 平仓后保证金会释放，可以立刻用于同一封邮件里的其他开仓</p>' % S)
     else:
         h.append('<p style="%s;margin-top:18px">■ 本次无仓位变动</p>' % P)
         h.append('<p style="%s">持仓与上次一致，今天不需要下单。</p>' % S)
@@ -1138,6 +1195,18 @@ def _build_mail(rows, changes, data_date, positions=None, pnl=None,
              '· 极端情形（全部持仓同时反向 8%%）约亏 %s 元 = %.1f%% 权益。<br>'
              '· 历史回测不代表未来表现；期货为保证金交易，存在本金全部损失的风险。</p>'
              % (S, format(tn * 0.08, ",.0f"), tn * 0.08 / EQUITY * 100))
+    # 这两条是「下单环节」最容易出事的地方，必须写在邮件里：
+    # ① 本脚本只发信号，不碰你的账户，也不知道你到底下没下单；
+    # ② 期货只能整手下，目标 0.6 手会开成 1 手，实际敞口高于模型目标。
+    h.append('<p style="%s;margin-top:10px;padding:10px 12px;background:#fff8e6;'
+             'border-left:3px solid #e0a800;border-radius:4px">'
+             '<b>下单须知</b><br>'
+             '· 本邮件是<b>信号建议</b>，不连接你的账户，也无法确认你是否真的成交。'
+             '若某次没下单，请以<b>账户实际持仓</b>为准，别以本邮件为准。<br>'
+             '· 期货只能整手交易：目标手数会向下取整（不足 1 手但接近时按 1 手），'
+             '所以<b>单腿实际敞口可能高于模型目标</b>，属正常现象。<br>'
+             '· 开仓价按信号日收盘价估算，实际以你的成交价为准，'
+             '因此「跟踪权益」与券商结算会有小差异。</p>' % S)
     h.append('<p style="%s;margin-top:16px;padding-top:10px;border-top:1px solid #eceff3">'
              '由 strategy_top2.py 自动发送</p>' % S)
     h.append("</div>")
@@ -1148,12 +1217,20 @@ def _build_mail(rows, changes, data_date, positions=None, pnl=None,
          "数据截止 %s   权益 %s 元   下一交易日开盘执行" % (data_date, format(EQUITY, ",.0f")),
          "-" * 46]
     if changes:
-        L.append("本次需要操作（%d 项）" % len(changes))
-        L.append("%-12s %-10s %4s %9s %9s" % ("品种", "操作", "手数", "现价", "保证金"))
+        L.append("本次需要操作（%d 项 / 共 %d 笔）"
+                 % (len(changes), sum(c.get("n_orders", 1) for c in changes)))
+        L.append("%-10s %-22s %6s %8s %10s" % ("品种", "操作", "手数", "参考价", "保证金"))
         for c in changes:
-            L.append("%-12s %-10s %4d %9s %9s"
-                     % (c["name"], c["how"], c["lots"],
-                        format(c["px"], ",.1f"), format(c["margin"], ",.0f")))
+            n_ord = c.get("n_orders", 1)
+            o_lots = c.get("order_lots", c["lots"])
+            m_after = c.get("margin_after", c["margin"])
+            m_txt = ("释放 %s" % format(c.get("margin_released", c["margin"]), ",.0f")) \
+                if m_after <= 0 else format(m_after, ",.0f")
+            lots_txt = ("%d手" % o_lots) if n_ord == 1 else ("%d笔/%d手" % (n_ord, o_lots))
+            L.append("%-10s %-22s %6s %8s %10s"
+                     % (c["name"], c["how"], lots_txt,
+                        format(c["px"], ",.1f"), m_txt))
+        L.append("参考价=上一交易日收盘价，不是限价；反手须先平后开。")
     else:
         L.append("本次无仓位变动，今天不需要下单。")
     L.append("")

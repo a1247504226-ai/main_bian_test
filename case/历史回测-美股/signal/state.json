@@ -1,11 +1,11 @@
 {
- "asof": "2026-10-22",
+ "asof": "2026-11-09",
  "hold": {
   "AAPL": true,
   "MSFT": true,
-  "NVDA": true,
+  "NVDA": false,
   "AMZN": true,
   "NFLX": false
  },
- "saved_at": "2026-10-23 20:30:05"
+ "saved_at": "2026-11-10 20:30:06"
 }

@@ -1,0 +1,30 @@
+# 这是参考模板，实际部署请运行 deploy/setup.sh，它会按真实路径自动生成。
+# 手动安装时把 <APP_DIR> / <USER> 换成实际值，然后：
+#   sudo cp deploy/tradebot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable tradebot
+
+[Unit]
+Description=Binance TG Auto Trader
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<USER>
+WorkingDirectory=<APP_DIR>
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=<APP_DIR>/venv/bin/python trader.py
+Restart=always
+RestartSec=5
+StartLimitBurst=50
+StartLimitIntervalSec=600
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tradebot
+
+[Install]
+WantedBy=multi-user.target

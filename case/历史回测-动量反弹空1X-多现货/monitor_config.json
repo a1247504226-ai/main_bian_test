@@ -12,11 +12,12 @@
     "port": 465,
     "use_ssl": true,
     "max_retries": 6,
-    "strategy_label": "BTC动量策略 · SMA50过滤多头 1×做空"
+    "strategy_label": "BTC动量策略 · SMA50过滤 双腿合约 2× 逐仓"
   },
   "binance": {
-    "_说明": "默认关闭。要真实下单需同时满足：enabled=true、填好 api_key/api_secret、运行一键下单.bat（等于加 --live）。use_testnet=false 表示连实盘，改成 true 或加 --testnet 参数可连测试网。leverage 只影响保证金占用与爆仓线，不影响收益：1× 要价格逆行 +100% 才爆仓，2× 只要 +50%；1× 逐仓会占满 100% 保证金，所以下单会自动缩量留 1% 缓冲。rebalance_tolerance 是「目标与实际差多少才动手」，0.02 = 名义差 2% 以内不动，避免天天小额调整磨损手续费。resize_on_drift=false（默认）= 只在进场那天按「权益×敞口」定名义，持仓期间不再调仓（与回测完全一致）；改成 true 会每天把名义对齐到当日敞口，实测 9 年终值从 162.62× 掉到 55.97×，不要开。fee_buffer 是下单时预留的手续费比例。 proxy 留空=直连；如果这台机器必须挂代理才能连币安，填 http://127.0.0.1:7890 这种本地代理地址，否则查余额/下单会报网络错误。 auto_stop_order=true 时，真实下单完成后会自动挂/撤空头止损条件单（默认 false = 不碰你的条件单，按邮件里的止损价自己挂）。stop_working_type 是触发基准：MARK_PRICE（标记价格，抗插针，默认）或 CONTRACT_PRICE（最新成交价，与回测口径一致）。",
+    "_说明": "默认关闭。要真实下单需同时满足：enabled=true、填好 api_key/api_secret、运行一键下单.bat（等于加 --live）。auto_live=true 时，定时任务（每天 08:02 自动跑）也会真实下单 —— 这就是「无人值守全自动」。⚠ 打开前务必先用一键下单.bat 的演练模式确认计划正确，并且 enabled=true、API Key 已填；三者缺一，auto_live 也不会生效。use_testnet=false 表示连实盘，改成 true 或加 --testnet 参数可连测试网。leverage 只影响保证金占用与爆仓线，不影响收益：1× 要价格逆行 100% 才爆仓，2× 只要 50%。杠杆同时是「敞口能开多大」的物理上限——名义 = 权益×敞口，保证金 = 名义/杠杆，所以 leverage 必须 ≥ exposure_cap，否则敞口开不出去（引擎会自动缩到 eq×L）。rebalance_tolerance 是「目标与实际差多少才动手」，0.02 = 名义差 2% 以内不动，避免天天小额调整磨损手续费。resize_on_drift=false（默认）= 只在进场那天按「权益×敞口」定名义，持仓期间不再调仓（与回测完全一致）；改成 true 会每天把名义对齐到当日敞口，实测会大幅拖累收益，不要开。fee_buffer 是下单时预留的手续费比例。 proxy 留空=直连；如果这台机器必须挂代理才能连币安，填 http://127.0.0.1:7890 这种本地代理地址，否则查余额/下单会报网络错误。 auto_stop_order=true 时，真实下单完成后会自动挂/撤空头止损条件单（默认 false = 不碰你的条件单，按邮件里的止损价自己挂）。⚠ 加仓后成本价会变加权平均，手动挂单容易按邮件里的旧成本价算错；想让止损自动跟随真实成本价，就把这项改成 true。stop_working_type 是触发基准：MARK_PRICE（标记价格，抗插针，默认）或 CONTRACT_PRICE（最新成交价，与回测口径一致）。",
     "enabled": false,
+    "auto_live": false,
     "use_testnet": false,
     "api_key": "",
     "api_secret": "",
@@ -26,7 +27,7 @@
     "testnet_futures_base": "https://testnet.binancefuture.com",
     "proxy": "",
     "symbol": "BTCUSDT",
-    "leverage": 1,
+    "leverage": 2,
     "margin_type": "ISOLATED",
     "min_notional_usdt": 20.0,
     "rebalance_tolerance": 0.02,
@@ -36,10 +37,11 @@
     "stop_working_type": "MARK_PRICE"
   },
   "strategy": {
-    "_说明": "与 btc_strategy.py 回测口径保持一致。base_capital_usdt 是邮件里所有成本/盈亏的计算基准（固定本金，不复利）。primary_set 是唯一的一组均线参数。regime_ma 是长期均线过滤：只约束多头，收盘价在 SMA(regime_ma) 下方时不开多、空头照做；设 0 关闭。participate_from_next_trade=true 表示当前这笔你没有参与、不计入账户，等下一次仓位变化时再按本金开始计算。 short_stop 是空头固定止损：0.05 = 空头逆行 5% 就市价平仓（默认 0.05，填 0 关闭）。多头不设止损 —— 现货无爆仓风险，实测加了反而更差（见使用说明 §八）。",
+    "_说明": "与 btc_strategy.py 回测口径保持一致。base_capital_usdt 是邮件里所有成本/盈亏的计算基准（滚仓起点）。primary_set 是唯一的一组均线参数。regime_ma 是长期均线过滤：只约束多头，收盘价在 SMA(regime_ma) 下方时不开多、空头照做；设 0 关闭。participate_from_next_trade=true 表示当前这笔你没有参与、不计入账户，等下一次仓位变化时再按本金开始计算。 short_stop 是空头固定止损：0.05 = 空头逆行 5% 就市价平仓（默认 0.05，填 0 关闭）。多头不设止损（合约多头靠爆仓线保护，见 long_leg）。 long_leg 决定多头载体：'spot' = 现货（不付资金费，敞口最多 1.0）；'fut' = 合约（付资金费，敞口可 >1，有爆仓线）。敞口上限 exposure_cap > 1 时必须是 'fut'。 vt 是仓位总旋钮：名义 = 权益 × min(exposure_cap, vt/当日波动率)。vt 越大仓位越重。",
     "symbol": "BTCUSDT",
-    "vt": 0.03,
-    "exposure_cap": 1.0,
+    "vt": 0.06,
+    "exposure_cap": 2.0,
+    "long_leg": "fut",
     "atr_n": 14,
     "short_stop": 0.05,
     "long_stop": 0.0,

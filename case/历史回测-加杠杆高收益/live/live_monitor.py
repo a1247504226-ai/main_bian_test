@@ -22,8 +22,10 @@ import datetime
 import io
 import json
 import os
+import shutil
 import smtplib
 import ssl
+import subprocess
 import sys
 import time
 import urllib.request
@@ -39,6 +41,15 @@ CST = datetime.timezone(datetime.timedelta(hours=8))
 # data-api.binance.vision 是币安官方公开行情镜像，通常比 api.binance.com 更稳，放第一位
 BINANCE = ["https://data-api.binance.vision", "https://api.binance.com",
            "https://api1.binance.com", "https://api2.binance.com"]
+
+# 行情源兜底链：(base, klines 路径, ticker 路径)
+# 实测本机到币安主网（现货 4 个镜像）全部超时，只有测试网可达。
+# 测试网是 U 本位合约接口，K 线字段与现货一致、价格同步主网，故放第一位。
+# 主网镜像留在后面：换到能直连主网的机器时仍可用（顺序不影响结果）。
+BINANCE_SOURCES = (
+    [("https://testnet.binancefuture.com", "/fapi/v1/klines", "/fapi/v1/ticker/price")]
+    + [(h, "/api/v3/klines", "/api/v3/ticker/price") for h in BINANCE]
+)
 MS = {"1h": 3600_000, "4h": 4 * 3600_000, "1d": 86400_000}
 
 
@@ -129,19 +140,52 @@ def save_state(s):
 
 
 # ------------------------------------------------------------------ 行情
+def _find_curl():
+    """跨平台定位 curl：PATH 优先；Windows 再查 System32（部分环境 PATH 不含它）。"""
+    p = shutil.which("curl")
+    if p:
+        return p
+    if sys.platform == "win32":
+        for c in (r"C:\Windows\System32\curl.exe", r"C:\Windows\SysWOW64\curl.exe"):
+            if os.path.exists(c):
+                return c
+    return None
+
+
+_CURL = _find_curl()
+
+
 def http_json(url, tries=3, timeout=10, deadline=None):
-    """拉取 URL 并解析 JSON。deadline 传入「绝对截止时间戳」时，超时即跳出，避免无限等待。"""
+    """拉取 URL 并解析 JSON。deadline 传入「绝对截止时间戳」时，超时即跳出，避免无限等待。
+
+    优先用 curl：本机到币安的 DNS 会返回多个 CDN IP，其中部分握手必挂，
+    而 urllib 只试第一个（常卡在坏 IP 上直到超时）；curl 自带多 IP 重试，
+    实测稳定得多。找不到 curl 时才退回 urllib。
+    """
     last = None
     for k in range(tries):
         if deadline is not None and time.time() > deadline:
             break
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                return json.loads(r.read().decode())
-        except Exception as e:                      # noqa: BLE001
-            last = e
-            time.sleep(0.5 * (k + 1))
+        if _CURL:
+            try:
+                p = subprocess.run(
+                    [_CURL, "-s", "-S", "--max-time", str(timeout),
+                     "-H", "User-Agent: Mozilla/5.0", url],
+                    capture_output=True, timeout=timeout + 5)
+                out = p.stdout.decode(errors="replace").strip()
+                if p.returncode == 0 and out:
+                    return json.loads(out)
+                last = RuntimeError(p.stderr.decode(errors="replace")[:150] or "curl 空响应")
+            except Exception as e:                  # noqa: BLE001
+                last = e
+        else:
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    return json.loads(r.read().decode())
+            except Exception as e:                  # noqa: BLE001
+                last = e
+        time.sleep(0.5 * (k + 1))
     raise last
 
 
@@ -156,10 +200,10 @@ def klines(symbol, interval, limit=400, closed_only=True, provider=None,
         return provider(symbol, interval, limit, closed_only)
     deadline = time.time() + _budget
     last = None
-    for host in BINANCE:
+    for host, kpath, _tpath in BINANCE_SOURCES:
         if time.time() > deadline:
             break
-        url = f"{host}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+        url = f"{host}{kpath}?symbol={symbol}&interval={interval}&limit={limit}"
         try:
             d = http_json(url, tries=2, deadline=deadline)
             if isinstance(d, list) and d:
@@ -184,11 +228,11 @@ def last_price(symbol, provider=None, _budget=20.0):
         return provider(symbol)
     deadline = time.time() + _budget
     last = None
-    for host in BINANCE:
+    for host, _kpath, tpath in BINANCE_SOURCES:
         if time.time() > deadline:
             break
         try:
-            d = http_json(f"{host}/api/v3/ticker/price?symbol={symbol}",
+            d = http_json(f"{host}{tpath}?symbol={symbol}",
                           tries=2, deadline=deadline)
             return float(d["price"])
         except Exception as e:                      # noqa: BLE001

@@ -3,6 +3,12 @@ chcp 65001 >nul
 setlocal EnableExtensions
 cd /d "%~dp0"
 
+rem STOP.flag switch
+if exist "%~dp0STOP.flag" (
+    echo [%TIME%] STOP.flag found, skip this round >> monitor.log
+    exit /b 0
+)
+
 rem 选择 Python：优先 .venv，缺失则回退系统 python / py（本策略纯标准库，无需第三方包）
 set "PYEXE="
 if exist ".venv\Scripts\python.exe" set "PYEXE=.venv\Scripts\python.exe"
