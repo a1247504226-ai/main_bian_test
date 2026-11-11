@@ -95,7 +95,7 @@ class Trader:
         self.ex = executor
         self.notify = notifier
         self.buf = sp.TPSLBuffer(ttl_sec=cfg.tpsl_ttl_sec)
-        self.stats = {"open": 0, "amend": 0, "ignore": 0, "fail": 0}
+        self.stats = {"open": 0, "amend": 0, "trail": 0, "ignore": 0, "fail": 0}
         self._warned: set = set()   # 已告警过的 symbol，避免重复刷屏
         # 消息必须串行处理：Telethon 默认并发投递，
         # 两个信号同时到达会各自读到「开仓前」的持仓快照，双双通过风控 → 超限开仓
@@ -108,7 +108,7 @@ class Trader:
         多个 pending 时按 FIFO 猜，可能把止损挂到错的币上 ——
         宁可漏掉这条让你手动 amend，也不能改错仓位。
         """
-        pending = self.ex.pending.all()
+        pending = self.ex.pending.provisional()
         if len(pending) == 1:
             return next(iter(pending))
         if len(pending) > 1:
@@ -127,6 +127,8 @@ class Trader:
                 await self._handle_open(ev)
             elif ev.kind == sp.TPSL:
                 await self._handle_tpsl(ev)
+            elif ev.kind == sp.TP_HIT:
+                await self._handle_tp_hit(ev)
             elif ev.kind == sp.CLOSE:
                 await self._handle_close(ev)
             else:
@@ -168,6 +170,7 @@ class Trader:
             self.stats["open"] += 1
         else:
             self.stats["fail"] += 1
+            log.error("开仓失败 %s %s: %s", sym, ev.direction, r.error)
 
     async def _handle_tpsl(self, ev: sp.ParsedEvent):
         # 消息里带了币种名就精确匹配；没带才按 FIFO 分配给最早的待更新仓位
@@ -196,14 +199,60 @@ class Trader:
         log.info("🔧 止盈止损齐了 %s → TP %s / SL %s", target, done["tp"], done["sl"])
         r = await asyncio.to_thread(
             self.ex.amend_protection, target,
-            done["tp"], done["sl"])
+            done["tp"], done["sl"], done.get("tp_all") or [])
         if r.ok:
             self.stats["amend"] += 1
         else:
             self.stats["fail"] += 1
             # 失败时把数据放回缓存，housekeeping 会定时重试，
             # 否则频道不重发就永远卡在兜底止损上
-            self.buf.restore(target, done["tp"], done["sl"])
+            self.buf.restore(target, done["tp"], done["sl"], done.get("tp_all"))
+
+    async def _handle_tp_hit(self, ev: sp.ParsedEvent):
+        """到达 TP1/TP2 → 把止损提到该目标外侧 0.5%，锁定利润后继续博 TP3
+
+        这就是回测算出来最优的策略 C2：到 TP1 后不再裸奔，
+        回落到 TP1 附近就止盈出场，继续涨就吃到 TP3。
+        """
+        sym = ev.symbol
+        info = self.ex.pending.get(sym)
+        if not info or info.get("status") != "protected":
+            log.debug("TP%d 到达但 %s 无受保护仓位，忽略", ev.level, sym)
+            return
+
+        tp_all = info.get("tp_all") or []
+        if not tp_all or ev.level > len(tp_all):
+            log.warning("%s 收到 TP%d 通知但目标价不全 %s，忽略",
+                        sym, ev.level, tp_all)
+            return
+
+        target = tp_all[ev.level - 1]
+        tp3 = tp_all[-1]
+        direction = info.get("direction", "")
+        cur_sl = info.get("sl")
+
+        # 止损移到目标价「外侧」0.5%：空单在上方，多单在下方
+        if direction == "short":
+            new_sl = target * 1.005
+            if cur_sl and new_sl >= cur_sl:
+                log.info("%s TP%d 到达，新止损 %.8g 不优于当前 %.8g，保持不动",
+                         sym, ev.level, new_sl, cur_sl)
+                return
+        else:
+            new_sl = target * 0.995
+            if cur_sl and new_sl <= cur_sl:
+                log.info("%s TP%d 到达，新止损 %.8g 不优于当前 %.8g，保持不动",
+                         sym, ev.level, new_sl, cur_sl)
+                return
+
+        log.info("🎯 %s 到达 TP%d(%.8g)，止损上移到 %.8g，继续持有博 TP3(%.8g)",
+                 sym, ev.level, target, new_sl, tp3)
+        r = await asyncio.to_thread(
+            self.ex.amend_protection, sym, tp3, new_sl, tp_all, True)
+        if r.ok:
+            self.stats["trail"] += 1
+        else:
+            self.stats["fail"] += 1
 
     async def _handle_close(self, ev: sp.ParsedEvent):
         log.info("📤 离场信号 %s", ev.symbol)

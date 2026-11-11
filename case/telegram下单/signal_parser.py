@@ -14,13 +14,14 @@ TG 频道消息解析器
 4. 欧洲小数逗号 0,425 → 0.425
 """
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, field
 from typing import List, Optional
 
 # 事件类型
 OPEN = "OPEN"        # 开仓
 TPSL = "TPSL"        # 止盈止损（可能只有一半）
 CLOSE = "CLOSE"      # 明确要求离场
+TP_HIT = "TP_HIT"    # 到达某个止盈目标（TP1/TP2/TP3）
 IGNORE = "IGNORE"    # 忽略
 
 # 方向关键词
@@ -33,6 +34,14 @@ NOISE_KEYS = (
     "名额", "活动", "点击此处", "私信", "小助理", "感谢信任",
     "已翻倍", "已到达", "已抵达", "手动止盈", "减仓", "离场",
     "带保本", "TP1", "TP2", "TP3", "浮盈", "小浮盈", "进场已",
+)
+
+# 真正要市价平仓的关键词
+# 注意：不包含「止盈」「TP1」「TP2」—— TP1/TP2 到达只是减仓，不平仓
+# 也不包含单独的「止损」—— 「止损：77500」是价位，不是平仓指令
+CLOSE_KEYS = (
+    "离场", "全平", "平仓", "出局",
+    "止损了", "已止损", "到达止损", "打止损", "扫损",
 )
 
 SYMBOL_RE = re.compile(r"#([A-Z0-9]{2,15})")
@@ -54,6 +63,8 @@ class ParsedEvent:
     sl: Optional[float] = None
     raw: str = ""
     note: str = ""               # 解析说明，写日志用
+    level: int = 0               # TP 级别（TP_HIT 时有效）
+    tp_all: List[float] = field(default_factory=list)   # 全部止盈目标
 
     def __repr__(self):
         return (f"<{self.kind} {self.symbol} {self.direction} "
@@ -179,7 +190,8 @@ def parse(text: str) -> ParsedEvent:
     comp_m = COMP_RE.search(t)
 
     # ---------- 1. 开仓信号：必须有 symbol + 方向 ----------
-    if symbol and direction:
+    # 含「离场/止损了」的不当开仓信号（频道有时会写「现价多 已离场」）
+    if symbol and direction and not any(k in t for k in CLOSE_KEYS):
         norm = normalize_symbol(symbol)
         if not norm:
             # 非 USDT 本位（BTCUSDC/BTCBUSD 之类），不接
@@ -187,11 +199,11 @@ def parse(text: str) -> ParsedEvent:
                                note=f"{symbol} 不是 USDT 本位合约，跳过")
         ev = ParsedEvent(OPEN, symbol=norm,
                          direction=direction, raw=raw, note=multi_note)
-        # 少数情况开仓消息里直接带了止盈止损
+        # 少数情况开仓消息里直接带了止盈止损（取最远目标 TP3）
         if tp_m:
             nums = _parse_num_list(tp_m.group(1))
             if nums:
-                ev.tp = nums[0]
+                ev.tp = nums[-1]
         if sl_m:
             ev.sl = _to_float(sl_m.group(1))
         if comp_m:
@@ -210,7 +222,11 @@ def parse(text: str) -> ParsedEvent:
         if tp_m:
             nums = _parse_num_list(tp_m.group(1))
             if nums:
-                ev.tp = nums[0]
+                # 取最后一个 = TP3（最远目标）挂单，同时保留全部用于移动止损
+                ev.tp = nums[-1]
+                ev.tp_all = nums
+                if len(nums) > 1:
+                    ev.note = f"止盈多目标 {nums}，挂 TP3={nums[-1]}"
         if sl_m:
             ev.sl = _to_float(sl_m.group(1))
         if ev.tp is not None or ev.sl is not None:
@@ -221,9 +237,22 @@ def parse(text: str) -> ParsedEvent:
     if m:
         return ParsedEvent(IGNORE, raw=raw, note="裸数字列表，缺上下文")
 
-    # ---------- 4. 明确离场 ----------
-    if symbol and ("离场" in t or "全平" in t or "止损离场" in t):
-        return ParsedEvent(CLOSE, symbol=normalize_symbol(symbol), raw=raw)
+    # ---------- 4. 平仓通知 ----------
+    # 只有「离场 / 平仓 / 止损了」这类明确指令才市价平仓。
+    # TP1/TP2 到达只是减仓通知，不平仓 —— 止盈挂的是 TP3，让利润跑完。
+    if symbol and any(k in t for k in CLOSE_KEYS):
+        norm = normalize_symbol(symbol)
+        if norm:
+            return ParsedEvent(CLOSE, symbol=norm, raw=raw)
+
+    # ---------- 5. 到达某个止盈目标 ----------
+    # 「TP1 止盈减仓」「TP2 已抵达」—— 不平仓，但要用来移动止损
+    tp_hit = re.search(r"TP\s*([123])", t, re.IGNORECASE)
+    if symbol and tp_hit:
+        norm = normalize_symbol(symbol)
+        if norm:
+            return ParsedEvent(TP_HIT, symbol=norm,
+                               level=int(tp_hit.group(1)), raw=raw)
 
     return ParsedEvent(IGNORE, raw=raw, note="非信号消息")
 
@@ -242,9 +271,12 @@ class TPSLBuffer:
     def feed(self, ev: ParsedEvent, target_symbol: str, now: float):
         if not target_symbol:
             return None
-        b = self._buf.setdefault(target_symbol, {"tp": None, "sl": None, "ts": now})
+        b = self._buf.setdefault(target_symbol,
+                                 {"tp": None, "sl": None, "tp_all": [], "ts": now})
         if ev.tp is not None:
             b["tp"] = ev.tp
+        if ev.tp_all:
+            b["tp_all"] = ev.tp_all
         if ev.sl is not None:
             b["sl"] = ev.sl
         b["ts"] = now
@@ -263,7 +295,7 @@ class TPSLBuffer:
                 self._buf.pop(sym, None)
         return out
 
-    def restore(self, symbol: str, tp=None, sl=None):
+    def restore(self, symbol: str, tp=None, sl=None, tp_all=None):
         """amend 失败时把数据放回缓存，等 housekeeping 重试"""
         if not symbol:
             return
@@ -272,6 +304,8 @@ class TPSLBuffer:
             b["tp"] = tp
         if sl is not None:
             b["sl"] = sl
+        if tp_all:
+            b["tp_all"] = tp_all
         b["ts"] = time.time()
         b["retry"] = b.get("retry", 0) + 1
         self._buf[symbol] = b

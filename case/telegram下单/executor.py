@@ -49,7 +49,7 @@ class Signal:
     position_pct: float = 0.10          # 名义占权益（margin_pct 为空时用）
     signal_id: str = ""
     # 兜底保护（双向）
-    provisional_sl_pct: float = 7.0
+    provisional_sl_pct: float = 5.0
     provisional_tp_pct: float = 7.0
 
     @property
@@ -122,10 +122,22 @@ class PendingStore:
     def all(self) -> Dict[str, Dict[str, Any]]:
         return dict(self._data)
 
+    def provisional(self) -> Dict[str, Dict[str, Any]]:
+        """还在等真实止盈止损的（只有兜底保护）"""
+        return {k: v for k, v in self._data.items()
+                if v.get("status", "provisional") == "provisional"}
+
+    def protected(self) -> Dict[str, Dict[str, Any]]:
+        """已挂真实止盈止损、正在跟踪 TP1/TP2 的"""
+        return {k: v for k, v in self._data.items()
+                if v.get("status") == "protected"}
+
     def stale(self, minutes: int = 10) -> List[str]:
         out = []
         now = datetime.now()
         for sym, info in self._data.items():
+            if info.get("status", "provisional") != "provisional":
+                continue
             try:
                 t = datetime.fromisoformat(info["created_at"])
                 if (now - t).total_seconds() > minutes * 60:
@@ -443,6 +455,7 @@ class Executor:
             # ---------- 8. 记录 ----------
             if provisional:
                 self.pending.add(sym, {
+                    "status": "provisional",
                     "direction": direction, "entry": avg, "qty": filled,
                     "provisional_sl": prov_sl, "provisional_tp": prov_tp,
                     "leverage": sig.leverage,
@@ -488,6 +501,8 @@ class Executor:
         symbol: str,
         tp_price: Optional[float] = None,
         sl_price: Optional[float] = None,
+        tp_all: Optional[List[float]] = None,
+        relaxed: bool = False,
     ) -> OrderResult:
         """
         阶段 2：收到真实止盈止损后替换兜底单。
@@ -532,12 +547,22 @@ class Executor:
                     log.warning("读取现有挂单失败: %s", e)
 
             if tp_price and sl_price and self.strict_price_check:
-                if direction == "long" and not (sl_price < entry < tp_price):
-                    return OrderResult(False, sym, direction,
-                                       error=f"多单价位不合理 entry={entry} sl={sl_price} tp={tp_price}")
-                if direction == "short" and not (tp_price < entry < sl_price):
-                    return OrderResult(False, sym, direction,
-                                       error=f"空单价位不合理 entry={entry} sl={sl_price} tp={tp_price}")
+                if relaxed:
+                    # 移动止损：止损已经进到盈利区，只要求它在止盈的正确一侧
+                    if direction == "short" and not (tp_price < sl_price):
+                        return OrderResult(False, sym, direction,
+                                           error=f"空单移动止损不合理 tp={tp_price} sl={sl_price}")
+                    if direction == "long" and not (sl_price < tp_price):
+                        return OrderResult(False, sym, direction,
+                                           error=f"多单移动止损不合理 tp={tp_price} sl={sl_price}")
+                else:
+                    # 初次挂单：止损必须在入场价外侧
+                    if direction == "long" and not (sl_price < entry < tp_price):
+                        return OrderResult(False, sym, direction,
+                                           error=f"多单价位不合理 entry={entry} sl={sl_price} tp={tp_price}")
+                    if direction == "short" and not (tp_price < entry < sl_price):
+                        return OrderResult(False, sym, direction,
+                                           error=f"空单价位不合理 entry={entry} sl={sl_price} tp={tp_price}")
 
             if not sl_price:
                 return OrderResult(False, sym, direction,
@@ -548,7 +573,12 @@ class Executor:
                     f"[DRY-RUN] amend {sym} {direction.upper()} "
                     f"SL {sl_price} TP {tp_price or '无'}（entry {entry:.6g}）"
                 )
-                self.pending.remove(sym)
+                self.pending.add(sym, {
+                    "status": "protected", "direction": direction,
+                    "entry": entry, "qty": abs(p["amount"]),
+                    "tp": tp_price, "sl": sl_price,
+                    "tp_all": tp_all or ([tp_price] if tp_price else []),
+                })
                 return OrderResult(True, sym, direction, abs(p["amount"]), p["mark"],
                                    dry_run=True)
 
@@ -571,7 +601,17 @@ class Executor:
                 r = self.c.take_profit(sym, pos_side, tp_price, f"TP{stamp}")
                 tp_id = str(r.get("orderId", ""))
 
-            self.pending.remove(sym)
+            # 不删记录：改成「已保护」并保存全部目标价，
+            # 后面 TP1/TP2 到达时要靠它把止损提上来
+            self.pending.add(sym, {
+                "status": "protected",
+                "direction": direction,
+                "entry": entry,
+                "qty": abs(p["amount"]),
+                "tp": tp_price,
+                "sl": sl_price,
+                "tp_all": tp_all or ([tp_price] if tp_price else []),
+            })
 
             sl_pct = abs(sl_price - entry) / entry * 100
             tp_pct = abs(tp_price - entry) / entry * 100 if tp_price else 0

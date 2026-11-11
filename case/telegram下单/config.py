@@ -39,7 +39,7 @@ class Config:
     # 下单
     leverage: int = 2                    # 下单杠杆
     margin_pct: float = 0.50             # 单笔保证金占权益比例
-    provisional_sl_pct: float = 7.0      # 兜底止损百分比
+    provisional_sl_pct: float = 5.0      # 兜底止损百分比
     provisional_tp_pct: float = 7.0      # 兜底止盈百分比
     # 风控
     max_leverage: int = 2

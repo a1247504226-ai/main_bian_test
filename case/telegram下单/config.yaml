@@ -22,7 +22,8 @@ leverage: 2
 margin_pct: 0.50
 
 # 开仓时立即挂的兜底止盈止损（等真实值到了再 amend 替换）
-provisional_sl_pct: 7.0
+# 止盈 7%、止损 5%：止损收紧一点，减少单笔亏损
+provisional_sl_pct: 5.0
 provisional_tp_pct: 7.0
 
 # ============ 风控 ============
