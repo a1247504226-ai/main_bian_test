@@ -37,23 +37,29 @@ class Config:
     testnet: bool = True                 # True=测试网（默认），False=主网
     dry_run: bool = True
     # 下单
-    leverage: int = 2                    # 下单杠杆
+    leverage: int = 3                    # 下单杠杆
     margin_pct: float = 0.50             # 单笔保证金占权益比例
     provisional_sl_pct: float = 5.0      # 兜底止损百分比
     provisional_tp_pct: float = 7.0      # 兜底止盈百分比
     # 风控
-    max_leverage: int = 2
-    max_position_pct: float = 1.00       # 单笔名义敞口上限
+    max_leverage: int = 3
+    max_position_pct: float = 1.50       # 单笔名义敞口上限
     max_margin_pct: float = 0.50         # 单笔保证金上限
     max_total_margin_pct: float = 1.00   # 总保证金上限（1.00=允许满仓两仓）
     max_open_positions: int = 2
-    max_symbol_exposure_pct: float = 1.00
-    daily_loss_limit_pct: float = 0.05
+    max_symbol_exposure_pct: float = 1.50
+    daily_loss_limit_pct: float = 0.20
     max_consecutive_losses: int = 3
     min_order_notional: float = 5.0
     allowed_symbols: Optional[List[str]] = None
     # 信号文本含这些词就跳过不开仓（这些票需要人工补仓/轻仓判断，自动化跟不了）
     skip_keywords: Optional[List[str]] = None
+    # 挂单（限价）信号是否跳过。频道发「挂单多 分批进场：3.13-3.08」时，
+    # 市价开仓会开在当前价、偏离区间，默认跳过
+    skip_limit_orders: bool = True
+    # 同币反向信号是否自动反手（先平旧仓再开新仓）。
+    # false = 只告警跳过，避免误判导致双向亏损
+    allow_reverse: bool = False
     # 告警
     tg_token: str = ""
     tg_chat_id: str = ""
@@ -72,6 +78,7 @@ class Config:
     tg_phone: str = ""
     tg_channel: str = ""
     tg_session: str = "tg_session"
+    tg_proxy: str = ""           # 形如 http://127.0.0.1:7897，留空表示直连
     tpsl_ttl_sec: int = 90        # 止盈止损只收到一半时的等待秒数
     # 运维
     state_dir: str = "state"
@@ -138,6 +145,8 @@ def load_config(path: str = "config.yaml") -> Config:
         "TG_API_HASH": "tg_api_hash",
         "TG_PHONE": "tg_phone",
         "TG_CHANNEL": "tg_channel",
+        "TG_SESSION": "tg_session",
+        "TG_PROXY": "tg_proxy",
         "SMTP_SERVER": "smtp_server",
         "SMTP_USER": "smtp_user",
         "SMTP_PASSWORD": "smtp_password",
@@ -162,6 +171,8 @@ def load_config(path: str = "config.yaml") -> Config:
         ("SMTP_MAX_RETRIES", "smtp_max_retries", int),
         ("BALANCE_ALERT_THRESHOLD", "balance_alert_threshold", float),
         ("BALANCE_ALERT_STEP", "balance_alert_step", float),
+        ("SKIP_LIMIT_ORDERS", "skip_limit_orders", _bool),
+        ("ALLOW_REVERSE", "allow_reverse", _bool),
     ]:
         raw = os.getenv(env)
         # .env 里留空的键（TG_API_ID=）会返回空字符串，不能直接 int('')
@@ -192,6 +203,20 @@ def load_config(path: str = "config.yaml") -> Config:
         raise ValueError(
             f"max_margin_pct({cfg.max_margin_pct}) 小于 margin_pct({cfg.margin_pct})，"
             f"每一单都会被风控拒绝")
+
+    # 日亏限制必须 >= 单笔止损，否则第一笔亏损就熔断，当天再也开不了仓
+    single_loss_pct = derived_notional * cfg.provisional_sl_pct / 100
+    if cfg.daily_loss_limit_pct + 1e-9 < single_loss_pct:
+        raise ValueError(
+            f"daily_loss_limit_pct({cfg.daily_loss_limit_pct*100:.1f}%) 小于单笔止损 "
+            f"({single_loss_pct*100:.1f}% = {derived_notional:.2f}名义 × {cfg.provisional_sl_pct}%)，"
+            f"第一笔止损就会触发熔断。建议改成 {single_loss_pct*2.5:.2f} 左右")
+
+    # 连亏熔断也要能容纳至少 2 笔止损，否则等于每亏一笔就停
+    if cfg.max_consecutive_losses < 2:
+        raise ValueError(
+            f"max_consecutive_losses({cfg.max_consecutive_losses}) 太小，"
+            f"至少设 2（3x 下每笔止损亏 {single_loss_pct*100:.1f}% 权益）")
 
     # 环境自检：切到主网必须配主网 key，否则一路报 -2015 很难排查
     if not cfg.testnet and not cfg.mainnet_api_key:

@@ -36,21 +36,34 @@ log = logging.getLogger("trader")
 
 def setup_logging(cfg: Config, verbose=False):
     os.makedirs(cfg.log_dir, exist_ok=True)
+    logfile = os.path.join(cfg.log_dir, "trader.log")
+
+    # 每天 0 点切一个新文件，保留 14 天，自动压缩
+    from logging.handlers import TimedRotatingFileHandler
+    fh = TimedRotatingFileHandler(
+        logfile, when="midnight", backupCount=14, encoding="utf-8")
+    fh.suffix = "%Y%m%d"
+    fh.setFormatter(logging.Formatter(LOG_FMT))
+
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(logging.Formatter(LOG_FMT))
+
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
-        format=LOG_FMT,
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-            logging.FileHandler(os.path.join(cfg.log_dir, "trader.log"),
-                                encoding="utf-8"),
-        ],
+        handlers=[sh, fh],
+        force=True,
     )
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-    logging.getLogger("telethon").setLevel(logging.WARNING)
+
+    # 降噪：这些第三方库的警告对交易没意义，只在出错时才要
+    logging.getLogger("urllib3").setLevel(logging.ERROR)
+    logging.getLogger("telethon").setLevel(logging.ERROR)      # 屏蔽断线重连的 WARNING
+    logging.getLogger("telethon.network").setLevel(logging.ERROR)
+    logging.getLogger("asyncio").setLevel(logging.ERROR)
 
 
-def build(cfg: Config):
-    client = BinanceFutures(cfg.active_api_key, cfg.active_api_secret, testnet=cfg.testnet)
+def build(cfg: Config, offline: bool = False):
+    client = BinanceFutures(cfg.active_api_key, cfg.active_api_secret,
+                            testnet=cfg.testnet, offline=offline)
     limits = RiskLimits(
         max_leverage=cfg.max_leverage,
         max_position_pct=cfg.max_position_pct,
@@ -135,6 +148,22 @@ class Trader:
                 self.stats["ignore"] += 1
                 log.debug("忽略：%s", text[:50])
 
+    def _current_side(self, sym: str) -> str:
+        """当前该币持仓方向（long/short），无持仓返回空字符串"""
+        try:
+            if self.ex.dry_run:
+                for p in self.ex.dry.all():
+                    if p.get("symbol") == sym:
+                        return (p.get("side") or "").lower()
+                return ""
+            poss = self.ex.c.get_positions(sym)
+            if not poss:
+                return ""
+            return (poss[0].get("side") or "").lower()
+        except Exception as e:
+            log.debug("查询 %s 持仓失败: %s", sym, e)
+            return ""
+
     async def _handle_open(self, ev: sp.ParsedEvent):
         sym = ev.symbol
         if self.cfg.allowed_symbols and sym not in self.cfg.allowed_symbols:
@@ -149,6 +178,33 @@ class Trader:
                 log.info("跳过 %s（信号含排除词 %s）：%s",
                          sym, hit, ev.raw[:60].replace("\n", " "))
                 self.stats["ignore"] += 1
+                return
+
+        # 挂单（限价）信号：频道给的「分批进场：3.13-3.08」是挂单区间，
+        # 市价开仓会开在当前价、可能远离区间，默认跳过
+        if ev.is_limit and self.cfg.skip_limit_orders:
+            log.info("跳过 %s（挂单信号，市价开会偏离进场区间）：%s",
+                     sym, ev.raw[:60].replace("\n", " "))
+            self.stats["ignore"] += 1
+            return
+
+        # 同币已有反向持仓：默认只告警跳过，避免误判导致双向亏损
+        cur = self._current_side(sym)
+        if cur and ev.direction and cur != ev.direction:
+            if not self.cfg.allow_reverse:
+                msg = (f"⚠️ {sym} 反向信号已跳过\n"
+                       f"   当前持有 {cur.upper()}，新信号 {ev.direction.upper()}\n"
+                       f"   要自动反手，把 config.yaml 的 allow_reverse 改成 true")
+                log.warning(msg.replace("\n", " | "))
+                if self.notify:
+                    self.notify(msg)
+                self.stats["ignore"] += 1
+                return
+            log.info("🔄 %s 反向信号：先平 %s 再开 %s", sym, cur, ev.direction)
+            cr = await asyncio.to_thread(self.ex.close, sym, "reverse")
+            if not cr.ok:
+                log.error("反手平仓失败 %s: %s", sym, cr.error)
+                self.stats["fail"] += 1
                 return
 
         log.info("📥 开仓信号 %s %s", sym, ev.direction)
@@ -328,6 +384,19 @@ async def run_live(cfg: Config, trader: Trader):
         print(f"❌ {problem}")
         sys.exit(1)
 
+    # session 文件必须真实存在
+    sess_file = cfg.tg_session if cfg.tg_session.endswith(".session") else cfg.tg_session + ".session"
+    if not os.path.exists(sess_file):
+        found = sorted(f for f in os.listdir(".") if f.endswith(".session"))
+        print(f"❌ 找不到 session 文件：{sess_file}")
+        print(f"   当前目录：{os.getcwd()}")
+        if found:
+            print(f"   目录里已有的 session：{found}")
+            print(f"   → 把 .env.bot 里的 TG_SESSION 改成 {found[0][:-len('.session')]}")
+        else:
+            print("   目录里没有任何 .session 文件")
+        sys.exit(1)
+
     listener = TgListener(
         api_id=cfg.tg_api_id,
         api_hash=cfg.tg_api_hash,
@@ -335,7 +404,25 @@ async def run_live(cfg: Config, trader: Trader):
         channel=cfg.tg_channel,
         session_path=cfg.tg_session,
         dedup_file=os.path.join(cfg.state_dir, "seen_msgs.json"),
+        proxy_url=cfg.tg_proxy,
     )
+    # 启动时打印现有持仓，重启后能确认哪些仓还开着
+    try:
+        poss = trader.ex.c.get_positions()
+        if poss:
+            print(f"当前持仓 {len(poss)} 个：")
+            for p_ in poss:
+                print(f"  {p_['symbol']:12s} {p_['side']:5s} {abs(p_['amount'])} "
+                      f"入场 {p_['entry']} 标记 {p_['mark']} "
+                      f"浮盈 {p_['unrealized']:+.2f}U")
+            print()
+        else:
+            print("当前无持仓")
+            print()
+    except Exception as e:
+        print(f"查询持仓失败: {e}")
+        print()
+
     health.start(cfg.health_port)
     # 保存引用：create_task 的返回值若没人持有，可能被 GC 回收导致巡检停止
     hk_task = asyncio.create_task(trader.housekeeping())
@@ -343,6 +430,94 @@ async def run_live(cfg: Config, trader: Trader):
         await listener.run(trader.on_message)
     finally:
         hk_task.cancel()
+
+
+async def run_fetch(cfg: Config, trader: Trader, limit: int):
+    """直接从 TG 拉历史消息，解析并走一遍下单逻辑（dry-run）
+
+    不用手动导出 txt，也能验证 session 是否可用、解析规则对不对。
+    """
+    from telethon import TelegramClient
+    from tg_listener import build_proxy, check_ready, resolve_channel
+
+    problem = check_ready(cfg.tg_api_id, cfg.tg_api_hash, cfg.tg_channel)
+    if problem:
+        print(f"❌ {problem}")
+        sys.exit(1)
+
+    # 清空上次的虚拟持仓，避免影响风控
+    trader.ex.dry.clear()
+    for s_ in list(trader.ex.pending.all()):
+        trader.ex.pending.remove(s_)
+    trader.ex.strict_price_check = False
+
+    # 先确认 session 文件真的存在，否则 Telethon 会静默新建空 session
+    sess_file = cfg.tg_session if cfg.tg_session.endswith(".session") else cfg.tg_session + ".session"
+    if not os.path.exists(sess_file):
+        found = sorted(f for f in os.listdir(".") if f.endswith(".session"))
+        print(f"❌ 找不到 session 文件：{sess_file}")
+        print(f"   当前目录：{os.getcwd()}")
+        if found:
+            print(f"   目录里已有的 session：{found}")
+            print(f"   → 把 .env.bot 里的 TG_SESSION 改成 {found[0][:-len('.session')]}")
+        else:
+            print("   目录里没有任何 .session 文件，请先把 session 放进来")
+        sys.exit(1)
+    print(f"session 文件：{sess_file} ({os.path.getsize(sess_file)} 字节)")
+
+    proxy = build_proxy(cfg.tg_proxy)
+    if proxy:
+        print(f"代理：{proxy['proxy_type']}://{proxy['addr']}:{proxy['port']}")
+    client = TelegramClient(
+        cfg.tg_session, cfg.tg_api_id, cfg.tg_api_hash,
+        proxy=proxy, connection_retries=5, retry_delay=3, timeout=20,
+    )
+    print("连接 Telegram...")
+    await client.connect()
+    if await client.is_user_authorized():
+        print("session 有效，无需验证码")
+    else:
+        if not cfg.tg_phone:
+            print()
+            print("❌ session 未授权，且没配 TG_PHONE，无法登录")
+            print(f"   当前工作目录：{os.getcwd()}")
+            print(f"   1) 确认 {cfg.tg_session}.session 就在这个目录里")
+            print("   2) 或在 .env.bot 填 TG_PHONE=+86... 后重跑（会要求输一次验证码）")
+            await client.disconnect()
+            sys.exit(1)
+        print("session 无效，用手机号重新登录（需要输验证码）...")
+        await client.start(phone=cfg.tg_phone)
+
+    me = await client.get_me()
+    print(f"已登录：{me.first_name} (@{me.username or '-'})")
+
+    entity = await client.get_entity(resolve_channel(cfg.tg_channel))
+    title = getattr(entity, "title", cfg.tg_channel)
+    print(f"频道：{title}")
+
+    msgs = await client.get_messages(entity, limit=limit)
+    print(f"拉到 {len(msgs)} 条消息，按时间正序解析（dry_run={cfg.dry_run}）\n")
+
+    ok = ign = 0
+    for m in reversed(msgs):
+        text = (m.message or "").strip()
+        if not text:
+            continue
+        ev = sp.parse(text)
+        if ev.kind != sp.IGNORE:
+            print(f"[{m.id:>6}] {ev.kind:7s} {ev.symbol or '-':12s} "
+                  f"{ev.direction or '-':6s} tp={ev.tp} sl={ev.sl}")
+            ok += 1
+        else:
+            ign += 1
+        await trader.on_message(text, m.id)
+
+    print(f"\n解析出信号 {ok} 条，忽略 {ign} 条")
+    print(f"完成：开仓 {trader.stats['open']}，改单 {trader.stats['amend']}，"
+          f"移动止损 {trader.stats['trail']}，"
+          f"忽略 {trader.stats['ignore']}，失败 {trader.stats['fail']}")
+    print("\n" + trader.ex.pending_report())
+    await client.disconnect()
 
 
 async def run_replay(cfg: Config, trader: Trader, path: str,
@@ -381,10 +556,16 @@ async def run_replay(cfg: Config, trader: Trader, path: str,
 
 # ----------------------------------------------------------------------
 def main():
+    # 开机自启时工作目录是 C:\Windows\System32，必须切回脚本所在目录
+    # 否则找不到 config.yaml / .env.bot
+    os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
     p = argparse.ArgumentParser(description="TG 频道自动跟单")
     p.add_argument("-c", "--config", default="config.yaml")
     p.add_argument("--live", action="store_true", help="真实下单")
-    p.add_argument("--replay", metavar="FILE", help="回放历史消息文件")
+    p.add_argument("--replay", metavar="FILE", help="回放本地历史消息文件")
+    p.add_argument("--fetch", type=int, metavar="N", default=None,
+                   help="直接从 TG 拉最近 N 条消息并解析（dry-run 验证用）")
     p.add_argument("--limit", type=int, default=None, help="回放条数")
     p.add_argument("--delay", type=float, default=0.1, help="回放间隔秒")
     p.add_argument("--testnet", action="store_true",
@@ -427,11 +608,15 @@ def main():
             print("   （当前是 DRY-RUN，只打印不会真下单）")
     print()
 
-    client, risk, executor, notifier = build(cfg)
+    # 回放强制离线：不连币安，避免反复测试把 IP 权重打爆（418 封禁）
+    offline = bool(args.replay)
+    client, risk, executor, notifier = build(cfg, offline=offline)
     trader = Trader(cfg, executor, notifier)
 
     try:
-        if args.replay:
+        if args.fetch:
+            asyncio.run(run_fetch(cfg, trader, args.fetch))
+        elif args.replay:
             asyncio.run(run_replay(cfg, trader, args.replay, args.limit, args.delay))
         else:
             asyncio.run(run_live(cfg, trader))

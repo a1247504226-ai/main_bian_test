@@ -88,6 +88,7 @@ import btc_strategy as E                      # 数据 / 指标 / 引擎常量
 import btc_monitor as M                       # 信号 / 敞口 / 配置 / 日志（唯一来源）
 
 TRADE_LOG = os.path.join(HERE, "trade_log.csv")
+TRADE_RUN_LOG = os.path.join(HERE, "trade_run.log")   # 完整运行过程（给人看）
 TRADE_STATE = os.path.join(HERE, "trade_state.json")
 RULES_CACHE = os.path.join(HERE, "exchange_rules.json")
 
@@ -118,6 +119,16 @@ def to_float(x, default=0.0):
         return float(x)
     except (TypeError, ValueError):
         return default
+
+
+def _num(x):
+    """紧凑数字：去掉无意义的尾零（0.0001 -> '0.0001'，100.0 -> '100'）。
+    别用 %.3f —— 测试网合约 stepSize 是 0.0001，会被显示成 0.000，看着像 0。"""
+    try:
+        s = ("%.8f" % float(x)).rstrip("0").rstrip(".")
+        return s if s else "0"
+    except (TypeError, ValueError):
+        return str(x)
 
 
 def qty_problem(qty, price, rule, cfg_min=20.0):
@@ -241,6 +252,36 @@ def append_trade_log(rows):
                 w.writerow(r)
     except Exception as e:
         M.log("      ⚠ 写 trade_log.csv 失败：%s" % e)
+
+
+def dump_run_log():
+    """
+    把本次运行的控制台内容追加到 trade_run.log。
+
+    为什么不能只靠 trade_log.csv：csv 只记「最终执行了什么动作」，
+    而对账过程、账户快照、为什么跳过某个动作、为什么某轮没收敛 —— 这些
+    判断依据全在控制台里，出了问题只看 csv 根本查不出原因。
+
+    两个文件分工：
+      · trade_run.log  → 给人看，完整过程（排查问题用）
+      · trade_log.csv  → 给 Excel / 程序看，一行一个动作（对账用）
+    """
+    buf = getattr(M, "LOG_BUF", None)
+    if not buf:
+        return
+    try:
+        # 长期每天跑会一直变长：超过 5MB 就只保留最近 2000 行，避免无限膨胀。
+        if os.path.exists(TRADE_RUN_LOG) and os.path.getsize(TRADE_RUN_LOG) > 5 * 1024 * 1024:
+            with open(TRADE_RUN_LOG, encoding="utf-8", errors="replace") as f:
+                tail = f.readlines()[-2000:]
+            with open(TRADE_RUN_LOG, "w", encoding="utf-8") as f:
+                f.write("（超过 5MB，已截断，只保留最近 2000 行）\n")
+                f.writelines(tail)
+        with open(TRADE_RUN_LOG, "a", encoding="utf-8") as f:
+            f.write("\n### 运行时间：%s\n" % M.fdt())
+            f.write("\n".join(str(x) for x in buf) + "\n")
+    except Exception:
+        pass
 
 
 # ==============================================================================
@@ -691,9 +732,9 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now, resize=None):
         notes.append("读取交易所精度规则失败：%s → 不下单（避免精度错误拒单）" % e)
         return acts, notes
 
-    notes.append("交易所最小下单：现货 %.5f %s / %.1f USDT，合约 %.3f %s / %.1f USDT"
-                 % (r_spot["min_qty"], bnc.base, r_spot["min_notional"],
-                    r_fut["min_qty"], bnc.symbol, r_fut["min_notional"]))
+    notes.append("交易所最小下单：现货 %s %s / %.0f USDT，合约 %s %s / %.0f USDT"
+                 % (_num(r_spot["min_qty"]), bnc.base, r_spot["min_notional"],
+                    _num(r_fut["min_qty"]), bnc.symbol, r_fut["min_notional"]))
 
     target_notional = equity * expo
     sf = M.short_size_factor(lev, expo)
@@ -763,8 +804,8 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now, resize=None):
             acts.append({"kind": "fut_close", "market": "futures", "side": side,
                          "qty": q, "qty_str": fmt_qty(q, r_fut["step"]),
                          "notional": q * price,
-                         "text": "平合约%s头 %.3f（reduceOnly 市价%s）"
-                                 % ("空" if have_fut < 0 else "多", q,
+                         "text": "平合约%s头 %s（reduceOnly 市价%s）"
+                                 % ("空" if have_fut < 0 else "多", _num(q),
                                     "买入" if side == "BUY" else "卖出")})
         # 平仓释放的保证金：逐仓的 isolatedMargin 已经含未实现盈亏，
         # 再单独加一次 upnl 会重复计算（曾导致多划转一笔）。
@@ -918,8 +959,8 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now, resize=None):
                 acts.append({"kind": "fut_open", "market": "futures", "side": _side_open,
                              "qty": want, "qty_str": fmt_qty(want, r_fut["step"]),
                              "notional": want * price,
-                             "text": "开合约%s头 %.3f %s（市价%s，逐仓 %d×，占用保证金 ≈ %.2f USDT）"
-                                     % (_dtxt, want, bnc.symbol,
+                             "text": "开合约%s头 %s %s（市价%s，逐仓 %d×，占用保证金 ≈ %.2f USDT）"
+                                     % (_dtxt, _num(want), bnc.symbol,
                                         "买入" if _long else "卖出", lev,
                                         want * price / lev)})
                 if sf < 1.0:
@@ -931,8 +972,8 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now, resize=None):
             diff = target_fut_qty - have
             if abs(diff) * price < max(target_notional * tol, r_fut["min_notional"],
                                        min_notional_cfg):
-                notes.append("合约%s头 %.3f 已接近目标 %.3f，不动。"
-                             % (_dtxt, have, target_fut_qty))
+                notes.append("合约%s头 %s 已接近目标 %s，不动。"
+                             % (_dtxt, _num(have), _num(target_fut_qty)))
             elif diff > 0:
                 # 加仓：先确认杠杆对，再确认钱够。
                 # ⚠ 改杠杆会改变保证金占用：1× 满仓的仓位改成 2× 会释放一半保证金，
@@ -977,8 +1018,8 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now, resize=None):
                     acts.append({"kind": "fut_add", "market": "futures", "side": _side_open,
                                  "qty": diff, "qty_str": fmt_qty(diff, r_fut["step"]),
                                  "notional": diff * price,
-                                 "text": "%s头加仓 %.3f %s（≈ %.2f USDT，占用保证金 ≈ %.2f）"
-                                         % (_dtxt, diff, bnc.symbol, diff * price,
+                                 "text": "%s头加仓 %s %s（≈ %.2f USDT，占用保证金 ≈ %.2f）"
+                                         % (_dtxt, _num(diff), bnc.symbol, diff * price,
                                             diff * price / lev)})
             else:
                 q = -diff
@@ -989,7 +1030,7 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now, resize=None):
                     acts.append({"kind": "fut_reduce", "market": "futures", "side": _side_close,
                                  "qty": q, "qty_str": fmt_qty(q, r_fut["step"]),
                                  "notional": q * price,
-                                 "text": "%s头减仓 %.3f %s（reduceOnly）" % (_dtxt, q, bnc.symbol)})
+                                 "text": "%s头减仓 %s %s（reduceOnly）" % (_dtxt, _num(q), bnc.symbol)})
 
     # ---------- 3) 目标空仓 ----------
     if target_dir == 0:
@@ -1033,7 +1074,7 @@ def run_action(bnc, act, cfg):
             status = st.get("status") or r.get("status") or "SENT"
             filled = to_float(st.get("executedQty") or r.get("executedQty"))
             avg = to_float(st.get("avgPrice") or r.get("avgPrice"))
-            return True, oid, "%s · 成交 %.3f @ %.2f" % (status, filled, avg)
+            return True, oid, "%s · 成交 %s @ %.2f" % (status, _num(filled), avg)
 
         if kind in ("transfer_in", "transfer_out"):
             direction = "in" if kind == "transfer_in" else "out"
@@ -1212,7 +1253,11 @@ def _execute(cfg, bnc, target_dir, expo, price, bar_date, sig_label,
               % (snap["spot_qty"], bnc.base, snap["spot_val"],
                  snap["usdt_free"], snap["fut_amt"], snap["fut_upnl"]))
         M.log("      账户权益 %.2f USDT" % snap["equity"])
+        # 「交易所最小下单」和「目标占用保证金」每轮都一样，只打第 1 轮，减少噪音
+        _NOISE = ("交易所最小下单", "目标占用保证金")
         for nt in notes:
+            if rd > 1 and nt.startswith(_NOISE):
+                continue
             M.log("      " + nt)
 
         if not acts:
@@ -1547,6 +1592,8 @@ def main():
 if __name__ == "__main__":
     try:
         sys.exit(main())
+    except SystemExit:
+        raise
     except Exception:
         err = traceback.format_exc()
         M.log("运行出错：")
@@ -1557,3 +1604,6 @@ if __name__ == "__main__":
         except Exception:
             pass
         sys.exit(1)
+    finally:
+        # 无论正常结束、异常、还是 sys.exit，都把本次运行过程落到 trade_run.log
+        dump_run_log()

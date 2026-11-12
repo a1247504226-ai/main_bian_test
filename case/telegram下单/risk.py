@@ -24,7 +24,7 @@ class RiskRejected(Exception):
 
 @dataclass
 class RiskLimits:
-    max_leverage: int = 2                    # 杠杆上限
+    max_leverage: int = 3                    # 杠杆上限
     max_position_pct: float = 1.00           # 单笔名义敞口上限（占权益）
     max_margin_pct: float = 0.50             # 单笔保证金占用上限（占权益）
     max_total_margin_pct: float = 0.95       # 全部持仓保证金合计上限

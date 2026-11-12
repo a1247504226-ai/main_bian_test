@@ -65,6 +65,7 @@ class ParsedEvent:
     note: str = ""               # 解析说明，写日志用
     level: int = 0               # TP 级别（TP_HIT 时有效）
     tp_all: List[float] = field(default_factory=list)   # 全部止盈目标
+    is_limit: bool = False       # 挂单（限价）信号：频道让你在特定区间挂单等成交
 
     def __repr__(self):
         return (f"<{self.kind} {self.symbol} {self.direction} "
@@ -199,6 +200,9 @@ def parse(text: str) -> ParsedEvent:
                                note=f"{symbol} 不是 USDT 本位合约，跳过")
         ev = ParsedEvent(OPEN, symbol=norm,
                          direction=direction, raw=raw, note=multi_note)
+        # 挂单 = 限价单，频道给的「分批进场：3.13-3.08」是挂单区间。
+        # 市价开仓会开在当前价，可能远离区间，所以单独标记出来交给上层决定
+        ev.is_limit = "挂单" in t
         # 少数情况开仓消息里直接带了止盈止损（取最远目标 TP3）
         if tp_m:
             nums = _parse_num_list(tp_m.group(1))

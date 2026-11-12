@@ -26,6 +26,7 @@
     ex.close_position("BTCUSDT")
 """
 
+import datetime
 import hashlib
 import hmac
 import http.client
@@ -47,6 +48,7 @@ from decimal import Decimal, ROUND_DOWN, ROUND_UP
 
 BASE_TESTNET = "https://testnet.binancefuture.com"
 BASE_MAINNET = "https://fapi.binance.com"
+CST = datetime.timezone(datetime.timedelta(hours=8))
 
 
 def find_curl():
@@ -126,7 +128,8 @@ class BinanceError(Exception):
 
 class BinanceFutures:
     def __init__(self, api_key, api_secret, testnet=True, allow_mainnet=False,
-                 recv_window=10000, timeout=20, max_retries=3, verbose=True):
+                 recv_window=10000, timeout=20, max_retries=3, verbose=True,
+                 log_file=None):
         if not testnet and not allow_mainnet:
             raise RuntimeError(
                 "拒绝连接主网：如需真实下单，请显式传 testnet=False, allow_mainnet=True")
@@ -138,6 +141,7 @@ class BinanceFutures:
         self.timeout = timeout
         self.max_retries = max_retries
         self.verbose = verbose
+        self.log_file = log_file      # 订单日志文件路径（None 则不落盘）
         self._offset_ms = 0          # server_time - local_time
         self._ip = None              # 当前选定的可用出口 IP
         self._info_cache = {}
@@ -168,9 +172,34 @@ class BinanceFutures:
         return max(0.0, (int(m.group(1)) - self._ts()) / 1000.0)
 
     # ---------------------------------------------------------------- 基础设施
-    def _log(self, msg):
-        if self.verbose:
-            print(f"[exchange] {msg}", flush=True)
+    def _log(self, msg, to_console=None):
+        """写日志：**文件必写**，控制台是否显示由 to_console 决定。
+
+        to_console=False 用于「出口 IP / 时间校准 / 持仓模式」这类只在排查时
+        才需要的信息——落盘留痕，但不刷屏。
+        """
+        line = f"[{datetime.datetime.now(CST):%Y-%m-%d %H:%M:%S}] {msg}"
+        show = self.verbose if to_console is None else to_console
+        if show:
+            print(line, flush=True)
+        self._write_file(line)
+
+    def _write_file(self, line):
+        """追加到订单日志；超过 2MB 自动轮转一次，避免无限增长。"""
+        if not self.log_file:
+            return
+        try:
+            if os.path.exists(self.log_file) and os.path.getsize(self.log_file) > 2 * 1024 * 1024:
+                os.replace(self.log_file, self.log_file + ".1")
+            with open(self.log_file, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:                            # noqa: BLE001
+            pass
+
+    def _audit(self, action, symbol, **kv):
+        """订单审计行：只落文件，不进控制台（避免刷屏）。"""
+        parts = "  ".join(f"{k}={v}" for k, v in kv.items())
+        self._log(f"{action:<6} {symbol:<10} {parts}", to_console=False)
 
     def sync_time(self):
         """[坑1] 用服务器时间校准本机时钟偏差（本机曾慢 12.8 秒）。"""
@@ -194,7 +223,7 @@ class BinanceFutures:
         if best is None:
             raise BinanceError(-1, "无法获取服务器时间，检查网络")
         self._offset_ms = best
-        self._log(f"时间校准完成，本机偏移 {best:+d} ms")
+        self._log(f"时间校准完成，本机偏移 {best:+d} ms", to_console=False)
         return best
 
     def _ts(self):
@@ -212,7 +241,7 @@ class BinanceFutures:
             self._ip = pick_alive_ip(self._host(), context=self._ctx)
             if not self._ip:
                 raise BinanceError(-1, f"{self._host()} 的所有解析 IP 均不可达")
-            self._log(f"出口 IP 选定 {self._ip}")
+            self._log(f"出口 IP 选定 {self._ip}", to_console=False)
         return self._ip
 
     def _build(self, method, path, params, signed):
@@ -396,7 +425,7 @@ class BinanceFutures:
         if self._dual_side is None:
             r = self._request("GET", "/fapi/v1/positionSide/dual", signed=True)
             self._dual_side = bool(r.get("dualSidePosition"))
-            self._log(f"持仓模式：{'双向(hedge)' if self._dual_side else '单向(one-way)'}")
+            self._log(f"持仓模式：{'双向(hedge)' if self._dual_side else '单向(one-way)'}", to_console=False)
         return self._dual_side
 
     def balance(self, asset="USDT"):
@@ -422,7 +451,7 @@ class BinanceFutures:
         r = self._request("POST", "/fapi/v1/leverage",
                           {"symbol": symbol, "leverage": int(leverage)}, signed=True)
         self._done.add(key)
-        self._log(f"{symbol} 杠杆设为 {r.get('leverage')}x")
+        self._log(f"{symbol} 杠杆设为 {r.get('leverage')}x", to_console=False)
         return r
 
     def set_margin_type(self, symbol, margin_type="CROSSED"):
@@ -590,6 +619,8 @@ class BinanceFutures:
                     -1, f"{symbol} 已有 {pos['side']} 持仓 {pos['qty']}，"
                         f"拒绝叠加开仓（先平仓，或用 trade.py sync）")
 
+        # 先探测持仓模式，让日志顺序更自然（否则会出现在下单那一刻）
+        self.dual_side()
         self.set_margin_type(symbol, margin_type)
         self.set_leverage(symbol, leverage)
 
@@ -632,17 +663,36 @@ class BinanceFutures:
         side = "BUY" if direction == "long" else "SELL"
         self._log(f"开{direction} {symbol} qty={qty} 名义≈{notional:.2f}U "
                   f"保证金≈{need_margin:.2f}U 杠杆{leverage}x")
-        order = self.market_order(symbol, side, qty,
-                                  position_side=("LONG" if direction == "long" else "SHORT"))
+        try:
+            order = self.market_order(
+                symbol, side, qty,
+                position_side=("LONG" if direction == "long" else "SHORT"))
+        except BinanceError as e:
+            self._audit("FAIL", symbol, act=f"open-{direction}", qty=str(qty),
+                        notional=f"{notional:.2f}", err=str(e)[:100])
+            raise
 
         # ---------------- [坑27] 以实际持仓复核 ----------------
         after = self.position(symbol)
         if after["side"] != direction:
+            self._audit("FAIL", symbol, act="verify-dir", expect=direction,
+                        actual=after["side"], order=order.get("orderId"))
             raise BinanceError(
                 -1, f"下单后复核失败：期望 {direction}，实际 {after['side']}，请立即人工检查")
         if Decimal(str(after["qty"])) < qty * Decimal("0.95"):
+            self._audit("FAIL", symbol, act="verify-qty", expect=str(qty),
+                        actual=after["qty"], order=order.get("orderId"))
             raise BinanceError(
                 -1, f"下单后持仓不足：期望 {qty}，实际 {after['qty']}")
+
+        # 成功审计（只落文件）
+        self._audit("OPEN", symbol,
+                    side=side, qty=str(qty), notional=f"{notional:.2f}",
+                    lev=f"{leverage}x", margin=f"{need_margin:.2f}",
+                    order=order.get("orderId"), status=order.get("status"),
+                    avg=f"{float(order.get('avgPrice') or 0):.2f}",
+                    filled=order.get("executedQty"),
+                    pos=f"{after['side']} {after['qty']}", avail=f"{bal['available']:.2f}")
         return order
 
     def close_position(self, symbol, max_rounds=2):
@@ -652,6 +702,7 @@ class BinanceFutures:
         残余仓位等于反向暴露，必须循环清干净；清不干净就报错让人工处理。
         """
         symbol = self.normalize_symbol(symbol)
+        self.dual_side()                     # 提前探测，日志顺序更自然
         order = None
         for i in range(max_rounds):
             pos = self.position(symbol)
@@ -665,14 +716,23 @@ class BinanceFutures:
 
             side = "SELL" if pos["side"] == "long" else "BUY"
             self._log(f"平仓 {pos['side']} {symbol} qty={qty}")
-            order = self.market_order(
-                symbol, side, qty,
-                reduce_only=True,
-                position_side=("LONG" if pos["side"] == "long" else "SHORT"),
-                require_full=False)
+            try:
+                order = self.market_order(
+                    symbol, side, qty,
+                    reduce_only=True,
+                    position_side=("LONG" if pos["side"] == "long" else "SHORT"),
+                    require_full=False)
+            except BinanceError as e:
+                self._audit("FAIL", symbol, act="close", side=pos["side"],
+                            qty=str(qty), err=str(e)[:100])
+                raise
 
             after = self.position(symbol)
             if after["side"] == "flat":
+                self._audit("CLOSE", symbol, side=pos["side"], qty=str(qty),
+                            order=order.get("orderId"), status=order.get("status"),
+                            avg=f"{float(order.get('avgPrice') or 0):.2f}",
+                            filled=order.get("executedQty"), pos="flat")
                 return order
             self._log(f"平仓后仍有残余 {after['qty']}，重试 {i + 1}/{max_rounds}")
 

@@ -44,7 +44,7 @@ class Signal:
     entry: Optional[float] = None       # 参考入场价（None = 用标记价）
     tp1: Optional[float] = None         # 止盈价（可后补）
     sl: Optional[float] = None          # 止损价（可后补）
-    leverage: int = 2
+    leverage: int = 3
     margin_pct: Optional[float] = None  # 保证金占权益（优先使用）
     position_pct: float = 0.10          # 名义占权益（margin_pct 为空时用）
     signal_id: str = ""
@@ -247,6 +247,23 @@ class Executor:
         except Exception as e:
             log.warning("开仓邮件发送失败: %s", e)
 
+    def _notify_close(self, sym, side, pnl, reason, equity):
+        """平仓后推邮件"""
+        if not self.mailer:
+            return
+        body = (
+            f"币种：{sym}\n"
+            f"方向：{side}\n"
+            f"盈亏：{pnl:+.2f} USDT\n"
+            f"平仓原因：{reason}\n"
+            f"当前权益：{equity:.2f} USDT\n\n"
+            f"—— 交易机器人自动通知"
+        )
+        try:
+            self.mailer.send(f"【平仓】{sym} {pnl:+.2f}U", body)
+        except Exception as e:
+            log.warning("平仓邮件发送失败: %s", e)
+
     def _check_balance(self, context: str = ""):
         """交易后检查余额，跨档发邮件。失败不影响主流程"""
         if self.dry_run or not self.balance_watcher:
@@ -317,6 +334,33 @@ class Executor:
 
             ref_price = sig.entry or mark        # 仅用于日志和信号合理性校验
             notional, margin = self._calc_size(equity, sig)
+
+            # 已有持仓锁定的保证金要从可用额度里扣：
+            # 否则第一仓亏一点，权益缩水但第一仓保证金已锁定，
+            # 第二仓按新权益算 50% → 合计超过 100% → 永远开不了第二仓
+            used_margin = 0.0
+            for p_ in positions:
+                lv = max(1, int(p_.get("leverage", 1)))
+                used_margin += abs(p_["amount"] * p_["mark"]) / lv
+            avail = equity - used_margin
+            if avail <= 0:
+                return OrderResult(False, sym, direction,
+                                   error=f"可用保证金不足（权益 {equity:.2f}U，"
+                                         f"已占用 {used_margin:.2f}U）")
+            if margin > avail:
+                # 可用额度不到目标一半时直接拒绝：
+                # 硬开出来的仓位会远小于预期，还可能低于最小下单量
+                target_pct = sig.margin_pct if sig.margin_pct is not None else sig.position_pct
+                if avail < equity * target_pct * 0.5:
+                    return OrderResult(False, sym, direction,
+                                       error=f"可用保证金不足（权益 {equity:.2f}U，"
+                                             f"已占用 {used_margin:.2f}U，可用 {avail:.2f}U，"
+                                             f"目标 {margin:.2f}U）")
+                log.info("%s 保证金按可用额度下调 %.2fU → %.2fU（已占用 %.2fU）",
+                         sym, margin, avail, used_margin)
+                margin = avail
+                notional = margin * max(1, sig.leverage)
+
             qty = self.c.round_qty(sym, notional / mark)
             est_notional = qty * mark            # 风控用这个，与实际成交口径一致
 
@@ -326,6 +370,20 @@ class Executor:
                 return OrderResult(False, sym, direction,
                                    error=f"下单数量取整后为 0（预算名义 {notional:.2f}U，"
                                          f"价格 {mark:.6g}，低于该交易对最小下单量）")
+
+            # 取整会让实际名义偏离目标：高价币（BTC）stepSize 粗，偏差可能很大。
+            # 权益越小偏差越大，必须提示，否则以为开了 150% 实际只有 80%
+            if notional > 0 and est_notional < notional * 0.85:
+                log.warning(
+                    "%s 数量取整后名义 %.1fU，比目标 %.1fU 少 %.0f%%"
+                    "（价格 %.6g，数量 %s）。权益越小偏差越大",
+                    sym, est_notional, notional,
+                    (1 - est_notional / notional) * 100, mark, qty)
+                self._alert(
+                    f"⚠️ {sym} 实际仓位偏小\n"
+                    f"   目标名义 {notional:.1f}U → 实际 {est_notional:.1f}U"
+                    f"（-{(1-est_notional/notional)*100:.0f}%）\n"
+                    f"   原因：价格 {mark:.6g}，最小数量单位限制")
 
             # ---------- 2. 风控 ----------
             self.risk.check_open(
@@ -464,7 +522,8 @@ class Executor:
                 self._alert(
                     f"🟡 开仓 {sym} {direction.upper()} {filled} @ {avg:.6g}\n"
                     f"   名义 {actual_notional:.2f}U | 保证金 {actual_margin:.2f}U ({sig.leverage}x)\n"
-                    f"   兜底 SL {prov_sl:.6g} / TP {prov_tp:.6g}（±{sig.provisional_sl_pct}%）\n"
+                    f"   兜底 SL {prov_sl:.6g} (id {sl_id}) | TP {prov_tp:.6g} (id {tp_id})\n"
+                    f"   订单 {order.get('orderId')} | coid {coid_open} | 信号 {sig.signal_id}\n"
                     f"   ⏳ 等待真实止盈止损，收到后执行 amend"
                 )
             else:
@@ -667,8 +726,9 @@ class Executor:
             self.c.cancel_all(sym)
             seed = Signal(symbol=sym, direction="close", entry=None,
                           signal_id=f"{reason}-{int(time.time())}")
-            self.c.market_order(sym, close_side, abs(p["amount"]),
-                                _coid("CL", seed), reduce_only=True)
+            close_order = self.c.market_order(sym, close_side, abs(p["amount"]),
+                                              _coid("CL", seed), reduce_only=True)
+            fill_px = float(close_order.get("avgPrice") or p["mark"])
 
             bal = self.c.get_balance()
             if bal_before is not None:
@@ -677,8 +737,13 @@ class Executor:
                 pnl = p["unrealized"]
             self.risk.record_trade(pnl, bal["total"])
             self.pending.remove(sym)
-            self._alert(f"🔵 平仓 {sym} {p['side']} 盈亏 {pnl:+.2f}U ({reason})\n"
-                        f"   {self.risk.summary()}")
+            self._alert(
+                f"🔵 平仓 {sym} {p['side']} {abs(p['amount'])} @ {fill_px:.6g}\n"
+                f"   入场 {p['entry']:.6g} | 盈亏 {pnl:+.2f}U | 原因 {reason}\n"
+                f"   订单 {close_order.get('orderId')} | 权益 {bal['total']:.2f}U\n"
+                f"   {self.risk.summary()}"
+            )
+            self._notify_close(sym, p["side"], pnl, reason, bal["total"])
             # 平仓后余额可能跨档，检查一次
             if self.balance_watcher:
                 try:

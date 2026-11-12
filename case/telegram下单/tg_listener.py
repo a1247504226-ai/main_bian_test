@@ -11,6 +11,7 @@ Telegram 频道监听
 """
 import asyncio
 import logging
+import os
 from typing import Awaitable, Callable, Optional
 
 log = logging.getLogger(__name__)
@@ -24,6 +25,36 @@ except ImportError:
     TelegramClient = None
 
 
+def resolve_channel(ch):
+    """频道标识归一化
+
+    @username / t.me/xxx  → 原样返回字符串
+    -1001234567890        → 转成 int（Telethon 只认 int 形式的频道 ID）
+    """
+    s = str(ch).strip()
+    if s.lstrip("-").isdigit():
+        return int(s)
+    return s
+
+
+def build_proxy(proxy_url: str):
+    """把 http://127.0.0.1:7897 转成 Telethon 需要的 proxy 参数
+
+    支持 http / socks5，留空返回 None（直连）
+    """
+    if not proxy_url or not proxy_url.strip():
+        return None
+    from urllib.parse import urlparse
+    u = urlparse(proxy_url.strip())
+    if not u.hostname:
+        return None
+    return {
+        "proxy_type": (u.scheme or "http").lower(),
+        "addr": u.hostname,
+        "port": u.port or 7897,
+    }
+
+
 class TgListener:
     def __init__(
         self,
@@ -33,6 +64,7 @@ class TgListener:
         channel: str,
         session_path: str = "tg_session",
         dedup_file: str = "state/seen_msgs.json",
+        proxy_url: str = "",
     ):
         if not HAS_TELETHON:
             raise RuntimeError(
@@ -42,6 +74,7 @@ class TgListener:
         self.phone = phone
         self.channel = channel
         self.session_path = session_path
+        self.proxy_url = proxy_url
         self.client: Optional[TelegramClient] = None
         self._seen = self._load_seen(dedup_file)
         self._seen_file = dedup_file
@@ -70,11 +103,32 @@ class TgListener:
     # ---------------- 主循环 ----------------
     async def run(self, on_message: Callable[[str, int], Awaitable[None]]):
         """on_message(text, msg_id) 收到新消息时调用"""
-        self.client = TelegramClient(self.session_path, self.api_id, self.api_hash)
+        proxy = build_proxy(self.proxy_url)
+        if proxy:
+            log.info("使用代理 %s:%s (%s)", proxy["addr"], proxy["port"], proxy["proxy_type"])
+        self.client = TelegramClient(
+            self.session_path, self.api_id, self.api_hash,
+            proxy=proxy,
+            connection_retries=5,
+            retry_delay=3,
+            timeout=20,
+        )
 
-        log.info("连接 Telegram（首次运行需输入手机验证码）...")
+        log.info("连接 Telegram...")
         try:
-            await self.client.start(phone=self.phone)
+            await self.client.connect()
+            if await self.client.is_user_authorized():
+                log.info("session 有效，无需验证码")
+            else:
+                if not self.phone:
+                    raise RuntimeError(
+                        "session 未授权，且没配 TG_PHONE，无法登录。\n"
+                        f"  1) 确认 {self.session_path}.session 在当前目录"
+                        f"（当前工作目录：{os.getcwd()}）\n"
+                        "  2) 或在 .env.bot 里填 TG_PHONE=+86... 后重新运行"
+                        "（会要求输一次验证码）")
+                log.info("session 无效，用手机号重新登录...")
+                await self.client.start(phone=self.phone)
         except SessionPasswordNeededError:
             log.error("账号开启了两步验证，请在终端手动输入密码")
             raise
@@ -94,7 +148,7 @@ class TgListener:
             pass
 
         # 解析频道
-        target = self.channel.strip()
+        target = resolve_channel(self.channel)
         try:
             entity = await self.client.get_entity(target)
         except Exception as e:

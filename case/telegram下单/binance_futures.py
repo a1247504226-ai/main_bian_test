@@ -45,12 +45,14 @@ class BinanceFutures:
         testnet: bool = False,
         recv_window: int = 5000,
         timeout: int = 10,
+        offline: bool = False,
     ):
         self.api_key = api_key
         self.api_secret = api_secret
         self.base = TESTNET if testnet else MAINNET
         self.recv_window = recv_window
         self.timeout = timeout
+        self.offline = offline
         self.session = requests.Session()
         self.session.headers.update({"X-MBX-APIKEY": api_key})
 
@@ -58,6 +60,74 @@ class BinanceFutures:
         self._filters: Dict[str, Dict[str, Any]] = {}
         # 时间偏移（本机与服务器时差）
         self._time_offset = 0
+        # markPrice 短缓存 {symbol: (价格, 时间戳)}，避免同一币反复请求
+        self._price_cache: Dict[str, tuple] = {}
+        self._price_ttl = 3.0
+        # 离线模式的虚拟账户
+        self._off_equity = 500.0
+        self._off_positions: Dict[str, Dict[str, Any]] = {}
+
+        if offline:
+            log.info("离线模式：不连接币安（回放/测试用，零 API 权重）")
+            return
+
+    # ------------------------------------------------------------------
+    # 离线模拟（回放、单元测试用）
+    # ------------------------------------------------------------------
+    def _offline_response(self, method: str, path: str, params: Dict[str, Any]):
+        m = method.upper()
+        if path == "/fapi/v1/time":
+            return {"serverTime": int(time.time() * 1000)}
+        if path == "/fapi/v1/exchangeInfo":
+            return {"symbols": [{"symbol": s, "quantityPrecision": 4,
+                                 "pricePrecision": 6,
+                                 "filters": [
+                                     {"filterType": "LOT_SIZE", "stepSize": "0.0001",
+                                      "minQty": "0.0001"},
+                                     {"filterType": "PRICE_FILTER", "tickSize": "0.000001"},
+                                     {"filterType": "MIN_NOTIONAL", "notional": "5"},
+                                 ]} for s in ["BTCUSDT", "ETHUSDT"]]}
+        if path == "/fapi/v2/balance":
+            return [{"asset": "USDT", "balance": str(self._off_equity),
+                     "availableBalance": str(self._off_equity),
+                     "crossUnPnl": "0"}]
+        if path == "/fapi/v2/positionRisk":
+            want = (params or {}).get("symbol")
+            out = []
+            for sym, p in self._off_positions.items():
+                if want and sym != want.upper():
+                    continue
+                out.append({"symbol": sym, "positionAmt": str(p["amount"]),
+                            "entryPrice": str(p["entry"]), "markPrice": str(p["mark"]),
+                            "unRealizedProfit": "0", "leverage": str(p.get("leverage", 3))})
+            return out
+        if path == "/fapi/v1/premiumIndex":
+            sym = (params or {}).get("symbol", "")
+            px = self._off_positions.get(sym, {}).get("mark", 1.0)
+            return {"symbol": sym, "markPrice": str(px)}
+        if path == "/fapi/v1/order":
+            qty = float((params or {}).get("quantity", 0) or 0)
+            sym = (params or {}).get("symbol", "")
+            is_reduce = str((params or {}).get("reduceOnly", "")).lower() == "true"
+            otype = (params or {}).get("type", "")
+            if otype in ("STOP_MARKET", "TAKE_PROFIT_MARKET"):
+                return {"orderId": int(time.time() * 1000) % 1000000, "status": "NEW"}
+            if is_reduce:
+                self._off_positions.pop(sym, None)
+            else:
+                px = self._off_positions.get(sym, {}).get("mark", 1.0)
+                side = (params or {}).get("side", "BUY")
+                self._off_positions[sym] = {
+                    "symbol": sym, "amount": qty if side == "BUY" else -qty,
+                    "entry": px, "mark": px, "leverage": 3}
+            return {"orderId": int(time.time() * 1000) % 1000000,
+                    "avgPrice": str((params or {}).get("_px", 1.0)),
+                    "executedQty": str(qty), "status": "FILLED"}
+        if path == "/fapi/v1/allOpenOrders":
+            return {"code": 200, "msg": "ok"}
+        if path in ("/fapi/v1/leverage", "/fapi/v1/marginType"):
+            return {"code": 200, "msg": "ok"}
+        return {}
 
     # ------------------------------------------------------------------
     # 底层请求
@@ -67,6 +137,8 @@ class BinanceFutures:
 
         用短超时：这只是优化项，失败也不影响下单（签名请求遇到 -1021 会自动重试）
         """
+        if self.offline:
+            return
         r = self.session.get(f"{self.base}/fapi/v1/time", timeout=5)
         r.raise_for_status()
         server_ts = r.json()["serverTime"]
@@ -89,6 +161,9 @@ class BinanceFutures:
         max_retries: int = 3,
     ) -> Any:
         params = dict(params or {})
+        if self.offline:
+            return self._offline_response(method, path, params)
+
         if signed:
             params["timestamp"] = int(time.time() * 1000) + self._time_offset
             params["recvWindow"] = self.recv_window
@@ -105,14 +180,20 @@ class BinanceFutures:
                     q = self._sign(params) if signed else urlencode(params)
                     resp = self.session.post(f"{url}?{q}", timeout=self.timeout)
 
-                # 限频监控
+                # 限频监控：80-90% 只记 debug（正常波动），接近上限才告警
                 used = resp.headers.get("X-MBX-USED-WEIGHT-1M")
                 if used:
                     ratio = int(used) / WEIGHT_LIMIT_1M
-                    if ratio > 0.8:
-                        log.warning("API 权重已用 %.0f%% (%s/%d)，降速 2s",
+                    if ratio > 0.95:
+                        log.warning("API 权重 %.0f%% (%s/%d)，接近上限，降速 3s",
                                     ratio * 100, used, WEIGHT_LIMIT_1M)
-                        time.sleep(2)
+                        time.sleep(3)
+                    elif ratio > 0.9:
+                        log.info("API 权重 %.0f%%，降速 1s", ratio * 100)
+                        time.sleep(1)
+                    elif ratio > 0.8:
+                        log.debug("API 权重 %.0f%%，轻微降速", ratio * 100)
+                        time.sleep(0.5)
 
                 if resp.status_code == 200:
                     return resp.json()
@@ -132,8 +213,27 @@ class BinanceFutures:
                     params["timestamp"] = int(time.time() * 1000) + self._time_offset
                     continue
 
-                # 5xx 服务端错误 / 429 限频 / 418 封禁：退避重试
-                if resp.status_code >= 500 or resp.status_code in (429, 418):
+                # 418 = IP 封禁（权重超限），429 = 限频
+                # 关键：418 绝不能重试！盲目重试只会延长封禁时间（可能从 2 分钟变成几小时）
+                if resp.status_code in (418, 429):
+                    ra = resp.headers.get("Retry-After", "")
+                    try:
+                        wait = int(ra)
+                    except (ValueError, TypeError):
+                        wait = 120 if resp.status_code == 418 else 30
+                    if resp.status_code == 418:
+                        raise BinanceError(
+                            -1003,
+                            f"IP 被币安封禁（418），需等 {wait} 秒。"
+                            f"原因是 API 权重超限，不要重试，等待后自动恢复",
+                            418)
+                    log.warning("触发限频 429，按 Retry-After 等待 %d 秒", wait)
+                    time.sleep(wait)
+                    last_err = BinanceError(code, msg, resp.status_code)
+                    continue
+
+                # 5xx 服务端错误：退避重试
+                if resp.status_code >= 500:
                     wait = 2 ** attempt
                     log.warning("HTTP %d，%d 秒后重试 (%d/%d)",
                                 resp.status_code, wait, attempt, max_retries)
@@ -181,6 +281,14 @@ class BinanceFutures:
 
     def get_filters(self, symbol: str) -> Dict[str, Any]:
         symbol = symbol.upper()
+        # 离线模式：任何币种都给一套通用规则，不查 exchangeInfo
+        # （回放时数据里几百个币种，不可能逐个预置）
+        if self.offline and symbol not in self._filters:
+            self._filters[symbol] = {
+                "step": Decimal("0.0001"), "tick": Decimal("0.000001"),
+                "minQty": Decimal("0.0001"), "minNotional": Decimal("5"),
+                "qtyPrecision": 4, "pricePrecision": 6,
+            }
         if symbol not in self._filters:
             self.load_exchange_info([symbol])
         if symbol not in self._filters:
@@ -391,11 +499,21 @@ class BinanceFutures:
         return self._request("GET", "/fapi/v1/openOrders", params)
 
     def get_mark_price(self, symbol: str) -> float:
+        """标记价，带 3 秒缓存：同一币短时间反复查（开仓+挂单校验）不重复打 API"""
+        sym = symbol.upper()
+        now = time.time()
+        hit = self._price_cache.get(sym)
+        if hit and now - hit[1] < self._price_ttl:
+            return hit[0]
         data = self._request("GET", "/fapi/v1/premiumIndex",
-                             {"symbol": symbol.upper()}, signed=False)
-        return float(data["markPrice"])
+                             {"symbol": sym}, signed=False)
+        px = float(data["markPrice"])
+        self._price_cache[sym] = (px, now)
+        return px
 
     def ping(self) -> bool:
+        if self.offline:
+            return True
         try:
             r = self.session.get(f"{self.base}/fapi/v1/ping", timeout=self.timeout)
             return r.status_code == 200

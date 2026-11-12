@@ -12,11 +12,11 @@ testnet: true
 dry_run: true
 
 # ============ 下单 ============
-# 杠杆。2x = 保证金 50% 可撬动 100% 名义
-leverage: 2
+# 杠杆。3x = 保证金 50% 可撬动 150% 名义
+leverage: 3
 
 # 单笔保证金占账户权益比例（这才是你真正"拿多少钱去做这个仓"）
-# 0.50 = 每仓用一半权益做保证金 → 2x 下名义 100%
+# 0.50 = 每仓用一半权益做保证金 → 3x 下名义 150%
 # 注意：这样最多开 2 个仓（50% × 2 = 100% 保证金），没有缓冲
 # 想开更多仓就调小：0.30 → 3 仓，0.25 → 4 仓，0.15 → 6 仓
 margin_pct: 0.50
@@ -28,10 +28,10 @@ provisional_tp_pct: 7.0
 
 # ============ 风控 ============
 # 杠杆上限（必须 >= 上面的 leverage，否则全部拒单）
-max_leverage: 2
+max_leverage: 3
 
-# 单笔名义敞口上限（名义/权益）。2x + margin 50% → 名义 100%
-max_position_pct: 1.00
+# 单笔名义敞口上限（名义/权益）。3x + margin 50% → 名义 150%
+max_position_pct: 1.50
 
 # 单笔保证金上限
 max_margin_pct: 0.50
@@ -43,11 +43,13 @@ max_total_margin_pct: 1.00
 # 最多同时持有几个仓
 max_open_positions: 2
 
-# 单币种累计名义敞口上限
-max_symbol_exposure_pct: 1.00
+# 单币种累计名义敞口上限（必须 >= 单笔名义 1.50，否则全部拒单）
+max_symbol_exposure_pct: 1.50
 
-# 当日亏损达 5% 停止开新仓
-daily_loss_limit_pct: 0.05
+# 当日亏损达 20% 停止开新仓
+# 3x 下每笔止损亏 7.5% 权益，20% 约等于 2.6 笔，留出连亏缓冲
+# 不能设小于 7.5%，否则第一笔止损就熔断，当天再也开不了仓
+daily_loss_limit_pct: 0.20
 
 # 连亏 3 笔熔断，需人工解除
 max_consecutive_losses: 3
@@ -67,6 +69,16 @@ allowed_symbols: null
 skip_keywords:
   - 轻仓
   - 补仓
+
+# 挂单（限价）信号是否跳过
+# 频道发「挂单多 分批进场：3.13-3.08」时，是让你在区间内挂限价单。
+# 市价开仓会开在当前价，可能远离区间，所以默认跳过（7.3% 的信号属于这类）
+skip_limit_orders: true
+
+# 同币反向信号是否自动反手（先平旧仓再开新仓）
+# false = 只发告警并跳过。频道偶尔会「空单还在又喊做多」，
+#         自动反手在误判时会双向亏损，所以默认保守
+allow_reverse: false
 
 # ============ TG 频道监听 ============
 # 申请步骤：手机登录 https://my.telegram.org → API development tools

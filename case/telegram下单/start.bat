@@ -1,99 +1,100 @@
 @echo off
-chcp 65001 >nul
+setlocal
 cd /d "%~dp0"
-title 币安 TG 跟单机器人
+title Binance TG Trader
 
 echo ==================================================
-echo    币安 TG 跟单机器人
+echo    Binance TG Auto Trader
 echo ==================================================
 echo.
 
 where python >nul 2>nul
 if errorlevel 1 (
-    echo [错误] 找不到 python，请先安装 Python 3.9+ 并加入 PATH
+    echo [ERROR] python not found in PATH
+    echo         Install Python 3.9+ first
     pause
     exit /b 1
 )
 
 if not exist ".env.bot" (
-    echo [错误] 缺少 .env.bot
-    echo        请复制 .env.bot.example 为 .env.bot 并填好密钥
+    echo [ERROR] .env.bot missing
+    echo         Copy .env.bot.example to .env.bot and fill in keys
     pause
     exit /b 1
 )
 
 python -c "import requests, yaml, dotenv" >nul 2>nul
 if errorlevel 1 (
-    echo [提示] 首次运行，正在安装依赖...
+    echo [INFO] Installing dependencies...
     python -m pip install -q -r requirements.txt
     if errorlevel 1 (
-        echo [错误] 依赖安装失败
+        echo [ERROR] pip install failed
         pause
         exit /b 1
     )
 )
 
-echo 选择运行模式：
+echo Select run mode:
 echo.
-echo   [1] 测试网 + 只打印      最安全，验证信号解析
-echo   [2] 测试网 + 真实下单    虚拟资金，可放心测
-echo   [3] 回放历史消息         离线验证解析和下单逻辑
-echo   [4] 检查配置             看环境/密钥/余额
-echo   [5] 主网 + 真实下单      真实资金，谨慎
+echo   [1] Testnet + dry-run        (safest, parse only)
+echo   [2] Testnet + live orders    (virtual money)
+echo   [3] Replay history file      (offline test)
+echo   [4] Check config
+echo   [5] MAINNET + live orders    (REAL MONEY)
 echo.
 set "choice="
-set /p "choice=请输入序号 [1]: "
+set /p "choice=Enter number [1]: "
 if "%choice%"=="" set "choice=1"
 
-if "%choice%"=="1" goto MODE1
-if "%choice%"=="2" goto MODE2
-if "%choice%"=="3" goto MODE3
-if "%choice%"=="4" goto MODE4
-if "%choice%"=="5" goto MODE5
-echo 无效选择
+if "%choice%"=="1" goto M1
+if "%choice%"=="2" goto M2
+if "%choice%"=="3" goto M3
+if "%choice%"=="4" goto M4
+if "%choice%"=="5" goto M5
+echo Invalid choice
 pause
 exit /b 1
 
-:MODE1
+:M1
 echo.
-echo === 测试网 + 只打印 ===
+echo === Testnet + dry-run ===
 python trader.py
 goto END
 
-:MODE2
+:M2
 echo.
-echo === 测试网 + 真实下单（虚拟资金）===
+echo === Testnet + live orders ===
 python trader.py --live
 goto END
 
-:MODE3
+:M3
 echo.
 set "f="
-set /p "f=请输入历史消息文件路径（可直接回车用默认）: "
+set /p "f=History file path (Enter for default): "
 if "%f%"=="" set "f=D:\Down\cyclone\telegram_history_10000.txt"
 if not exist "%f%" (
-    echo [错误] 文件不存在: %f%
+    echo [ERROR] file not found: %f%
     goto END
 )
+echo === Replay: %f% ===
 python trader.py --replay "%f%" --limit 50
 goto END
 
-:MODE4
+:M4
 echo.
 python main.py check
 goto END
 
-:MODE5
+:M5
 echo.
 echo ##################################################
-echo   警告：即将用【真实资金】在币安主网下单
-echo   请确认 .env.bot 里已配置 BINANCE_MAINNET_API_KEY
+echo   WARNING: REAL MONEY on Binance MAINNET
 echo ##################################################
 echo.
 set "c="
-set /p "c=输入 YES 继续: "
+set /p "c=Type YES to continue: "
 if /i not "%c%"=="YES" (
-    echo 已取消
+    echo Cancelled
     goto END
 )
 python trader.py --mainnet --live
@@ -102,6 +103,6 @@ goto END
 :END
 echo.
 echo ==================================================
-echo 程序已退出
+echo Done
 echo ==================================================
 pause

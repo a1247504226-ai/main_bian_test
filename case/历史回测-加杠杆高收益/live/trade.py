@@ -16,6 +16,7 @@
 """
 
 import argparse
+import datetime
 import json
 import os
 import sys
@@ -23,6 +24,22 @@ import time
 
 import live_monitor as L
 from exchange import BinanceError, BinanceFutures
+
+LOG_PATH = os.path.join(L.HERE, "trade.log")
+
+
+def log(msg, console=True):
+    """写订单日志：文件必写，控制台按需显示。"""
+    line = f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] {msg}"
+    if console:
+        print(line, flush=True)
+    try:
+        if os.path.exists(LOG_PATH) and os.path.getsize(LOG_PATH) > 2 * 1024 * 1024:
+            os.replace(LOG_PATH, LOG_PATH + ".1")
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:                                # noqa: BLE001
+        pass
 
 
 def build_client(cfg):
@@ -35,6 +52,7 @@ def build_client(cfg):
         e["api_key"], e["api_secret"],
         testnet=bool(e.get("testnet", True)),
         allow_mainnet=bool(e.get("allow_mainnet", False)),
+        log_file=LOG_PATH,
     )
     ex.min_interval = float(e.get("min_interval_sec", 1.0))
     return ex, e
@@ -82,7 +100,7 @@ def cmd_sync(ex, e, cfg):
     snap = L.snapshot(cfg)
     want = snap["want"]
     pos = ex.position(symbol)
-    print(f"策略应有: {want} | 交易所实际: {_fmt_pos(pos)}")
+    log(f"信号 {want} | 交易所 {_fmt_pos(pos)} | 价格 {snap['price']:,.2f}")
 
     # [坑18] 停用开关：只拦「开新仓」，平仓永远放行——
     # 停用状态下更应该允许减仓，否则想退出都退不掉。
@@ -90,11 +108,11 @@ def cmd_sync(ex, e, cfg):
 
     if want == "flat":
         if pos["side"] == "flat":
-            print("→ 已经是空仓，无需操作")
+            log("无需操作：已是空仓")
             return
-        print("→ 策略要求空仓，平掉现有持仓")
+        log(f"平仓：策略要求空仓（当前 {pos['side']} {pos['qty']}）")
         ex.close_position(symbol)
-        print("完成：", _fmt_pos(ex.position(symbol)))
+        log(f"完成：{_fmt_pos(ex.position(symbol))}")
         return
 
     if stopped:
@@ -102,7 +120,7 @@ def cmd_sync(ex, e, cfg):
                  "如需平仓用 trade.py close；要恢复开仓请删除 live/STOP.flag")
 
     if pos["side"] == want:
-        print(f"→ 已持{want}，与策略一致，无需操作")
+        log(f"无需操作：已持{want}，与策略一致")
         return
 
     # [坑19] 冷却期只在「要开新仓」时生效（平仓不受限，否则止损失败会卡死）
@@ -110,23 +128,22 @@ def cmd_sync(ex, e, cfg):
     cd = int(st.get("cooldown_until", 0) or 0)
     now_ms = int(time.time() * 1000)
     if now_ms < cd:
-        remain_h = (cd - now_ms) / 3600000
-        print(f"[冷却中] 策略止损后冷却还剩 {remain_h:.1f} 小时，暂不开新仓")
-        print(f"         如需强制开仓：python trade.py open {want}")
+        log(f"暂不开仓：策略冷却还剩 {(cd - now_ms) / 3600000:.1f} 小时"
+            f"（强制开仓用 trade.py open {want}）")
         return
 
     if pos["side"] != "flat":
-        print(f"→ 需要反手（{pos['side']} → {want}），先平仓")
+        log(f"反手：{pos['side']} → {want}，先平仓")
         ex.close_position(symbol)
         pos = ex.position(symbol)
         if pos["side"] != "flat":
-            print("[警告] 平仓后仍有持仓，中止开仓以免反向叠加")
+            log("[警告] 平仓后仍有持仓，中止开仓以免反向叠加")
             return
 
-    print(f"→ 开{want}，名义 {notional}U / {lev:g}x")
+    log(f"开{want}：名义 {notional}U / {lev:g}x")
     order = ex.open_position(symbol, want, notional, lev, margin_type=margin_type)
-    print(f"  成交 {order.get('executedQty')} @ {order.get('avgPrice')}，状态 {order.get('status')}")
-    print("完成：", _fmt_pos(ex.position(symbol)))
+    log(f"完成：{_fmt_pos(ex.position(symbol))}  "
+        f"成交 {order.get('executedQty')} @ {float(order.get('avgPrice') or 0):,.2f}")
 
 
 def cmd_open(ex, e, cfg, direction, notional, lev):
@@ -134,20 +151,22 @@ def cmd_open(ex, e, cfg, direction, notional, lev):
     pos = ex.position(symbol)
     if pos["side"] != "flat":
         sys.exit(f"[拒绝] 已有持仓 {_fmt_pos(pos)}，请先 close 或 sync")
+    log(f"手动开{direction}：名义 {notional}U / {lev:g}x")
     order = ex.open_position(symbol, direction, notional, lev,
                              margin_type=e.get("margin_type", "CROSSED"))
-    print(f"开{direction}成交 {order.get('executedQty')} @ {order.get('avgPrice')}")
-    print("当前持仓：", _fmt_pos(ex.position(symbol)))
+    log(f"完成：{_fmt_pos(ex.position(symbol))}  "
+        f"成交 {order.get('executedQty')} @ {float(order.get('avgPrice') or 0):,.2f}")
 
 
 def cmd_close(ex, e, cfg):
     symbol = cfg.get("symbol", "BTCUSDT")
+    log("手动平仓")
     order = ex.close_position(symbol)
     if order is None:
-        print("本来就没有持仓")
+        log("本来就没有持仓")
         return
-    print(f"平仓成交 {order.get('executedQty')} @ {order.get('avgPrice')}")
-    print("当前持仓：", _fmt_pos(ex.position(symbol)))
+    log(f"完成：{_fmt_pos(ex.position(symbol))}  "
+        f"成交 {order.get('executedQty')} @ {float(order.get('avgPrice') or 0):,.2f}")
 
 
 def main():
@@ -168,6 +187,11 @@ def main():
     if args.cmd == "open" and os.path.exists(os.path.join(L.HERE, "STOP.flag")):
         sys.exit("[拒绝] STOP.flag 存在（本机已停用）。要开仓请先删除 live/STOP.flag")
 
+    trading = args.cmd != "status"        # status 只是查看，不写运行分隔线
+    if trading:
+        log(f"===== trade.py {args.cmd} 开始 =====", console=False)
+    t0 = time.time()
+    rc = 0
     try:
         ex, e = build_client(cfg)
         if args.cmd == "status":
@@ -181,11 +205,15 @@ def main():
         elif args.cmd == "close":
             cmd_close(ex, e, cfg)
     except BinanceError as err:
-        print(f"[交易所错误] {err}")
+        log(f"[错误] {err}")
         if err.code == -1003:
-            print("  → IP 被限流。测试网对共享出口 IP 很敏感，等解封或换网络后再试。")
-        return 1
-    return 0
+            log("  → IP 被限流。测试网对共享出口 IP 很敏感，等解封或换网络后再试。")
+        rc = 1
+    finally:
+        if trading:
+            log(f"===== trade.py {args.cmd} 结束（{time.time() - t0:.1f}s）=====",
+                console=False)
+    return rc
 
 
 if __name__ == "__main__":

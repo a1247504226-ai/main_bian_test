@@ -9,9 +9,12 @@
 """
 
 import json
+import os
 import sys
 
 from exchange import BinanceFutures
+
+LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trade.log")
 
 KEY = "riufKUh5kdZNF0eOiHo2eLRPVXOFlPAxbVIdePgK3e0EIbeOmFqGIaryTTT0u9fb"
 SEC = "FG6lfFCmNnG0ieStXhQ9QTfaM3ix1Pb5tLksdwvnwq8aUVSinGuzyH6ID2gZJQpO"
@@ -28,7 +31,7 @@ def main():
     notional = float(sys.argv[2]) if len(sys.argv) > 2 else 150.0
     lev = float(sys.argv[3]) if len(sys.argv) > 3 else 2.0
 
-    ex = BinanceFutures(KEY, SEC)          # 默认测试网
+    ex = BinanceFutures(KEY, SEC, log_file=LOG_PATH)   # 默认测试网
     pre = ex.preflight(SYMBOL, leverage=lev)
     show("1) 下单前体检", pre)
 
