@@ -1,8 +1,0 @@
-2026-11-12 15:07:53,436 INFO    binance_futures: 时间同步完成，偏移 1796 ms
-2026-11-12 15:07:54,031 INFO    tg_listener: 使用代理 127.0.0.1:7897 (http)
-2026-11-12 15:07:54,031 INFO    health: 心跳服务监听 :8080/health
-2026-11-12 15:07:54,045 INFO    tg_listener: 连接 Telegram...
-2026-11-12 15:07:55,427 INFO    tg_listener: session 有效，无需验证码
-2026-11-12 15:07:55,657 INFO    tg_listener: 已登录：Jack Han (@wangzheguilai1995)
-2026-11-12 15:07:56,039 INFO    tg_listener: 开始监听：傲冠合约交易社区
-2026-11-12 15:07:56,040 INFO    tg_listener: 监听已启动，等待消息...（Ctrl+C 退出）

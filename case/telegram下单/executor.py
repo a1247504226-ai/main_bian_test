@@ -511,6 +511,14 @@ class Executor:
                                    error=f"保护单失败: {e}")
 
             # ---------- 8. 记录 ----------
+            # 结构化单行日志：一行一笔，方便 grep 和事后对账
+            log.info(
+                "开仓成交 | %s %s | 数量 %s | 成交价 %.6g | 名义 %.2fU | 保证金 %.2fU | "
+                "%dx | SL %.6g | TP %.6g | 订单 %s | coid %s | 保护 %s | 信号 %s",
+                sym, direction.upper(), filled, avg, actual_notional, actual_margin,
+                sig.leverage, prov_sl, prov_tp, order.get("orderId"), coid_open,
+                "兜底" if provisional else "完整", sig.signal_id)
+
             if provisional:
                 self.pending.add(sym, {
                     "status": "provisional",
@@ -672,12 +680,22 @@ class Executor:
                 "tp_all": tp_all or ([tp_price] if tp_price else []),
             })
 
-            sl_pct = abs(sl_price - entry) / entry * 100
-            tp_pct = abs(tp_price - entry) / entry * 100 if tp_price else 0
+            sl_delta = (sl_price - entry) / entry * 100
+            tp_delta = ((tp_price - entry) / entry * 100) if tp_price else 0.0
+            sl_pct = abs(sl_delta)
+            tp_pct = abs(tp_delta)
+            # 结构化单行日志
+            log.info(
+                "改单成交 | %s %s | 入场 %.6g | 止损 %.6g (%+.2f%%) id=%s | "
+                "止盈 %s (%+.2f%%) id=%s | 目标 %s",
+                sym, direction.upper(), entry, sl_price,
+                (sl_price - entry) / entry * 100, sl_id,
+                f"{tp_price:.6g}" if tp_price else "无", tp_pct, tp_id,
+                tp_all or "-")
             self._alert(
                 f"🔄 保护单已更新 {sym} {direction.upper()}\n"
-                f"   止损 {sl_price} (-{sl_pct:.2f}%) id={sl_id}\n"
-                f"   止盈 {tp_price or '无'} (+{tp_pct:.2f}%) id={tp_id}"
+                f"   止损 {sl_price} ({sl_delta:+.2f}%) id={sl_id}\n"
+                f"   止盈 {tp_price or '无'} ({tp_delta:+.2f}%) id={tp_id}"
             )
             return OrderResult(True, sym, direction, abs(p["amount"]), p["mark"],
                                sl_order_id=sl_id, tp_order_id=tp_id)
@@ -737,6 +755,13 @@ class Executor:
                 pnl = p["unrealized"]
             self.risk.record_trade(pnl, bal["total"])
             self.pending.remove(sym)
+            # 结构化单行日志
+            log.info(
+                "平仓成交 | %s %s | 数量 %s | 成交价 %.6g | 入场 %.6g | 盈亏 %+.2fU | "
+                "原因 %s | 订单 %s | 权益 %.2fU | %s",
+                sym, p["side"], abs(p["amount"]), fill_px, p["entry"], pnl,
+                reason, close_order.get("orderId"), bal["total"],
+                f"{(pnl/(bal['total']-pnl)*100):+.2f}%" if bal["total"] - pnl > 0 else "-")
             self._alert(
                 f"🔵 平仓 {sym} {p['side']} {abs(p['amount'])} @ {fill_px:.6g}\n"
                 f"   入场 {p['entry']:.6g} | 盈亏 {pnl:+.2f}U | 原因 {reason}\n"

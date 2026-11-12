@@ -19,7 +19,7 @@ import logging
 import os
 import sys
 import time
-from typing import Optional
+from typing import Dict, Optional
 
 import health
 import signal_parser as sp
@@ -110,6 +110,9 @@ class Trader:
         self.buf = sp.TPSLBuffer(ttl_sec=cfg.tpsl_ttl_sec)
         self.stats = {"open": 0, "amend": 0, "trail": 0, "ignore": 0, "fail": 0}
         self._warned: set = set()   # 已告警过的 symbol，避免重复刷屏
+        # 同币种开仓冷却：TG 重连重放、消息重复、编辑再解析都可能重复触发开仓
+        self._recent_opens: Dict[str, float] = {}
+        self.open_cooldown = 30.0
         # 消息必须串行处理：Telethon 默认并发投递，
         # 两个信号同时到达会各自读到「开仓前」的持仓快照，双双通过风控 → 超限开仓
         self._lock = asyncio.Lock()
@@ -132,12 +135,12 @@ class Trader:
         return ""
 
     # ---------------- 消息处理 ----------------
-    async def on_message(self, text: str, msg_id: int):
+    async def on_message(self, text: str, msg_id: int, from_edit: bool = False):
         async with self._lock:      # 串行化，杜绝并发下单
             ev = sp.parse(text)
 
             if ev.kind == sp.OPEN:
-                await self._handle_open(ev)
+                await self._handle_open(ev, from_edit=from_edit)
             elif ev.kind == sp.TPSL:
                 await self._handle_tpsl(ev)
             elif ev.kind == sp.TP_HIT:
@@ -164,7 +167,7 @@ class Trader:
             log.debug("查询 %s 持仓失败: %s", sym, e)
             return ""
 
-    async def _handle_open(self, ev: sp.ParsedEvent):
+    async def _handle_open(self, ev: sp.ParsedEvent, from_edit: bool = False):
         sym = ev.symbol
         if self.cfg.allowed_symbols and sym not in self.cfg.allowed_symbols:
             log.info("跳过 %s（不在白名单）", sym)
@@ -188,10 +191,29 @@ class Trader:
             self.stats["ignore"] += 1
             return
 
-        # 同币已有反向持仓：默认只告警跳过，避免误判导致双向亏损
         cur = self._current_side(sym)
+
+        # 同一条消息被编辑成同方向 = 频道只是补了备注/改了标点，绝不能重复开仓
+        if from_edit and cur and cur == ev.direction:
+            log.info("编辑后仍是同向开仓 %s %s，忽略（防重复下单）", sym, ev.direction)
+            self.stats["ignore"] += 1
+            return
+
+        # 方向冲突处理
         if cur and ev.direction and cur != ev.direction:
-            if not self.cfg.allow_reverse:
+            if from_edit:
+                # 编辑成反方向 = 频道明确修正，直接反手（不受 allow_reverse 限制）
+                log.info("🔄 信号被编辑，方向反转 %s：%s → %s，执行反手",
+                         sym, cur.upper(), ev.direction.upper())
+                if self.notify:
+                    self.notify(f"🔄 {sym} 信号被编辑\n"
+                                f"   {cur.upper()} → {ev.direction.upper()}，正在反手")
+                cr = await asyncio.to_thread(self.ex.close, sym, "edit-reverse")
+                if not cr.ok:
+                    log.error("编辑反手平仓失败 %s: %s", sym, cr.error)
+                    self.stats["fail"] += 1
+                    return
+            elif not self.cfg.allow_reverse:
                 msg = (f"⚠️ {sym} 反向信号已跳过\n"
                        f"   当前持有 {cur.upper()}，新信号 {ev.direction.upper()}\n"
                        f"   要自动反手，把 config.yaml 的 allow_reverse 改成 true")
@@ -200,14 +222,28 @@ class Trader:
                     self.notify(msg)
                 self.stats["ignore"] += 1
                 return
-            log.info("🔄 %s 反向信号：先平 %s 再开 %s", sym, cur, ev.direction)
-            cr = await asyncio.to_thread(self.ex.close, sym, "reverse")
-            if not cr.ok:
-                log.error("反手平仓失败 %s: %s", sym, cr.error)
-                self.stats["fail"] += 1
+            else:
+                log.info("🔄 %s 反向信号：先平 %s 再开 %s", sym, cur, ev.direction)
+                cr = await asyncio.to_thread(self.ex.close, sym, "reverse")
+                if not cr.ok:
+                    log.error("反手平仓失败 %s: %s", sym, cr.error)
+                    self.stats["fail"] += 1
+                    return
+
+        # 同一币种 30 秒内只开一次：
+        # TG 断线重连会重放最近的 update，同一条信号可能被投递两次。
+        # 编辑来的信号不检查冷却（它是同一条消息的修正，不是重复投递）
+        if not from_edit:
+            now = time.time()
+            last = self._recent_opens.get(sym, 0.0)
+            if now - last < self.open_cooldown:
+                log.info("跳过 %s %s：%.0f 秒前刚开过仓（防重复下单）",
+                         sym, ev.direction, now - last)
+                self.stats["ignore"] += 1
                 return
 
-        log.info("📥 开仓信号 %s %s", sym, ev.direction)
+        log.info("📥 开仓信号 %s %s%s", sym, ev.direction,
+                 "（来自消息编辑）" if from_edit else "")
         sig = Signal(
             symbol=sym,
             direction=ev.direction,
@@ -224,6 +260,7 @@ class Trader:
         r = await asyncio.to_thread(self.ex.open, sig)
         if r.ok:
             self.stats["open"] += 1
+            self._recent_opens[sym] = time.time()   # 只有开成功才进冷却
         else:
             self.stats["fail"] += 1
             log.error("开仓失败 %s %s: %s", sym, ev.direction, r.error)

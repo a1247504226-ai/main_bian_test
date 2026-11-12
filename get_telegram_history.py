@@ -23,10 +23,10 @@ PROXY_PORT = 7897
 CHANNEL_ID = -1001976446916
 
 # 获取最近 1000 条
-MESSAGE_LIMIT = 1000
+MESSAGE_LIMIT = 10000
 
 # 输出文件
-OUTPUT_FILE = "telegram_history_1000.txt"
+OUTPUT_FILE = "telegram_history_10000.txt"
 
 
 # ============================================================

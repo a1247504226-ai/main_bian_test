@@ -12,7 +12,9 @@ Telegram 频道监听
 import asyncio
 import logging
 import os
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Dict, Optional
+
+import signal_parser as sp
 
 log = logging.getLogger(__name__)
 
@@ -78,6 +80,9 @@ class TgListener:
         self.client: Optional[TelegramClient] = None
         self._seen = self._load_seen(dedup_file)
         self._seen_file = dedup_file
+        # 记录每个消息最后处理过的文本，用来识别「假编辑」：
+        # 点赞、表情回应、回复计数变化都会触发 MessageEdited，但正文没变
+        self._last_text: Dict[int, str] = {}
 
     # ---------------- 去重 ----------------
     def _load_seen(self, path):
@@ -166,6 +171,11 @@ class TgListener:
             if msg_id in self._seen:
                 return
             self._seen.add(msg_id)
+            self._last_text[msg_id] = text
+            # 长期运行防内存膨胀：超过 1 万条只留最近 5000
+            if len(self._last_text) > 10000:
+                keep = list(self._last_text)[-5000:]
+                self._last_text = {k: self._last_text[k] for k in keep}
             try:
                 await on_message(text, msg_id)
             except Exception as e:
@@ -178,12 +188,29 @@ class TgListener:
         # 频道经常编辑消息修正止盈止损，不监听的话会一直用错的价位
         @self.client.on(events.MessageEdited(chats=entity))
         async def _edited(event):
+            msg_id = event.message.id
             text = (event.message.message or "").strip()
             if not text:
                 return
-            log.info("消息 #%d 被编辑，重新解析", event.message.id)
+            # 点赞/表情回应/回复计数变化也会触发 MessageEdited，但正文没变。
+            # 这类事件必须忽略：否则每条被点赞的旧信号都会重新解析一遍，
+            # 白白消耗币安 API 权重（418 的元凶之一）
+            if self._last_text.get(msg_id) == text:
+                log.debug("消息 #%d 触发编辑事件但正文未变（点赞/表情/回复），忽略", msg_id)
+                return
+            self._last_text[msg_id] = text
+
+            # 正文真的变了：交给 trader 判断。
+            # 开仓信号交给 trader 判断「同向 → 忽略防重复 / 反向 → 反手」，
+            # 不能在这里一刀切丢弃，否则频道真改了方向就漏单
+            ev = sp.parse(text)
+            log.info("消息 #%d 正文变更（%s），重新解析", msg_id, ev.kind)
             try:
-                await on_message(text, event.message.id)
+                try:
+                    await on_message(text, msg_id, from_edit=True)
+                except TypeError:
+                    # 兼容只接受两个参数的回调
+                    await on_message(text, msg_id)
             except Exception as e:
                 log.exception("处理编辑消息异常: %s", e)
 
