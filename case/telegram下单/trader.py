@@ -19,6 +19,7 @@ import logging
 import os
 import sys
 import time
+from datetime import datetime
 from typing import Dict, Optional
 
 import health
@@ -94,11 +95,8 @@ def build(cfg: Config, offline: bool = False):
 
     executor = Executor(client, risk, dry_run=cfg.dry_run, notify=notifier,
                         state_dir=cfg.state_dir, balance_watcher=watcher, mailer=mailer)
-    if cfg.active_api_key:
-        try:
-            client._sync_time()
-        except Exception as e:
-            log.warning("时间同步失败（后续会自动重试）: %s", e)
+    # 时间同步改成「懒同步」：第一次真正发签名请求时才校准，
+    # 启动时不再主动连币安。没有信号时程序完全不碰交易所
     return client, risk, executor, notifier
 
 
@@ -108,11 +106,16 @@ class Trader:
         self.ex = executor
         self.notify = notifier
         self.buf = sp.TPSLBuffer(ttl_sec=cfg.tpsl_ttl_sec)
-        self.stats = {"open": 0, "amend": 0, "trail": 0, "ignore": 0, "fail": 0}
+        self.stats = {"open": 0, "amend": 0, "trail": 0, "close": 0,
+                      "ignore": 0, "fail": 0}
         self._warned: set = set()   # 已告警过的 symbol，避免重复刷屏
         # 同币种开仓冷却：TG 重连重放、消息重复、编辑再解析都可能重复触发开仓
         self._recent_opens: Dict[str, float] = {}
         self.open_cooldown = 30.0
+        # 最近一条开仓信号的币种和时间（无论是否真的开仓成功），
+        # 用来判断「无币种的止盈止损」到底属于哪个仓
+        self._last_open_sym: str = ""
+        self._last_open_ts: float = 0.0
         # 消息必须串行处理：Telethon 默认并发投递，
         # 两个信号同时到达会各自读到「开仓前」的持仓快照，双双通过风控 → 超限开仓
         self._lock = asyncio.Lock()
@@ -134,12 +137,54 @@ class Trader:
                 len(pending))
         return ""
 
+    def _match_by_price(self, pending: Dict[str, Dict], ev) -> str:
+        """无币种的止盈止损：用价位合理性反推归属
+
+        只有当「唯一一个」仓位的入场价能让这组价位落在合理区间时才采用；
+        0 个或 2 个以上都合理 → 返回空（不猜）。
+
+        例：BTCUSDT 入场 80000，收到 SL=1.5 → 距入场 99.99%，超出 25% 上限，
+            自动排除；若另一个仓位在 1.4 附近，则唯一匹配它。
+        """
+        if ev.sl is None and ev.tp is None:
+            return ""
+        ok = []
+        for sym, info in pending.items():
+            try:
+                entry = float(info.get("entry") or 0)
+            except (TypeError, ValueError):
+                continue
+            if entry <= 0:
+                continue
+            good = True
+            if ev.sl is not None:
+                d = abs(ev.sl - entry) / entry
+                if not (0.005 < d <= 0.25):
+                    good = False
+            if ev.tp is not None and good:
+                d = abs(ev.tp - entry) / entry
+                if not (0.005 < d <= 0.60):
+                    good = False
+            if good:
+                ok.append(sym)
+        if len(ok) == 1:
+            log.info("止盈止损无币种，按价位反推归属 %s（唯一合理候选）", ok[0])
+            return ok[0]
+        if len(ok) > 1:
+            log.info("止盈止损无币种，%d 个仓位的价位都合理 %s，无法区分，跳过",
+                     len(ok), ok)
+        return ""
+
     # ---------------- 消息处理 ----------------
     async def on_message(self, text: str, msg_id: int, from_edit: bool = False):
         async with self._lock:      # 串行化，杜绝并发下单
             ev = sp.parse(text)
 
             if ev.kind == sp.OPEN:
+                # 先记录最近一条开仓信号（哪怕后面被排除词/风控跳过），
+                # 后面无币种的止盈止损要靠它确认归属
+                self._last_open_sym = ev.symbol
+                self._last_open_ts = time.time()
                 await self._handle_open(ev, from_edit=from_edit)
             elif ev.kind == sp.TPSL:
                 await self._handle_tpsl(ev)
@@ -250,6 +295,7 @@ class Trader:
             entry=ev.entry,
             tp1=ev.tp,
             sl=ev.sl,
+            tp_all=list(ev.tp_all or []),
             leverage=self.cfg.leverage,
             margin_pct=self.cfg.margin_pct,
             signal_id=f"tg-{int(time.time())}",
@@ -278,6 +324,40 @@ class Trader:
             target = ev.symbol
         else:
             target = self._pick_pending()
+            if not target:
+                # 多个待更新仓位时，用「价位是否合理」反推归属：
+                # 只有当唯一一个仓位的入场价能让这组价位落在合理区间时才采用。
+                # 这比 FIFO 猜安全得多（BTC@80000 收到 SL=1.5 会被排除）
+                target = self._match_by_price(pending, ev)
+            elif target:
+                # 单一候选：仍用「最近一条开仓信号」交叉验证。
+                # 如果最近的开仓信号不是这个 pending 的币（说明中间有被跳过/失败的信号），
+                # 绝不能猜 —— 猜错会把 A 币的止损挂到 B 币上
+                if self._last_open_sym and self._last_open_sym != target:
+                    log.warning(
+                        "止盈止损无币种，最近开仓信号是 %s，但待更新仓位是 %s，"
+                        "无法确认归属，跳过（请手动 amend --symbol %s）",
+                        self._last_open_sym, target, target)
+                    if self.notify:
+                        self.notify(
+                            f"⚠️ {target} 收到无币种的止盈止损\n"
+                            f"   但最近一条信号是 {self._last_open_sym}，无法确认归属\n"
+                            f"   已跳过。手动执行：python main.py amend "
+                            f"--symbol {target} --tp <价> --sl <价>")
+                    self.stats["ignore"] += 1
+                    return
+                gap = time.time() - self._last_open_ts
+                if self._last_open_ts > 0 and gap > 300:
+                    log.warning("止盈止损无币种，距最近开仓信号已 %.0f 秒，"
+                                "无法确认归属，跳过", gap)
+                    self.stats["ignore"] += 1
+                    return
+            if not target and len(pending) > 1:
+                log.warning("有 %d 个待更新仓位且消息未带币种名，价位也无法唯一匹配，"
+                            "已跳过。请手动执行：python main.py amend --symbol <币种> "
+                            "--tp <价> --sl <价>", len(pending))
+                self.stats["ignore"] += 1
+                return
         if not target:
             log.info("收到止盈止损但无待更新仓位，忽略：tp=%s sl=%s", ev.tp, ev.sl)
             self.stats["ignore"] += 1
@@ -297,9 +377,22 @@ class Trader:
             self.stats["amend"] += 1
         else:
             self.stats["fail"] += 1
-            # 失败时把数据放回缓存，housekeeping 会定时重试，
-            # 否则频道不重发就永远卡在兜底止损上
-            self.buf.restore(target, done["tp"], done["sl"], done.get("tp_all"))
+            # 只有「临时性」失败才重试（网络抖动、限频、撤单未确认）。
+            # 永久性失败（无持仓、价位不合理、币种不存在）重试 4 次也只是白烧权重：
+            # 每次 amend ≈ 14 权重，几十个这种符号同时重试就能把 2400/分钟打爆
+            permanent = any(k in (r.error or "") for k in (
+                "无持仓", "不合理", "不存在", "超出", "太近", "太远",
+                "写错", "未成交", "取整", "缺少止损价"))
+            if permanent:
+                log.warning("%s 止盈止损改单失败（不可重试）：%s，已放弃",
+                            target, r.error)
+                if self.notify:
+                    self.notify(f"⚠️ {target} 止盈止损改单被拒\n   {r.error}\n"
+                                f"   当前仍是兜底保护，请手动检查")
+            else:
+                # 临时失败：放回缓存由巡检重试，否则频道不重发就永远卡在兜底止损上
+                self.buf.restore(target, done["tp"], done["sl"],
+                                 done.get("tp_all"))
 
     async def _handle_tp_hit(self, ev: sp.ParsedEvent):
         """到达 TP1/TP2 → 把止损提到该目标外侧 0.5%，锁定利润后继续博 TP3
@@ -323,6 +416,7 @@ class Trader:
         tp3 = tp_all[-1]
         direction = info.get("direction", "")
         cur_sl = info.get("sl")
+        entry = info.get("entry")
 
         # 止损移到目标价「外侧」0.5%：空单在上方，多单在下方
         if direction == "short":
@@ -338,6 +432,23 @@ class Trader:
                          sym, ev.level, new_sl, cur_sl)
                 return
 
+        # 边界校验：止盈价位写错（比如 1-2-3 实际应是 100-200-300）时，
+        # 算出的止损会跑到入场价另一侧极远处，挂上去等于没有止损
+        if entry and entry > 0:
+            bad = (direction == "short" and new_sl < entry * 0.5) or \
+                  (direction != "short" and new_sl > entry * 1.5)
+            if bad:
+                log.warning("%s TP%d 价位异常：目标 %.6g，入场 %.6g，"
+                            "算出的止损 %.6g 超出 ±50%% 边界，跳过移动止损",
+                            sym, ev.level, target, entry, new_sl)
+                if self.notify:
+                    self.notify(f"⚠️ {sym} TP{ev.level} 价位异常\n"
+                                f"   目标价 {target:.6g}，入场 {entry:.6g}\n"
+                                f"   算出的止损 {new_sl:.6g} 超出 ±50%，已跳过\n"
+                                f"   当前仍是旧止损 {cur_sl}")
+                self.stats["ignore"] += 1
+                return
+
         log.info("🎯 %s 到达 TP%d(%.8g)，止损上移到 %.8g，继续持有博 TP3(%.8g)",
                  sym, ev.level, target, new_sl, tp3)
         r = await asyncio.to_thread(
@@ -346,65 +457,132 @@ class Trader:
             self.stats["trail"] += 1
         else:
             self.stats["fail"] += 1
+            # 移动止损失败必须重试：否则止损永远停在旧位置，风险敞口一直扩大
+            log.warning("%s TP%d 移动止损失败（%s），放入缓存等重试",
+                        sym, ev.level, r.error)
+            self.buf.restore(sym, tp3, new_sl, tp_all, relaxed=True)
 
     async def _handle_close(self, ev: sp.ParsedEvent):
         log.info("📤 离场信号 %s", ev.symbol)
-        await asyncio.to_thread(self.ex.close, ev.symbol, "tg-signal")
+        r = await asyncio.to_thread(self.ex.close, ev.symbol, "tg-signal")
+        if r.ok:
+            self.stats["close"] += 1
+        elif r.error and "无持仓" in r.error:
+            # 仓位可能已被交易所条件单平掉，属正常情况
+            log.info("%s 离场信号但无持仓（可能已被止盈止损单平掉）", ev.symbol)
+        else:
+            self.stats["fail"] += 1
+            log.error("离场失败 %s: %s", ev.symbol, r.error)
 
     # ---------------- 定时巡检 ----------------
     async def housekeeping(self):
+        # 空闲时（没有待管理仓位、没有待重试改单）一个币安请求都不发。
+        # 本地的超时检查、告警去重都不需要网络
+        last_pos_check = 0.0
+        idle_logged = False
+        pos_check_warned = False
         while True:
             await asyncio.sleep(15)
             # 整个循环体包在 try 里：一次异常不能把巡检任务搞死
             try:
                 now = time.time()
+                api_calls = 0
                 # 缓存超时的止盈止损
                 for sym, part in self.buf.flush_expired(now):
                     if sym not in self._warned:
                         self._warned.add(sym)
-                        self.notify(
-                            f"⚠️ {sym} 止盈止损只收到一半（tp={part['tp']} sl={part['sl']}），"
-                            f"超过 {self.cfg.tpsl_ttl_sec} 秒未补齐，请手动检查")
+                        if self.notify:
+                            self.notify(
+                                f"⚠️ {sym} 止盈止损只收到一半（tp={part['tp']} sl={part['sl']}），"
+                                f"超过 {self.cfg.tpsl_ttl_sec} 秒未补齐，请手动检查")
                 # 长时间未更新的仓位（每个 symbol 只告警一次，避免每 15 秒刷屏）
                 for sym in self.ex.pending.stale(10):
                     if sym not in self._warned:
                         self._warned.add(sym)
-                        self.notify(f"⚠️ {sym} 开仓后超过 10 分钟仍未收到真实止盈止损，"
-                                    f"当前只有兜底保护，请检查频道消息")
+                        if self.notify:
+                            self.notify(f"⚠️ {sym} 开仓后超过 10 分钟仍未收到真实止盈止损，"
+                                        f"当前只有兜底保护，请检查频道消息")
                 # 重试之前失败的 amend（最多 3 次，超过就告警放弃）
-                for sym, data in self.buf.ready().items():
+                # 每轮最多处理 3 个符号：amend 一次 ≈ 14 权重，
+                # 几十个符号同时重试会把 2400/分钟 打爆（418 的来源）
+                _ready = list(self.buf.ready().items())
+                if len(_ready) > 3:
+                    log.warning("待重试改单 %d 个，本轮只处理 3 个（控制 API 权重）",
+                                len(_ready))
+                for sym, data in _ready[:3]:
                     if sym not in self.ex.pending.all():
                         self.buf.drop(sym)
                         continue
                     if data.get("retry", 0) > 3:
                         self.buf.drop(sym)
-                        self.notify(f"❌ {sym} 止盈止损改单连续失败 3 次，"
-                                    f"当前仍是兜底保护，请手动执行 amend")
+                        if self.notify:
+                            self.notify(f"❌ {sym} 止盈止损改单连续失败 3 次，"
+                                        f"当前仍是兜底保护，请手动执行 amend")
                         continue
                     log.info("重试 amend %s (第 %d 次)", sym, data.get("retry", 0))
+                    # 必须带 tp_all 和 relaxed：
+                    #  - 不带 tp_all 会丢掉 TP1/TP2 目标价，后续无法移动止损
+                    #  - 不带 relaxed 时「移动止损」会被严格价位校验拒掉
+                    relaxed = bool(data.get("relaxed"))
                     r = await asyncio.to_thread(
-                        self.ex.amend_protection, sym, data["tp"], data["sl"])
+                        self.ex.amend_protection, sym, data["tp"], data["sl"],
+                        data.get("tp_all") or [], relaxed)
+                    api_calls += 1
                     if r.ok:
                         self.buf.drop(sym)
                         self.stats["amend"] += 1
                     else:
-                        self.buf.restore(sym, data["tp"], data["sl"])
+                        self.buf.restore(sym, data["tp"], data["sl"],
+                                         data.get("tp_all"), relaxed)
 
                 # 已解决的移出告警集合
                 active = set(self.ex.pending.all())
                 self._warned &= active
 
                 # 仓位已经被止损/止盈单平掉的，pending 记录要清掉，
-                # 否则会一直误报「超过 10 分钟未更新」
-                if not self.ex.dry_run:
+                # 否则会一直误报「超过 10 分钟未更新」。
+                # 关键：只在「有待管理仓位」且距上次检查够久时才连币安，
+                # 空闲时（active 为空）完全不发请求 —— 以前这里每 15 秒
+                # 无条件查一次持仓，是「没信号也一直连币安」的根源
+                if (not self.ex.dry_run and active
+                        and now - last_pos_check >= self.cfg.pos_check_interval):
+                    last_pos_check = now
+                    api_calls += 1
                     try:
                         live = {p["symbol"] for p in self.ex.c.get_positions()}
                         for sym in list(active):
-                            if sym not in live:
-                                log.info("仓位已了结，清理 pending: %s", sym)
-                                self.ex.pending.remove(sym)
-                    except Exception:
-                        pass
+                            if sym in live:
+                                continue
+                            # 刚开的仓可能因 API 延迟查不到，等 2 分钟再判断，
+                            # 否则会把还在的仓误判成「已了结」
+                            info = self.ex.pending.get(sym) or {}
+                            try:
+                                age = (datetime.now() - datetime.fromisoformat(
+                                    info.get("created_at", ""))).total_seconds()
+                            except Exception:
+                                age = 999
+                            if age < 120:
+                                continue
+                            log.info("仓位已了结（开仓 %.0f 秒后查无持仓），清理 pending: %s",
+                                     age, sym)
+                            self.ex.pending.remove(sym)
+                    except Exception as e:
+                        # 连接类错误限流：连不上时不要每轮刷一条
+                        if not pos_check_warned:
+                            pos_check_warned = True
+                            log.warning("巡检查询持仓失败（%s），稍后重试", e)
+                else:
+                    pos_check_warned = False
+
+                # 让用户能从日志确认「空闲时没有连币安」
+                if api_calls == 0:
+                    if not idle_logged:
+                        idle_logged = True
+                        log.info("空闲巡检：无待管理仓位/改单，本轮零币安请求"
+                                 "（只在有信号时才连币安）")
+                else:
+                    idle_logged = False
+                    log.debug("巡检本轮发出 %d 次币安请求", api_calls)
 
                 health.beat(stats=str(self.stats),
                             pending=len(self.ex.pending.all()))
@@ -443,21 +621,24 @@ async def run_live(cfg: Config, trader: Trader):
         dedup_file=os.path.join(cfg.state_dir, "seen_msgs.json"),
         proxy_url=cfg.tg_proxy,
     )
-    # 启动时打印现有持仓，重启后能确认哪些仓还开着
-    try:
-        poss = trader.ex.c.get_positions()
-        if poss:
-            print(f"当前持仓 {len(poss)} 个：")
-            for p_ in poss:
-                print(f"  {p_['symbol']:12s} {p_['side']:5s} {abs(p_['amount'])} "
-                      f"入场 {p_['entry']} 标记 {p_['mark']} "
-                      f"浮盈 {p_['unrealized']:+.2f}U")
+    # 启动时打印现有持仓（可选，默认关闭以保持启动零请求）
+    if cfg.print_positions_on_start:
+        try:
+            poss = trader.ex.c.get_positions()
+            if poss:
+                print(f"当前持仓 {len(poss)} 个：")
+                for p_ in poss:
+                    print(f"  {p_['symbol']:12s} {p_['side']:5s} {abs(p_['amount'])} "
+                          f"入场 {p_['entry']} 标记 {p_['mark']} "
+                          f"浮盈 {p_['unrealized']:+.2f}U")
+            else:
+                print("当前无持仓")
             print()
-        else:
-            print("当前无持仓")
-            print()
-    except Exception as e:
-        print(f"查询持仓失败: {e}")
+        except Exception as e:
+            # 启动连不上币安不影响监听；真正下单时会重试
+            log.debug("启动查询持仓失败: %s", e)
+    else:
+        print("启动零请求模式：无信号时不连币安（有信号下单时才连）")
         print()
 
     health.start(cfg.health_port)
@@ -551,7 +732,7 @@ async def run_fetch(cfg: Config, trader: Trader, limit: int):
 
     print(f"\n解析出信号 {ok} 条，忽略 {ign} 条")
     print(f"完成：开仓 {trader.stats['open']}，改单 {trader.stats['amend']}，"
-          f"移动止损 {trader.stats['trail']}，"
+          f"移动止损 {trader.stats['trail']}，平仓 {trader.stats['close']}，"
           f"忽略 {trader.stats['ignore']}，失败 {trader.stats['fail']}")
     print("\n" + trader.ex.pending_report())
     await client.disconnect()
@@ -587,6 +768,7 @@ async def run_replay(cfg: Config, trader: Trader, path: str,
         await asyncio.sleep(delay)
 
     print(f"\n完成：开仓 {trader.stats['open']}，改单 {trader.stats['amend']}，"
+          f"移动止损 {trader.stats['trail']}，平仓 {trader.stats['close']}，"
           f"忽略 {trader.stats['ignore']}，失败 {trader.stats['fail']}")
     print("\n" + trader.ex.pending_report())
 
@@ -623,6 +805,11 @@ def main():
         cfg.testnet = True
     if args.live:
         cfg.dry_run = False
+    # --fetch 拉的是历史消息，按几小时前的信号在「当前价」开仓毫无意义，
+    # 而且会真的把钱亏掉 —— 强制 dry-run（放在横幅之前，避免显示 LIVE 误导）
+    if args.fetch and not cfg.dry_run:
+        print("⚠️  --fetch 强制使用 DRY-RUN（历史信号不能用来真下单）")
+        cfg.dry_run = True
     setup_logging(cfg, args.verbose)
 
     print("=" * 64)

@@ -851,6 +851,25 @@ def build_order_plan(pos, cfg, binance, price):
                     snap["fut_wallet"], snap["fut_upnl"], snap["equity"]))
     notes.extend(pnotes)
     actions = [a["text"] for a in acts] or ["已与目标对齐，本轮无需操作"]
+
+    # ⚠ 止损价必须按「实盘成本价」算，不能按引擎推演价：
+    #   加仓（--rebalance）后交易所的成本价会变成加权平均（实测 80847 → 77743），
+    #   而 derive_position 只知道引擎推演的入场价。按引擎价挂止损，
+    #   实际止损幅度会从 5% 变成 9.2% —— 风控等于失效。
+    _real_entry = T.to_float(snap.get("fut_entry"))
+    if (sig < 0 and pos.get("stop_px") and _real_entry > 0 and pos.get("entry_px")
+            and abs(_real_entry / pos["entry_px"] - 1.0) > 0.005):
+        _ss = float(cfg["strategy"].get("short_stop") or 0.0)
+        _old_stop = pos["stop_px"]
+        pos["stop_px"] = _real_entry * (1.0 + _ss)
+        # 距现价的百分比也要跟着重算，否则详情卡会显示旧的「距现价 -12%」
+        pos["stop_pct"] = ((pos["stop_px"] / price - 1.0) if price > 0 else 0.0)
+        pos["entry_px_real"] = _real_entry
+        notes.append("⚠ 止损价已按**实盘成本价** %.2f 重算为 %.2f"
+                     "（若按引擎推演价 %.2f 会算成 %.2f，偏差 %.1f%%）→ 请按 %.2f 挂单。"
+                     % (_real_entry, pos["stop_px"], pos["entry_px"], _old_stop,
+                        (_old_stop / pos["stop_px"] - 1.0) * 100.0, pos["stop_px"]))
+
     if sig < 0 and pos.get("stop_px"):
         actions.append("【要挂的止损单】方向：买入平空 · 触发价 %.2f · 类型：止损市价单"
                        "（成本价 %.2f × %.2f，即逆行 %.0f%%）"
@@ -1050,12 +1069,16 @@ def build_mail_html(res):
         # 空头止损价单独一行：这是下单时要照着挂条件单的价格，必须显眼
         stop_row = ""
         if p["dir"] < 0 and p.get("stop_px"):
+            # 如果已按实盘成本价重算过（加仓后加权），标出来 —— 否则你对照币安看到的
+            # 成本价和邮件里的「成本价」不一致，会以为算错了
+            _real = p.get("entry_px_real")
+            _sub = ("　按实盘成本价 %.2f 计算" % _real) if _real else ""
             stop_row = ('<tr><td style="padding:4px 0;color:%s">止损价'
-                        '<span style="font-size:11.5px">（涨到此价市价买回）</span></td>'
+                        '<span style="font-size:11.5px">（涨到此价市价买回）</span>%s</td>'
                         '<td style="padding:4px 0;font-weight:700;color:%s">%.2f USDT'
                         '<span style="font-weight:400;color:#8a9aab;font-size:12px">'
                         '　距现价 %+.2f%%</span></td></tr>'
-                        % (C_MUTED, C_UP, p["stop_px"], p["stop_pct"] * 100.0))
+                        % (C_MUTED, _sub, C_UP, p["stop_px"], p["stop_pct"] * 100.0))
         # 「本金 + 浮盈」那一行的小字：未参与时浮盈不计入，措辞要跟着变
         if p.get("pending"):
             eq_sub = "本金 %s（这笔未参与，浮盈不计入）" % format(p["base"], ",.0f")

@@ -598,9 +598,12 @@ class Binance:
                 "测试网不提供「现货 ⇄ 合约」划转接口（/sapi/v1/asset/transfer）。"
                 "请在测试网手动划转后再跑，或改用实盘小额账户验证。")
         t = "MAIN_UMFUTURE" if direction == "in" else "UMFUTURE_MAIN"
+        # ⚠ 必须向下取整，不能四舍五入：可用余额算出来常常带浮点尾巴
+        #   （976.9539999999），%.8f 会进位成 976.95400001 → 超过可用余额 → 被拒单。
+        amt = math.floor(float(amount) * 1e8) / 1e8
+        amt_s = ("%.8f" % amt).rstrip("0").rstrip(".")
         return self._request("POST", self.spot, "/sapi/v1/asset/transfer",
-                             {"type": t, "asset": "USDT",
-                              "amount": ("%.8f" % amount).rstrip("0").rstrip(".")},
+                             {"type": t, "asset": "USDT", "amount": amt_s},
                              signed=True)
 
     def futures_market_order(self, side, qty_str, reduce_only=False):
@@ -745,6 +748,13 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now, resize=None):
     target_spot_qty = (target_notional / price) if want_spot_dir > 0 else 0.0
     target_fut_qty = (target_notional * sf / price) if want_fut_dir != 0 else 0.0
 
+    # 浮点残值归零（必须放在所有「有没有持仓」判断之前）：
+    # 平仓后交易所可能留 -1e-17 这种尾巴，它会让「有持仓」成立，
+    # 然后 qty_problem 按 stepSize 取整成 0 → 每轮跳过 → 仓位彻底卡死。
+    have_fut = snap["fut_amt"]
+    if abs(have_fut) < float(r_fut["step"]) * 0.5:
+        have_fut = 0.0
+
     # ---- 持仓期间不调仓（回测口径）----
     # 回测引擎只在「进场那根」按 权益×敞口 定名义，之后整段持有不再动。
     # 如果这里每天按当日敞口重算目标，就等于给策略偷偷加了一个「每日再平衡」，
@@ -754,10 +764,10 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now, resize=None):
         if want_spot_dir > 0 and snap["spot_qty"] > 0:
             target_spot_qty = snap["spot_qty"]
             target_notional = target_spot_qty * price
-        elif want_fut_dir != 0 and snap["fut_amt"] != 0 and \
-                (snap["fut_amt"] > 0) == (want_fut_dir > 0):
+        elif want_fut_dir != 0 and have_fut != 0 and \
+                (have_fut > 0) == (want_fut_dir > 0):
             # 同方向已有合约仓位 → 沿用进场时的名义（多头合约、空头都走这里）
-            target_fut_qty = abs(snap["fut_amt"])
+            target_fut_qty = abs(have_fut)
             target_notional = target_fut_qty * price
 
     if resize:
@@ -765,8 +775,8 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now, resize=None):
                      % (equity, expo, target_notional))
     elif target_dir != 0 and (
             (want_spot_dir > 0 and snap["spot_qty"] > 0) or
-            (want_fut_dir != 0 and snap["fut_amt"] != 0 and
-             (snap["fut_amt"] > 0) == (want_fut_dir > 0))):
+            (want_fut_dir != 0 and have_fut != 0 and
+             (have_fut > 0) == (want_fut_dir > 0))):
         notes.append("持仓期间不调仓：沿用进场时的名义 %.2f USDT"
                      "（今天若重新进场会用 权益 %.2f × 敞口 %.2f× = %.2f USDT）"
                      % (target_notional, equity, expo, equity * expo))
@@ -784,7 +794,7 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now, resize=None):
     min_move = max(min_notional_cfg, 1.0)          # 划转低于 1 USDT 没意义
 
     # ---------- 1) 先平反向腿 ----------
-    have_fut = snap["fut_amt"]
+    # （have_fut 已在上面算好，并已把浮点残值归零）
 
     # 平掉的条件：① 目标空仓；② 现有合约腿与目标方向相反；
     #             ③ 「多头现货」模式下目标做多（合约腿一律平掉，改回现货）。
@@ -798,7 +808,13 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now, resize=None):
         bad, why = qty_problem(q, price, r_fut, min_notional_cfg)
         if bad:
             notes.append("合约持仓 %+.3f 想平掉，但%s → 跳过（请在币安手动平仓）。" % (have_fut, why))
-            # 平不掉就绝不能继续往下开反向仓 —— 否则会变成「多空双开」
+            # 平不掉就绝不能继续往下开反向仓 —— 否则会变成「多空双开」。
+            # ⚠ 必须产出一个「失败」动作：如果只 return 空 acts，_execute 会判定
+            #   「✔ 已对齐」并返回成功 —— 明明仓位没平掉，却报一切正常。
+            acts.append({"kind": "blocked", "market": "futures", "side": "-",
+                         "qty": 0.0, "qty_str": "0", "notional": 0.0,
+                         "text": "合约持仓 %+.6f 无法平仓：%s（请到币安手动平仓）"
+                                 % (have_fut, why)})
             return acts, notes
         else:
             acts.append({"kind": "fut_close", "market": "futures", "side": side,
@@ -821,7 +837,8 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now, resize=None):
                          % ("多" if want_fut_dir > 0 else "空"))
             return acts, notes
 
-    if snap["spot_qty"] > 0 and want_spot_dir == 0:
+    # 现货残值同理：小于半个 step 的零头不当作持仓（否则每轮都提示「零头只能手动处理」）
+    if snap["spot_qty"] >= float(r_spot["step"]) * 0.5 and want_spot_dir == 0:
         # 卖「可用」而不是「总量」：有挂单/冻结时卖总量会被拒（余额不足）
         q = snap["spot_free"]
         if snap["spot_qty"] - q > 1e-9:
@@ -832,6 +849,17 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now, resize=None):
             if q > 0 or snap["spot_qty"] > 0:
                 notes.append("现货 %.8f %s 想清掉，但%s → 跳过（零头只能手动处理）。"
                              % (snap["spot_qty"], bnc.base, why))
+                # 零头（价值 < min_notional）无所谓，只提示；
+                # 但如果金额并不小却清不掉（多半被挂单冻结），必须报失败 ——
+                # 否则会静默「✔ 已对齐」，而现货其实还压在那里。
+                if snap["spot_val"] >= min_notional_cfg:
+                    acts.append({"kind": "blocked", "market": "spot", "side": "-",
+                                 "qty": 0.0, "qty_str": "0", "notional": 0.0,
+                                 "text": "现货 %.6f %s（%.2f USDT）无法清掉：%s"
+                                         "（请到币安手动处理）"
+                                         % (snap["spot_qty"], bnc.base,
+                                            snap["spot_val"], why)})
+                    return acts, notes
         else:
             acts.append({"kind": "spot_sell_all", "market": "spot", "side": "SELL",
                          "qty": q, "qty_str": fmt_qty(q, r_spot["step"]),
@@ -858,6 +886,7 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now, resize=None):
             # 现货 USDT 不够 → 从合约账户划转（合约可用要扣掉已有持仓占用的保证金）
             if proj_spot_usdt < need_usdt and proj_fut_avail > 0:
                 move = min(need_usdt - proj_spot_usdt, proj_fut_avail)
+                move = math.floor(move * 1e8) / 1e8
                 if move >= min_move:
                     acts.append({"kind": "transfer_out", "market": "transfer",
                                  "side": "->", "qty": move, "qty_str": "%.2f" % move,
@@ -927,6 +956,7 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now, resize=None):
                                  % (proj_fut_avail, need_margin))
                 else:
                     move = min(need_margin - proj_fut_avail, proj_spot_usdt)
+                    move = math.floor(move * 1e8) / 1e8
                     if move >= min_move:
                         acts.append({"kind": "transfer_in", "market": "transfer",
                                      "side": "<-", "qty": move, "qty_str": "%.2f" % move,
@@ -995,6 +1025,7 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now, resize=None):
                                      % (proj_fut_avail, need_m))
                     else:
                         move = min(need_m - proj_fut_avail, proj_spot_usdt)
+                        move = math.floor(move * 1e8) / 1e8
                         if move >= min_move:
                             acts.append({"kind": "transfer_in", "market": "transfer",
                                          "side": "<-", "qty": move, "qty_str": "%.2f" % move,
@@ -1050,11 +1081,16 @@ def run_action(bnc, act, cfg):
     b = cfg["binance"]
     kind = act["kind"]
     # 兜底：数量取整后为 0 的订单一定失败，宁可跳过也不要发出去
-    # （fut_setup / fut_leverage 不带数量，必须豁免，否则会被误杀）
-    if kind not in ("fut_setup", "fut_leverage") and \
+    # （fut_setup / fut_leverage / blocked 不带数量，必须豁免，否则会被误杀）
+    if kind not in ("fut_setup", "fut_leverage", "blocked") and \
             str(act.get("qty_str")) in ("", "0", "0.0"):
         return False, "-", "数量取整后为 0，已跳过（避免无效订单）"
     try:
+        if kind == "blocked":
+            # 不是真下单，是「这条腿没法处理」的信号 —— 让 _execute 立即停下并报失败，
+            # 而不是静默当成「已对齐」。
+            return False, "-", act.get("text") or "该动作被跳过"
+
         if kind == "fut_setup":
             bnc.set_margin_type(b["margin_type"])
             bnc.set_leverage(b["leverage"])
@@ -1072,8 +1108,16 @@ def run_action(bnc, act, cfg):
             oid = r.get("orderId", "-")
             st = bnc.order_status("futures", oid) or {}
             status = st.get("status") or r.get("status") or "SENT"
-            filled = to_float(st.get("executedQty") or r.get("executedQty"))
-            avg = to_float(st.get("avgPrice") or r.get("avgPrice"))
+            # ⚠ 不能写 `st.get(x) or r.get(x)`：查询接口返回的 executedQty 是**字符串 "0"**，
+            #   而 "0" 是 truthy，`or` 根本不会回退到下单响应里的真实成交量 →
+            #   日志永远显示「成交 0」，而且「没成交」还被当成成功，下一轮重复下单。
+            #   取两者最大值才是对的。
+            filled = max(to_float(st.get("executedQty")), to_float(r.get("executedQty")))
+            avg = max(to_float(st.get("avgPrice")), to_float(r.get("avgPrice")))
+            if filled <= 0 and status not in ("NEW", "PARTIALLY_FILLED"):
+                # 状态说成交了，但成交量是 0 —— 对不上，宁可停下让人查，也别继续加仓
+                return False, oid, ("%s · 成交 0（订单状态与成交量不一致，已停止，"
+                                    "请到币安核对 #%s）" % (status, oid))
             return True, oid, "%s · 成交 %s @ %.2f" % (status, _num(filled), avg)
 
         if kind in ("transfer_in", "transfer_out"):
@@ -1087,8 +1131,10 @@ def run_action(bnc, act, cfg):
             oid = r.get("orderId", "-")
             st = bnc.order_status("spot", oid) or {}
             status = st.get("status") or r.get("status") or "SENT"
-            filled = to_float(st.get("executedQty") or r.get("executedQty"))
-            spent = to_float(st.get("cummulativeQuoteQty") or r.get("cummulativeQuoteQty"))
+            # 同合约：字符串 "0" 是 truthy，必须取 max 而不是 or
+            filled = max(to_float(st.get("executedQty")), to_float(r.get("executedQty")))
+            spent = max(to_float(st.get("cummulativeQuoteQty")),
+                        to_float(r.get("cummulativeQuoteQty")))
             avg = (spent / filled) if filled else 0.0
             return True, oid, "%s · 成交 %.6f @ %.2f" % (status, filled, avg)
 
@@ -1249,9 +1295,11 @@ def _execute(cfg, bnc, target_dir, expo, price, bar_date, sig_label,
 
         M.log("")
         M.log("      ── 第 %d 轮对账 ──" % rd)
-        M.log("      现货 %.6f %s（%.2f USDT）· USDT 可用 %.2f · 合约 %+.3f（浮盈 %+.2f）"
+        M.log("      现货 %.6f %s（%.2f USDT）· USDT 可用 %.2f · 合约 %s（浮盈 %+.2f）"
               % (snap["spot_qty"], bnc.base, snap["spot_val"],
-                 snap["usdt_free"], snap["fut_amt"], snap["fut_upnl"]))
+                 snap["usdt_free"],
+                 ("+" if snap["fut_amt"] > 0 else "") + _num(snap["fut_amt"]),
+                 snap["fut_upnl"]))
         M.log("      账户权益 %.2f USDT" % snap["equity"])
         # 「交易所最小下单」和「目标占用保证金」每轮都一样，只打第 1 轮，减少噪音
         _NOISE = ("交易所最小下单", "目标占用保证金")
@@ -1314,7 +1362,19 @@ def _execute(cfg, bnc, target_dir, expo, price, bar_date, sig_label,
             M.log("      等待 2 秒后重新对账 ...")
             time.sleep(2)
 
-    # 跑满 max_rounds 还在产生动作 = 没收敛（通常是资金/精度问题），不能当成功
+    # 最后一轮还有动作，有两种可能：
+    #   ① 真的没做完（资金/精度卡住）→ 未收敛，要报失败
+    #   ② 其实做完了，只是 max_rounds 用尽、没机会再对账 → 不该误报
+    # 补一次**只读**对账来区分。失败就保持原判断（宁可报未收敛，也不假装成功）。
+    if acts:
+        try:
+            snap_chk = snapshot(bnc, price)
+            acts_chk, _ = build_actions(cfg, bnc, snap_chk, target_dir, expo,
+                                        sig_label, resize=resize)
+            if not acts_chk:
+                acts = []
+        except Exception:
+            pass
     converged = not acts
     if not converged:
         M.log("      ⚠ 已跑满 %d 轮仍有未完成动作（最后一轮 %d 个），请重跑或手工检查。"
@@ -1324,9 +1384,14 @@ def _execute(cfg, bnc, target_dir, expo, price, bar_date, sig_label,
     append_trade_log(log_rows)
     _sync_stop(snap)
 
-    if live:
+    if live and converged:
         tst["last_live_bar"] = bar_date
         tst["last_live_at"] = M.fdt()
+    elif live and not converged:
+        # ⚠ 没收敛时**绝不能**记 last_live_bar：否则下次同一天重跑只会提示
+        #   「这根之前已经执行过」，用户以为已搞定就不补了 → 仓位长期不对齐。
+        #   留 last_error 让人一眼看出「上次没跑完」。
+        tst["last_error"] = "跑满 %d 轮未收敛，仓位未完全对齐" % max_rounds
     tst["last_run"] = M.fdt()
     tst["last_bar"] = bar_date
     tst["last_signal"] = sig_label
@@ -1493,6 +1558,16 @@ def main():
                         st.get("regime_ma", 0))
     bar_date = M.fdate(bars[-1]["t"])
     price = bars[-1]["close"]
+    # 价格必须是个正数：下面 target_notional / price 会除零，NaN/Inf 会算出垃圾数量。
+    # btc_monitor 有同样的检查，直接跑本脚本时也必须挡住。
+    if not (isinstance(price, (int, float)) and price > 0
+            and price == price and price not in (float("inf"), float("-inf"))):
+        M.log("")
+        M.log("  ✘ 最新收盘价异常（%r）→ 拒绝下单。" % (price,))
+        M.log("    行情数据可能损坏，可加 --refresh 重拉后再试。")
+        M.log("")
+        M.log("=" * 100)
+        return 8
     target_dir, expo, dvol = target_of(cfg, bars, sig)
     sig_label = M.sig_text(target_dir)
 

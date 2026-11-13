@@ -14,7 +14,8 @@ TG 频道消息解析器
 4. 欧洲小数逗号 0,425 → 0.425
 """
 import re
-from dataclasses import dataclass, field, field
+import time
+from dataclasses import dataclass, field
 from typing import List, Optional
 
 # 事件类型
@@ -37,12 +38,19 @@ NOISE_KEYS = (
 )
 
 # 真正要市价平仓的关键词
-# 注意：不包含「止盈」「TP1」「TP2」—— TP1/TP2 到达只是减仓，不平仓
-# 也不包含单独的「止损」—— 「止损：77500」是价位，不是平仓指令
+# 注意：
+#  - 不包含「止盈」「TP1」「TP2」—— TP1/TP2 到达只是减仓，不平仓
+#  - 不包含单独的「止损」—— 「止损：77500」是价位，不是平仓指令
+#  - 不包含裸「平仓」—— 「现价多（平仓价参考 80000）」会被误判成平仓，
+#    本该开仓却把仓位平了。只认明确的「已平仓 / 平仓了 / 手动平仓」
 CLOSE_KEYS = (
-    "离场", "全平", "平仓", "出局",
-    "止损了", "已止损", "到达止损", "打止损", "扫损",
+    "离场", "全平", "出局", "扫损",
+    "止损了", "已止损", "到达止损", "打止损",
+    "已平仓", "平仓了", "手动平仓", "平仓止盈", "平仓离场", "全部平仓",
 )
+
+# 明确表示「这条别跟」的词，直接忽略，避免把讨论性内容当信号
+SKIP_KEYS = ("不要跟", "别跟", "勿跟", "不要追", "仅供参考", "已经过了", "已错过")
 
 SYMBOL_RE = re.compile(r"#([A-Z0-9]{2,15})")
 # 止盈：0.425-0.41-0.3925  /  止盈: 74500-73000
@@ -176,6 +184,10 @@ def parse(text: str) -> ParsedEvent:
     if not t:
         return ParsedEvent(IGNORE, raw=raw, note="空消息")
 
+    # 明确说「不要跟 / 仅供参考 / 已经过了」的直接忽略
+    if any(k in t for k in SKIP_KEYS):
+        return ParsedEvent(IGNORE, raw=raw, note="消息明确说不要跟")
+
     direction = detect_direction(t)
     symbol = extract_symbol_near_direction(t) or extract_symbol(t)
 
@@ -222,7 +234,15 @@ def parse(text: str) -> ParsedEvent:
         if re.search(r"[\d.,]+\s*单", t):
             return ParsedEvent(IGNORE, raw=raw, note="战绩统计消息，不是价格")
         # 少数消息会带币种名（#BTCUSDT 止盈：...），有的话就带上，匹配更准
-        ev = ParsedEvent(TPSL, symbol=normalize_symbol(symbol) if symbol else "", raw=raw)
+        ev = ParsedEvent(TPSL, raw=raw)
+        if symbol:
+            norm = normalize_symbol(symbol)
+            if not norm:
+                # 带了币种但不是 USDT 本位（BTCUSDC/BTCBUSD），
+                # 不能当成「无币种」去分配给别的仓位
+                return ParsedEvent(IGNORE, raw=raw,
+                                   note=f"{symbol} 不是 USDT 本位合约，跳过")
+            ev.symbol = norm
         if tp_m:
             nums = _parse_num_list(tp_m.group(1))
             if nums:
@@ -299,8 +319,13 @@ class TPSLBuffer:
                 self._buf.pop(sym, None)
         return out
 
-    def restore(self, symbol: str, tp=None, sl=None, tp_all=None):
-        """amend 失败时把数据放回缓存，等 housekeeping 重试"""
+    def restore(self, symbol: str, tp=None, sl=None, tp_all=None,
+                relaxed: bool = False):
+        """amend 失败时把数据放回缓存，等 housekeeping 重试
+
+        relaxed=True 表示这是「移动止损」，重试时不能再走「止损必须在入场价外侧」
+        的严格校验（那时止损已经移到盈利区了）
+        """
         if not symbol:
             return
         b = self._buf.get(symbol) or {"tp": None, "sl": None, "ts": time.time(), "retry": 0}
@@ -310,6 +335,8 @@ class TPSLBuffer:
             b["sl"] = sl
         if tp_all:
             b["tp_all"] = tp_all
+        if relaxed:
+            b["relaxed"] = True
         b["ts"] = time.time()
         b["retry"] = b.get("retry", 0) + 1
         self._buf[symbol] = b

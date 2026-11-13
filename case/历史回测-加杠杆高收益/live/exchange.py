@@ -336,7 +336,13 @@ class BinanceFutures:
                         self._log(f"IP 被限流，等待 {wait_s:.0f}s 解封")
                         time.sleep(wait_s + 1.0)
                         continue
-                    hint = f"（约 {wait_s:.0f}s 后解封）" if wait_s else ""
+                    # [坑46] -1003 有两种，旧提示对第二种什么都没说：
+                    #   ① 带 banned until → IP 被封（几十分钟到几小时）
+                    #   ② 无时间戳 → 每分钟权重耗尽（约 60s 自动恢复）
+                    if wait_s is not None:
+                        hint = f"（约 {wait_s:.0f}s 后解封）"
+                    else:
+                        hint = "（权重耗尽，约 1 分钟后自动恢复）"
                     raise BinanceError(-1003, f"请求被限流{hint}: {j.get('msg')}")
                 # 其余业务类 4xx 不重试，直接抛
                 if status < 500:
@@ -403,9 +409,25 @@ class BinanceFutures:
             out[f["filterType"]] = f
         return out
 
-    def round_qty(self, symbol, qty):
-        """[坑2] 数量按 stepSize 向下取整，用 Decimal 避免浮点误差。"""
-        step = Decimal(self.filters(symbol)["LOT_SIZE"]["stepSize"])
+    def lot_size(self, symbol, market=True):
+        """市价单必须用 MARKET_LOT_SIZE；限价单才用 LOT_SIZE。
+
+        [坑35] 两者并不相同：BTCUSDT maxQty 1000 vs **120**（8 倍），
+        SOLUSDT 1,000,000 vs **6,000**（167 倍）。
+        用错约束的结果是「本地校验通过、交易所直接拒单」，
+        极端情况下 stepSize 不一致还会算错数量。
+        """
+        f = self.filters(symbol)
+        if market:
+            return f.get("MARKET_LOT_SIZE") or f["LOT_SIZE"]
+        return f["LOT_SIZE"]
+
+    def round_qty(self, symbol, qty, market=True):
+        """[坑2] 数量按 stepSize 向下取整，用 Decimal 避免浮点误差。
+
+        默认按市价单约束（本策略全部使用市价单）。
+        """
+        step = Decimal(self.lot_size(symbol, market)["stepSize"])
         q = (Decimal(str(qty)) / step).to_integral_value(rounding=ROUND_DOWN) * step
         return q.quantize(step)
 
@@ -416,8 +438,19 @@ class BinanceFutures:
         return p.quantize(tick)
 
     def min_notional(self, symbol):
-        f = self.filters(symbol).get("MIN_NOTIONAL")
-        return Decimal(f["notional"]) if f else Decimal("5")
+        """最小名义值。
+
+        [坑36] 币安该字段在新版 exchangeInfo 里叫 NOTIONAL，旧版叫 MIN_NOTIONAL。
+        写死一个名字的话，改名后会静默回退到 5U —— 本该拦下的单就放行了。
+        两种都兼容，取不到才用保守默认值。
+        """
+        f = self.filters(symbol)
+        for key in ("MIN_NOTIONAL", "NOTIONAL"):
+            if key in f:
+                v = f[key].get("notional") or f[key].get("minNotional")
+                if v is not None:
+                    return Decimal(str(v))
+        return Decimal("5")
 
     # ---------------------------------------------------------------- 账户
     def dual_side(self):
@@ -471,26 +504,40 @@ class BinanceFutures:
         return r
 
     def position(self, symbol):
-        """返回净持仓：{'side': 'long'/'short'/'flat', 'qty': float, 'entry': float, 'upnl': float}"""
+        """返回净持仓：{'side','qty','entry','upnl','leverage','margin_type','position_side','raw'}
+
+        [坑32] 双向持仓模式下 positionRisk 会返回 LONG / SHORT 两行。
+        本策略不做对冲：若检测到同一币种存在多个方向持仓，**直接报错**，
+        而不是随便挑一个返回——漏掉一边会导致「以为空仓、实际有仓」的叠加下单。
+        """
         # 注意：不是 /fapi/v2/position（不存在，会 -5000），正确端点是 positionRisk
         rows = self._request("GET", "/fapi/v2/positionRisk", {"symbol": symbol}, signed=True)
+        found = []
         for r in rows:
             if r["symbol"] != symbol:
                 continue
             amt = float(r["positionAmt"])
             if abs(amt) < 1e-12:
                 continue
-            return {
+            found.append({
                 "side": "long" if amt > 0 else "short",
                 "qty": abs(amt),
                 "entry": float(r["entryPrice"]),
                 "upnl": float(r["unRealizedProfit"]),
                 "leverage": int(float(r.get("leverage", 0))),
                 "margin_type": r.get("marginType"),
+                "position_side": r.get("positionSide"),
                 "raw": r,
-            }
-        return {"side": "flat", "qty": 0.0, "entry": 0.0, "upnl": 0.0,
-                "leverage": 0, "margin_type": None, "raw": None}
+            })
+        if not found:
+            return {"side": "flat", "qty": 0.0, "entry": 0.0, "upnl": 0.0,
+                    "leverage": 0, "margin_type": None, "position_side": None, "raw": None}
+        if len(found) > 1:
+            desc = " / ".join(f"{x['side']} {x['qty']}" for x in found)
+            raise BinanceError(
+                -1, f"{symbol} 同时存在多个方向持仓（{desc}），本策略不支持对冲。"
+                    f"请先在交易所手动平掉其中一个方向再运行")
+        return found[0]
 
     # ---------------------------------------------------------------- 下单
     @staticmethod
@@ -517,6 +564,17 @@ class BinanceFutures:
         req_qty = Decimal(str(qty))
         if req_qty <= 0:
             raise BinanceError(-1, f"下单数量必须大于 0，收到 {qty!r}")
+
+        # [坑42] 兜底取整 + 上下限：即使调用方忘了按精度处理，
+        # 也不该把非法数量发给交易所（会被 -1111/-4164 拒，状态还难查）。
+        req_qty = self.round_qty(symbol, req_qty)
+        lot = self.lot_size(symbol, market=True)
+        if req_qty <= 0:
+            raise BinanceError(-1, f"数量按 stepSize 取整后为 0（原始 {qty}）")
+        if req_qty < Decimal(lot["minQty"]):
+            raise BinanceError(-1, f"数量 {req_qty} 低于最小下单量 {lot['minQty']}")
+        if req_qty > Decimal(lot["maxQty"]):
+            raise BinanceError(-1, f"数量 {req_qty} 超过最大下单量 {lot['maxQty']}")
 
         dual = self.dual_side()
         params = {
@@ -630,8 +688,13 @@ class BinanceFutures:
             price_hint = float(t["price"])
         if not price_hint or price_hint <= 0:
             raise BinanceError(-1, f"参考价异常：{price_hint!r}，拒绝下单")
+        # [坑33] 参考价离谱时直接拒绝：ticker 偶发返回 0 或异常值，
+        # 会让数量算出天量/零量。1e6 已远高于任何 USDT 本位币的价格上限。
+        if price_hint > 1_000_000:
+            raise BinanceError(-1, f"参考价 {price_hint:,.0f} 明显异常（>1e6），拒绝下单")
 
-        lot = self.filters(symbol)["LOT_SIZE"]
+        # 市价单用 MARKET_LOT_SIZE（maxQty 可能远小于 LOT_SIZE）
+        lot = self.lot_size(symbol, market=True)
         step = Decimal(lot["stepSize"])
         min_qty = Decimal(lot["minQty"])
         max_qty = Decimal(lot["maxQty"])
@@ -692,7 +755,8 @@ class BinanceFutures:
                     order=order.get("orderId"), status=order.get("status"),
                     avg=f"{float(order.get('avgPrice') or 0):.2f}",
                     filled=order.get("executedQty"),
-                    pos=f"{after['side']} {after['qty']}", avail=f"{bal['available']:.2f}")
+                    pos=f"{after['side']} {after['qty']}",
+                    avail_before=f"{bal['available']:.2f}")   # 下单前余额，非下单后
         return order
 
     def close_position(self, symbol, max_rounds=2):

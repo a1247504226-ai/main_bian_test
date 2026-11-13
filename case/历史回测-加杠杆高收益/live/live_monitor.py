@@ -189,6 +189,28 @@ def http_json(url, tries=3, timeout=10, deadline=None):
     raise last
 
 
+_SRV_OFFSET = {"ms": 0, "at": 0.0}
+
+
+def server_now_ms():
+    """服务器时间（毫秒），缓存 10 分钟。
+
+    [坑37] 本机时钟可能有偏差（实测曾慢 15 秒）。若用本机时间判断 K 线是否收盘，
+    刚收盘那根会被误判成"未收盘"而丢弃 → 信号整整晚 1 小时。
+    取不到服务器时间时退化为本机时间。
+    """
+    now = time.time()
+    if now - _SRV_OFFSET["at"] > 600:
+        try:
+            host = BINANCE_SOURCES[0][0]
+            d = http_json(f"{host}/fapi/v1/time", tries=1, timeout=6)
+            _SRV_OFFSET["ms"] = int(d["serverTime"]) - int(now * 1000)
+            _SRV_OFFSET["at"] = now
+        except Exception:                           # noqa: BLE001
+            pass
+    return int(time.time() * 1000) + _SRV_OFFSET["ms"]
+
+
 def klines(symbol, interval, limit=400, closed_only=True, provider=None,
            _budget=35.0):
     """带镜像兜底的 K 线拉取。closed_only=True 时剔除尚未收盘的 K 线（防前视）。
@@ -207,7 +229,7 @@ def klines(symbol, interval, limit=400, closed_only=True, provider=None,
         try:
             d = http_json(url, tries=2, deadline=deadline)
             if isinstance(d, list) and d:
-                now_ms = int(time.time() * 1000)
+                now_ms = server_now_ms()                # 用服务器时间，避免本机时钟偏差
                 bars = []
                 for r in d:
                     ct = int(r[6])
@@ -538,7 +560,10 @@ def step(cfg, force_email=False, provider=None, price_provider=None):
 
     # ---- 每日定时邮件：到达 daily_email_hour 点（默认 8 点，任务在 :02 跑）时，
     #      无论有没有信号都发一封「今日操作」；last_daily 保证一天只发一次 ----
-    _now_local = datetime.datetime.now()
+    # [坑31] 必须显式用 UTC+8，不能依赖服务器本地时区。
+    # Linux 服务器默认多为 UTC：若用 now() 无时区，"每日 8 点邮件"会跑到北京时间 16 点，
+    # 冷却期、日期判断也会跟着错 —— 属于"下错时机"。
+    _now_local = datetime.datetime.now(CST)
     _daily_hour = int(cfg.get("daily_email_hour", 8))
     _today = _now_local.strftime("%Y-%m-%d")
     # 补发窗口：过了 daily_email_hour 就允许发，直到「当天真的发成功」为止。

@@ -76,13 +76,8 @@ def build(cfg: Config):
     executor = Executor(client, risk, dry_run=cfg.dry_run, notify=notifier,
                         state_dir=cfg.state_dir, balance_watcher=watcher, mailer=mailer)
 
-    # 主动同步服务器时间：本机时钟偏差 >recvWindow 会导致 -1021 签名失败
-    if cfg.active_api_key:
-        try:
-            client._sync_time()
-        except Exception as e:
-            logging.getLogger(__name__).warning("时间同步失败（可忽略，后续会自动重试）: %s", e)
-
+    # 不在这里主动同步时间：第一次真正发签名请求时 BinanceFutures 会自动懒同步。
+    # 这样 serve 启动是零请求，只有收到信号（或显式 check）才会连币安。
     return client, risk, executor, notifier
 
 
@@ -249,8 +244,9 @@ def cmd_serve(cfg: Config, client: BinanceFutures, risk: RiskManager, notifier):
     while running["v"]:
         now = time.time()
         health.beat(risk=risk.summary())
-        # 每 60 秒做一次连通性自检
-        if now - last_check > 60:
+        # 仅在显式开启 health_ping_interval 时才主动探活；
+        # 默认 0 = 完全「有信号才连币安」，不在后台轮询币安
+        if cfg.health_ping_interval > 0 and now - last_check > cfg.health_ping_interval:
             ok = client.ping()
             if not ok:
                 notifier.send("⚠️ API 连通性异常，策略可能无法下单")

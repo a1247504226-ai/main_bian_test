@@ -95,3 +95,12 @@ tpsl_ttl_sec: 90                # 止盈止损只收到一半时，等多少秒
 state_dir: state
 log_dir: logs
 health_port: 8080
+# serve 模式下主动 ping 币安做存活检测的间隔秒数。0 = 不主动 ping（完全「有信号才连币安」）
+health_ping_interval: 0
+
+# 后台巡检：只有「有待管理仓位」时才查币安，空闲时零请求
+# 有仓位时多久查一次真实持仓（秒），用来清理已被条件单平掉的仓位
+pos_check_interval: 300         # 5 分钟
+# 启动时打印一次现有持仓（会发 1 次请求）。默认 false = 启动完全不碰币安
+# 想重启后确认还有哪些仓没平，改成 true
+print_positions_on_start: false

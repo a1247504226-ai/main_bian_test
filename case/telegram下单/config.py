@@ -80,10 +80,19 @@ class Config:
     tg_session: str = "tg_session"
     tg_proxy: str = ""           # 形如 http://127.0.0.1:7897，留空表示直连
     tpsl_ttl_sec: int = 90        # 止盈止损只收到一半时的等待秒数
+    # 巡检查真实持仓的间隔（秒）。只在有待管理仓位时才查，
+    # 空闲时一个币安请求都不发。默认 5 分钟
+    pos_check_interval: int = 300
+    # 启动时是否查一次现有持仓（1 次请求）。默认关闭：启动完全零请求，
+    # 想看重启后还有哪些仓，改成 true
+    print_positions_on_start: bool = False
     # 运维
     state_dir: str = "state"
     log_dir: str = "logs"
     health_port: int = 8080
+    # serve 模式下主动 ping 币安做存活检测的间隔秒数。0 = 不主动 ping，
+    # 完全「有信号才连币安」；>0 才每 N 秒探一次（探测失败会告警）。
+    health_ping_interval: int = 0
 
     # ---------------- 环境相关（只读属性）----------------
     @property
@@ -123,7 +132,8 @@ def load_config(path: str = "config.yaml") -> Config:
         from dataclasses import fields as _dc_fields
         valid = {f.name for f in _dc_fields(Config)}
         # 布尔字段强制转换：yaml 里写 "false"（带引号）会被当成真值
-        bool_fields = {"testnet", "dry_run"}
+        bool_fields = {"testnet", "dry_run", "skip_limit_orders",
+                       "allow_reverse", "print_positions_on_start"}
         for k, v in data.items():
             if k not in valid:
                 continue
@@ -164,6 +174,7 @@ def load_config(path: str = "config.yaml") -> Config:
         ("TESTNET", "testnet", _bool),
         ("DRY_RUN", "dry_run", _bool),
         ("HEALTH_PORT", "health_port", int),
+        ("HEALTH_PING_INTERVAL", "health_ping_interval", int),
         ("LEVERAGE", "leverage", int),
         ("MARGIN_PCT", "margin_pct", float),
         ("TG_API_ID", "tg_api_id", int),
@@ -173,6 +184,8 @@ def load_config(path: str = "config.yaml") -> Config:
         ("BALANCE_ALERT_STEP", "balance_alert_step", float),
         ("SKIP_LIMIT_ORDERS", "skip_limit_orders", _bool),
         ("ALLOW_REVERSE", "allow_reverse", _bool),
+        ("POS_CHECK_INTERVAL", "pos_check_interval", int),
+        ("PRINT_POSITIONS_ON_START", "print_positions_on_start", _bool),
     ]:
         raw = os.getenv(env)
         # .env 里留空的键（TG_API_ID=）会返回空字符串，不能直接 int('')
