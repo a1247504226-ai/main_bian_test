@@ -10,6 +10,7 @@
 import hashlib
 import hmac
 import math
+import os
 import time
 import logging
 from collections import deque
@@ -36,6 +37,11 @@ _ENDPOINT_WEIGHT = {
     ("GET", "/fapi/v1/order"): 1,
     ("POST", "/fapi/v1/order"): 1,
     ("DELETE", "/fapi/v1/order"): 1,
+    # Algo 条件单（止盈止损走这里）；权重保守取 5，宁可高估
+    ("POST", "/fapi/v1/algoOrder"): 5,
+    ("GET", "/fapi/v1/algoOrder"): 5,
+    ("DELETE", "/fapi/v1/algoOrder"): 5,
+    ("GET", "/fapi/v1/openAlgoOrders"): 5,
     ("DELETE", "/fapi/v1/allOpenOrders"): 1,
     ("GET", "/fapi/v1/openOrders"): 1,
     ("GET", "/fapi/v1/allOrders"): 5,
@@ -78,6 +84,13 @@ class BinanceFutures:
         self.offline = offline
         self.session = requests.Session()
         self.session.headers.update({"X-MBX-APIKEY": api_key})
+        # 关键：默认绕过系统代理（Windows 常见的 127.0.0.1:7897 代理，出口 IP
+        # 很可能被币安封禁，导致所有请求 418/超时）。直连正常。
+        # 确实需要代理时，设环境变量 BINANCE_PROXY=http://127.0.0.1:7897 显式指定。
+        self.session.trust_env = False
+        _proxy = os.environ.get("BINANCE_PROXY", "").strip()
+        if _proxy:
+            self.session.proxies.update({"http": _proxy, "https": _proxy})
 
         # 精度缓存 {symbol: {"step": Decimal, "tick": Decimal, "minQty": Decimal, "minNotional": Decimal, "qtyPrecision": int, "pricePrecision": int}}
         self._filters: Dict[str, Dict[str, Any]] = {}
@@ -731,11 +744,24 @@ class BinanceFutures:
             raise
 
     def get_order(self, symbol: str, client_order_id: str) -> Dict[str, Any]:
-        """按 clientOrderId 查订单，用于幂等重试后确认实际状态"""
-        return self._request("GET", "/fapi/v1/order", {
-            "symbol": symbol.upper(),
-            "origClientOrderId": client_order_id,
-        })
+        """按 clientOrderId 查订单，用于幂等重试后确认实际状态。
+        先查普通单，查不到再查 Algo 条件单（止盈止损走 algo 接口）。
+        """
+        sym = symbol.upper()
+        try:
+            return self._request("GET", "/fapi/v1/order", {
+                "symbol": sym, "origClientOrderId": client_order_id,
+            })
+        except BinanceError as e:
+            if e.code not in (-2013, -2011):   # 订单不存在
+                raise
+            r = self._request("GET", "/fapi/v1/algoOrder", {
+                "symbol": sym, "clientAlgoId": client_order_id,
+            })
+            if isinstance(r, dict):
+                r.setdefault("orderId", r.get("algoId", ""))
+                r.setdefault("stopPrice", r.get("triggerPrice"))
+            return r
 
     def _place_protection(
         self,
@@ -758,22 +784,34 @@ class BinanceFutures:
         # 对止盈 = 靠近入场价（更容易成交）。两个都符合预期。
         px = self.round_price(symbol, stop_price,
                               mode="down" if close_side == "SELL" else "up")
+        # 币安已把条件单（STOP_MARKET/TAKE_PROFIT_MARKET）迁到 Algo Order 接口：
+        #   POST /fapi/v1/algoOrder，必须带 algotype=CONDITIONAL，价格参数是
+        #   triggerPrice（不再是 stopPrice），幂等参数是 clientAlgoId。
+        # 旧接口会报 -4120 Order type not supported。
         params = {
             "symbol": symbol.upper(),
             "side": close_side,
             "type": "STOP_MARKET" if kind == "SL" else "TAKE_PROFIT_MARKET",
-            "stopPrice": px,
+            "algotype": "CONDITIONAL",
+            "triggerPrice": px,
             "closePosition": "true",
             "workingType": working_type,
-            "newClientOrderId": client_order_id,
+            "clientAlgoId": client_order_id,
         }
         if hedge:
             params["positionSide"] = position_side.upper()
 
+        def _norm(resp: Dict[str, Any]) -> Dict[str, Any]:
+            """统一响应字段：调用方按 orderId / stopPrice 取值"""
+            if isinstance(resp, dict):
+                resp.setdefault("orderId", resp.get("algoId", ""))
+                resp.setdefault("stopPrice", resp.get("triggerPrice", px))
+            return resp
+
         try:
-            r = self._request("POST", "/fapi/v1/order", params)
+            r = self._request("POST", "/fapi/v1/algoOrder", params)
             self._invalidate()
-            return r
+            return _norm(r)
         except BinanceError as e:
             # 模式判断错了：币安说方向不匹配 → 翻一下模式重试一次
             if e.code == -4061:
@@ -784,13 +822,13 @@ class BinanceFutures:
                     params.pop("positionSide", None)
                 log.warning("%s %s positionSide 被拒(-4061)，按%s模式重试",
                             symbol, kind, "双向" if self._dual_side else "单向")
-                r = self._request("POST", "/fapi/v1/order", params)
+                r = self._request("POST", "/fapi/v1/algoOrder", params)
                 self._invalidate()
-                return r
+                return _norm(r)
             if e.code == -4116:
                 log.warning("%s单 %s 已存在，查询状态", kind, client_order_id)
                 try:
-                    return self.get_order(symbol, client_order_id)
+                    return _norm(self.get_order(symbol, client_order_id))
                 except Exception:
                     pass
             raise
@@ -823,15 +861,56 @@ class BinanceFutures:
                                       client_order_id, working_type)
 
     def cancel_all(self, symbol: str) -> Any:
-        # 币安这个接口是 DELETE，不是 POST
-        r = self._request("DELETE", "/fapi/v1/allOpenOrders",
-                          {"symbol": symbol.upper()})
+        """撤掉该币所有挂单：普通单批量撤，Algo 条件单（止盈止损）逐个撤。
+        币安没有批量撤 algo 的端点，只能先查 openAlgoOrders 再按 algoId 删。
+        """
+        sym = symbol.upper()
+        out: Dict[str, Any] = {}
+        try:
+            out["regular"] = self._request("DELETE", "/fapi/v1/allOpenOrders",
+                                           {"symbol": sym})
+        except BinanceError as e:
+            # -2011 没有挂单，属正常
+            if e.code != -2011:
+                log.warning("%s 撤普通单失败: %s", sym, e)
+        try:
+            algos = self._request("GET", "/fapi/v1/openAlgoOrders", {"symbol": sym})
+            n = 0
+            for a in algos or []:
+                aid = a.get("algoId")
+                if not aid:
+                    continue
+                try:
+                    self._request("DELETE", "/fapi/v1/algoOrder",
+                                  {"symbol": sym, "algoId": aid})
+                    n += 1
+                except BinanceError as e:
+                    log.warning("%s 撤 algo %s 失败: %s", sym, aid, e)
+            out["algo_cancelled"] = n
+        except BinanceError as e:
+            log.warning("%s 查询/撤 algo 单失败: %s", sym, e)
         self._invalidate()
-        return r
+        return out
 
     def get_open_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """返回普通挂单 + Algo 条件单，字段统一成 type / stopPrice 方便调用方读取。"""
         params = {"symbol": symbol.upper()} if symbol else {}
-        return self._request("GET", "/fapi/v1/openOrders", params)
+        orders = list(self._request("GET", "/fapi/v1/openOrders", params))
+        try:
+            algos = self._request("GET", "/fapi/v1/openAlgoOrders", params)
+            for a in algos or []:
+                orders.append({
+                    "type": a.get("orderType"),
+                    "stopPrice": a.get("triggerPrice"),
+                    "side": a.get("side"),
+                    "algoId": a.get("algoId"),
+                    "clientAlgoId": a.get("clientAlgoId"),
+                    "status": a.get("algoStatus"),
+                    "algo": True,
+                })
+        except BinanceError as e:
+            log.debug("查询 algo 挂单失败: %s", e)
+        return orders
 
     def get_mark_price(self, symbol: str) -> float:
         """标记价，带 3 秒缓存：同一币短时间反复查（开仓+挂单校验）不重复打 API"""

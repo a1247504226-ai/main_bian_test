@@ -40,6 +40,7 @@ BTC 日线趋势策略 · 每日检测（邮件推送 + 可选币安下单）
     python btc_monitor.py --dump-html p.html  把邮件正文另存为 HTML（本地预览用，不发邮件）
     python btc_monitor.py --reset-state   清空本地状态（重新建立基准）
     python btc_monitor.py --force-mail    同一根日线已发过邮件时，仍然再发一封
+    python btc_monitor.py --no-trade       显式禁止下单（--json/--dump-html/--no-mail 同样只读，不会下单）
 
 口径说明
 --------
@@ -1656,6 +1657,7 @@ def doctor():
 def main():
     argv = sys.argv[1:]
     no_mail = "--no-mail" in argv
+    no_trade = "--no-trade" in argv
     live = "--live" in argv
     refresh = "--refresh" in argv
     reset = "--reset-state" in argv
@@ -1693,11 +1695,18 @@ def main():
     # ⚠ 但「只读」参数（--no-mail / --dump-html）必须挡住 auto_live ——
     #   否则用户只想看一眼（比如 --no-mail 检查数据），却真的开了仓。
     if not live and bool((cfg.get("binance") or {}).get("auto_live")):
-        if no_mail or html_out:
-            log("  ℹ 本次带 --no-mail / --dump-html（只读），已忽略 binance.auto_live，不会下单")
+        # ⚠ --json / --dump-html / --no-mail / --no-trade 全是「只读/导出」语义，
+        #    绝不能因为 auto_live=true 就真的去下单。尤其是 --json 只是附带导出，
+        #    用户只想导出一份结果 → 否则开着 auto_live 跑 --json 就会误开仓。
+        if no_mail or html_out or json_out or no_trade:
+            log("  ℹ 本次带 --no-mail / --dump-html / --json / --no-trade（只读），"
+                "已忽略 binance.auto_live，不会下单")
         else:
             live = True
             log("  ⚠ binance.auto_live = true → 本次按 --live 执行（会真实下单）")
+    if no_trade:
+        live = False
+        log("  ℹ --no-trade 显式禁下单：即使 --live 或 auto_live=true 也不会下单")
     warnings = []
 
     if reset and os.path.exists(STATE_PATH):

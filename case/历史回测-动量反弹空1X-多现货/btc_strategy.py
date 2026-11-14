@@ -537,9 +537,14 @@ def trade_stats(trades):
             "max_consec_loss": mx,
             "avg_hold": sum(t["exit_i"] - t["entry_i"] for t in ts) / len(ts),
         }
+    # ⚠ 按「载体」切分（spot/fut）在 long_leg="fut" 时会失效：
+    #   多头腿也走合约 → 多空全被标成 leg="fut"，两条腿混成一条，
+    #   报告会显示「合约空头腿 138 笔」而多头腿 0 笔。所以额外按方向切分。
     return {"all": blk(trades),
             "spot": blk([t for t in trades if t["leg"] == "spot"]),
-            "fut": blk([t for t in trades if t["leg"] == "fut"])}
+            "fut": blk([t for t in trades if t["leg"] == "fut"]),
+            "long": blk([t for t in trades if t["dir"] > 0]),
+            "short": blk([t for t in trades if t["dir"] < 0])}
 
 
 
@@ -1000,7 +1005,8 @@ def main():
                ["K线数量", n], ["样本年数", "%.2f" % years],
                ["本金USDT", "%.2f" % CAPITAL],
                ["信号", "双均线 EMA %d/%d（收盘确认，次日开盘成交）" % PRIMARY_SET],
-               ["多头腿", "现货（不付资金费）"],
+               ["多头腿", ("合约 %.0f× 逐仓（付资金费）" % LEVERAGE) if LONG_ON_FUT
+                else "现货（不付资金费）"],
                ["空头腿", "合约 %.0f× 逐仓" % LEVERAGE],
                ["趋势过滤", "SMA%d 只约束多头" % REGIME_MA],
                ["波动率目标", "%.2f" % VT], ["敞口上限", "%.2f" % EXPOSURE_CAP],
@@ -1119,12 +1125,12 @@ def main():
         elif sig[_i - 1] < 0:
             _LS += _d
     _sum = _LL + _LS
-    _solo = {"spot": r_l["stats"]["final"], "fut": r_s["stats"]["final"]}
-    _share = {"spot": (_LL / _sum) if _sum else 0.0,
-              "fut": (_LS / _sum) if _sum else 0.0, "all": 1.0}
+    _solo = {"long": r_l["stats"]["final"], "short": r_s["stats"]["final"]}
+    _share = {"long": (_LL / _sum) if _sum else 0.0,
+              "short": (_LS / _sum) if _sum else 0.0, "all": 1.0}
 
     leg_rows = []
-    for key, label in (("spot", "现货多头腿"), ("fut", "合约空头腿"), ("all", "合计")):
+    for key, label in (("long", "多头腿"), ("short", "空头腿"), ("all", "合计")):
         b = ts.get(key)
         if not b:
             continue
@@ -1145,7 +1151,7 @@ def main():
     log("  「单独回测」= 只跑这一条腿、其余时间空仓；「收益占比」按逐日对数收益切分。")
     log("  → 收益主要来自多头腿的「择时空仓」（躲开大跌，复利基数不被打残）；")
     log("    空头腿只贡献 %.2f×（占 %.0f%%），作用是熊市减亏、压回撤，不是收益引擎。"
-        % (_solo["fut"], _share["fut"] * 100))
+        % (_solo["short"], _share["short"] * 100))
     write_csv("02_分腿胜率.csv",
               ["腿", "笔数", "盈利笔数", "亏损笔数", "胜率", "盈亏比", "盈亏因子PF",
                "最长连亏", "平均持仓天数", "单独回测终值", "收益占比"], leg_rows)

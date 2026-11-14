@@ -106,8 +106,8 @@ class Trader:
         self.ex = executor
         self.notify = notifier
         self.buf = sp.TPSLBuffer(ttl_sec=cfg.tpsl_ttl_sec)
-        self.stats = {"open": 0, "amend": 0, "trail": 0, "close": 0,
-                      "ignore": 0, "fail": 0}
+        self.stats = {"msg": 0, "open": 0, "amend": 0, "trail": 0, "close": 0,
+                      "ignore": 0, "skip": 0, "fail": 0}
         self._warned: set = set()   # 已告警过的 symbol，避免重复刷屏
         # 同币种开仓冷却：TG 重连重放、消息重复、编辑再解析都可能重复触发开仓
         self._recent_opens: Dict[str, float] = {}
@@ -178,6 +178,7 @@ class Trader:
     # ---------------- 消息处理 ----------------
     async def on_message(self, text: str, msg_id: int, from_edit: bool = False):
         async with self._lock:      # 串行化，杜绝并发下单
+            self.stats["msg"] += 1
             ev = sp.parse(text)
 
             if ev.kind == sp.OPEN:
@@ -216,6 +217,7 @@ class Trader:
         sym = ev.symbol
         if self.cfg.allowed_symbols and sym not in self.cfg.allowed_symbols:
             log.info("跳过 %s（不在白名单）", sym)
+            self.stats["skip"] += 1
             return
 
         # 含「轻仓」「补仓」的票跳过：这类信号需要人工判断补仓时机和仓位大小，
@@ -367,6 +369,7 @@ class Trader:
         if not done:
             log.info("已缓存 %s 的部分止盈止损（tp=%s sl=%s），等另一半",
                      target, ev.tp, ev.sl)
+            self.stats["skip"] += 1     # 只收到一半，缓存等另一半（非最终动作）
             return
 
         log.info("🔧 止盈止损齐了 %s → TP %s / SL %s", target, done["tp"], done["sl"])
@@ -404,12 +407,14 @@ class Trader:
         info = self.ex.pending.get(sym)
         if not info or info.get("status") != "protected":
             log.debug("TP%d 到达但 %s 无受保护仓位，忽略", ev.level, sym)
+            self.stats["skip"] += 1
             return
 
         tp_all = info.get("tp_all") or []
         if not tp_all or ev.level > len(tp_all):
             log.warning("%s 收到 TP%d 通知但目标价不全 %s，忽略",
                         sym, ev.level, tp_all)
+            self.stats["skip"] += 1
             return
 
         target = tp_all[ev.level - 1]
@@ -424,12 +429,14 @@ class Trader:
             if cur_sl and new_sl >= cur_sl:
                 log.info("%s TP%d 到达，新止损 %.8g 不优于当前 %.8g，保持不动",
                          sym, ev.level, new_sl, cur_sl)
+                self.stats["skip"] += 1
                 return
         else:
             new_sl = target * 0.995
             if cur_sl and new_sl <= cur_sl:
                 log.info("%s TP%d 到达，新止损 %.8g 不优于当前 %.8g，保持不动",
                          sym, ev.level, new_sl, cur_sl)
+                self.stats["skip"] += 1
                 return
 
         # 边界校验：止盈价位写错（比如 1-2-3 实际应是 100-200-300）时，
@@ -470,6 +477,7 @@ class Trader:
         elif r.error and "无持仓" in r.error:
             # 仓位可能已被交易所条件单平掉，属正常情况
             log.info("%s 离场信号但无持仓（可能已被止盈止损单平掉）", ev.symbol)
+            self.stats["skip"] += 1
         else:
             self.stats["fail"] += 1
             log.error("离场失败 %s: %s", ev.symbol, r.error)
@@ -731,9 +739,10 @@ async def run_fetch(cfg: Config, trader: Trader, limit: int):
         await trader.on_message(text, m.id)
 
     print(f"\n解析出信号 {ok} 条，忽略 {ign} 条")
-    print(f"完成：开仓 {trader.stats['open']}，改单 {trader.stats['amend']}，"
-          f"移动止损 {trader.stats['trail']}，平仓 {trader.stats['close']}，"
-          f"忽略 {trader.stats['ignore']}，失败 {trader.stats['fail']}")
+    print(f"完成：处理 {trader.stats['msg']} 条 → 开仓 {trader.stats['open']}，"
+          f"改单 {trader.stats['amend']}，移动止损 {trader.stats['trail']}，"
+          f"平仓 {trader.stats['close']}，忽略 {trader.stats['ignore']}，"
+          f"跳过 {trader.stats['skip']}，失败 {trader.stats['fail']}")
     print("\n" + trader.ex.pending_report())
     await client.disconnect()
 
@@ -767,9 +776,10 @@ async def run_replay(cfg: Config, trader: Trader, path: str,
         await trader.on_message(b, msg_id)
         await asyncio.sleep(delay)
 
-    print(f"\n完成：开仓 {trader.stats['open']}，改单 {trader.stats['amend']}，"
-          f"移动止损 {trader.stats['trail']}，平仓 {trader.stats['close']}，"
-          f"忽略 {trader.stats['ignore']}，失败 {trader.stats['fail']}")
+    print(f"\n完成：处理 {trader.stats['msg']} 条 → 开仓 {trader.stats['open']}，"
+          f"改单 {trader.stats['amend']}，移动止损 {trader.stats['trail']}，"
+          f"平仓 {trader.stats['close']}，忽略 {trader.stats['ignore']}，"
+          f"跳过 {trader.stats['skip']}，失败 {trader.stats['fail']}")
     print("\n" + trader.ex.pending_report())
 
 

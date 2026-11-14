@@ -433,6 +433,39 @@ python main.py serve
 
 **切换真实下单**：命令行加 `--live`，或者把 `config.yaml` 里 `dry_run` 改成 `false`。
 
+## 测试网端到端自测（开仓 → 改单 → 平仓）
+
+想在测试网完整验证一遍「下单 → 改止盈止损 → 平仓」这条链路（用真实测试网、虚拟资金），
+跑这个脚本：
+
+```bash
+python testnet_e2e.py --symbol GRASSUSDT --side short --wait 60
+```
+
+它做的事：
+
+| 步骤 | 动作 | 间隔 |
+|------|------|------|
+| ① | 市价开仓（用 bot 真实 Executor，自动挂兜底止盈止损） | — |
+| ② | 按当前标记价改止盈止损（短单 TP 在下、SL 在上） | 等 `--wait` 秒 |
+| ③ | 撤单 + 市价平仓，并确认持仓清零 | 等 `--wait` 秒 |
+
+参数：
+
+```bash
+--symbol GRASSUSDT   # 币种（测试网有的话随便选；GRASS/BTC/ETH 都有）
+--side short         # long / short
+--wait 60            # 每步间隔秒数
+--tp-pct 10          # 改单时止盈幅度（%）
+--sl-pct 6           # 改单时止损幅度（%）
+```
+
+**注意**：
+- 脚本默认走测试网、真实下单（虚拟资金），会真的开仓/改单/平仓，不是 dry-run。
+- 每跑一次约 2 分钟（两个 `--wait 60`）。
+- 依赖 `.env.bot` 里的测试网 key；若直连币安不通，按第「币安 418」节配 `BINANCE_PROXY`。
+- 脚本在**工作区目录**（`C:/Users/hongji/WorkBuddy AI/.../testnet_e2e.py`），不在 bot 目录。
+
 ## 信号文件格式
 
 `signals.json`：
@@ -1114,6 +1147,46 @@ health_ping_interval: 0         # serve 模式主动探活间隔；0 = 不主动
 
 网络异常 / 5xx / 429 / 时间戳偏差这几类警告改成**同类 60 秒最多一条**。
 以前币安不可达时，一笔单重试 3 次就刷 3 条，加上巡检每 15 秒一轮，日志会被淹没。
+
+---
+
+## 条件单迁到 Algo Order API（2026-11 变更）
+
+币安把**条件单**（STOP_MARKET / TAKE_PROFIT_MARKET）从 `/fapi/v1/order` 迁到了
+**Algo Order 接口**。旧写法会报：
+
+```
+-4120 Order type not supported for this endpoint. Please use the Algo Order API endpoints instead.
+```
+
+后果：开仓成功但止盈止损挂不上 → 触发「裸仓保护」紧急平仓，每单白付手续费。
+
+新写法（`binance_futures.py` 已适配）：
+
+| | 旧 | 新 |
+|---|---|---|
+| 端点 | `POST /fapi/v1/order` | `POST /fapi/v1/algoOrder` |
+| 类型 | 直接 type | 加 `algotype=CONDITIONAL` + `type` |
+| 触发价 | `stopPrice` | **`triggerPrice`** |
+| 幂等 | `newClientOrderId` | **`clientAlgoId`** |
+| 返回 | `orderId` | `algoId`（已归一化成 orderId 兼容旧代码） |
+| 查询 | `GET /fapi/v1/openOrders` | `GET /fapi/v1/openAlgoOrders` |
+| 撤单 | `DELETE /fapi/v1/allOpenOrders` | **没有批量撤**，逐个 `DELETE /fapi/v1/algoOrder?algoId=` |
+
+重复 `clientAlgoId` 仍报 `-4116`，`cancel_all()` 现在会同时撤普通单和 algo 单。
+
+### ⚠️ 系统代理会导致 418（重要）
+
+Windows 上开着 Clash/V2Ray 等系统代理（如 `127.0.0.1:7897`）时，Python 的
+`requests` 默认会走系统代理，**代理的出口 IP 很可能被币安封禁**，表现为：
+- `ping` / `time` 这类公开接口 200（可能被缓存/豁免）
+- 但所有**签名接口**（下单/余额/持仓）返回 `418`，`Retry-After` 是几千秒
+
+排查：`python -c "import urllib.request; print(urllib.request.getproxies())"`。
+如果是代理导致，**绕过代理直连**即可（`curl` 不走系统代理所以往往 200，可对照）。
+
+已默认修复：`BinanceFutures` 创建 session 时 `trust_env=False`，忽略系统代理。
+确实需要代理时，设 `BINANCE_PROXY=http://127.0.0.1:7897` 显式指定。
 
 ---
 
