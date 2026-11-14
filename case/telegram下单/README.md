@@ -1084,6 +1084,7 @@ Telegram 会把**点赞、表情回应、回复、置顶**都推成「消息编�
 | `build()` 启动 | 主动同步服务器时间 | **懒同步**：第一次真正发签名请求时才校准 |
 | `run_live()` 启动 | 查一次持仓并打印 | 默认关闭（`print_positions_on_start: false`） |
 | `housekeeping()` | **每 15 秒无条件查一次持仓**，哪怕零仓位 | **事件驱动**：只有有待管理仓位时才查，间隔默认 5 分钟 |
+| `cmd_serve()` 循环 | **每 60 秒主动 `ping` 一次**做存活检测，没信号也连 | 默认关闭（`health_ping_interval: 0`）；>0 才每 N 秒探一次 |
 
 所以现在：
 
@@ -1106,6 +1107,7 @@ INFO 空闲巡检：无待管理仓位/改单，本轮零币安请求（只在�
 ```yaml
 pos_check_interval: 300          # 有仓位时多久查一次持仓（秒）
 print_positions_on_start: false  # 改成 true 可恢复「启动打印持仓」（会发 1 次请求）
+health_ping_interval: 0         # serve 模式主动探活间隔；0 = 不主动 ping（完全「有信号才连币安」）
 ```
 
 ### 连接类日志不再刷屏
