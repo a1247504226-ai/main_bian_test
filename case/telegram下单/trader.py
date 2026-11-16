@@ -112,6 +112,11 @@ class Trader:
         # 同币种开仓冷却：TG 重连重放、消息重复、编辑再解析都可能重复触发开仓
         self._recent_opens: Dict[str, float] = {}
         self.open_cooldown = 30.0
+        # 回放专用：虚拟时钟偏移（按消息间隔推进，避免把几天消息压缩成几秒）
+        self._vclock_offset = 0.0
+        # 回放专用：到 TP3 时模拟交易所止盈单成交、释放仓位槽
+        # （实盘由交易所执行 TP 单，这里没有交易所，需要手动模拟）
+        self.sim_close = False
         # 最近一条开仓信号的币种和时间（无论是否真的开仓成功），
         # 用来判断「无币种的止盈止损」到底属于哪个仓
         self._last_open_sym: str = ""
@@ -119,6 +124,11 @@ class Trader:
         # 消息必须串行处理：Telethon 默认并发投递，
         # 两个信号同时到达会各自读到「开仓前」的持仓快照，双双通过风控 → 超限开仓
         self._lock = asyncio.Lock()
+
+    def _now(self) -> float:
+        """当前时间。回放时叠加虚拟偏移，让「30 秒冷却 / 90 秒 TTL」按消息间隔生效，
+        而不是把几天消息压缩到几秒内跑完导致冷却误触发。"""
+        return time.time() + self._vclock_offset
 
     # ---------------- 匹配待更新仓位 ----------------
     def _pick_pending(self) -> str:
@@ -185,7 +195,7 @@ class Trader:
                 # 先记录最近一条开仓信号（哪怕后面被排除词/风控跳过），
                 # 后面无币种的止盈止损要靠它确认归属
                 self._last_open_sym = ev.symbol
-                self._last_open_ts = time.time()
+                self._last_open_ts = self._now()
                 await self._handle_open(ev, from_edit=from_edit)
             elif ev.kind == sp.TPSL:
                 await self._handle_tpsl(ev)
@@ -281,7 +291,7 @@ class Trader:
         # TG 断线重连会重放最近的 update，同一条信号可能被投递两次。
         # 编辑来的信号不检查冷却（它是同一条消息的修正，不是重复投递）
         if not from_edit:
-            now = time.time()
+            now = self._now()
             last = self._recent_opens.get(sym, 0.0)
             if now - last < self.open_cooldown:
                 log.info("跳过 %s %s：%.0f 秒前刚开过仓（防重复下单）",
@@ -308,7 +318,7 @@ class Trader:
         r = await asyncio.to_thread(self.ex.open, sig)
         if r.ok:
             self.stats["open"] += 1
-            self._recent_opens[sym] = time.time()   # 只有开成功才进冷却
+            self._recent_opens[sym] = self._now()   # 只有开成功才进冷却
         else:
             self.stats["fail"] += 1
             log.error("开仓失败 %s %s: %s", sym, ev.direction, r.error)
@@ -348,7 +358,7 @@ class Trader:
                             f"--symbol {target} --tp <价> --sl <价>")
                     self.stats["ignore"] += 1
                     return
-                gap = time.time() - self._last_open_ts
+                gap = self._now() - self._last_open_ts
                 if self._last_open_ts > 0 and gap > 300:
                     log.warning("止盈止损无币种，距最近开仓信号已 %.0f 秒，"
                                 "无法确认归属，跳过", gap)
@@ -365,7 +375,7 @@ class Trader:
             self.stats["ignore"] += 1
             return
 
-        done = self.buf.feed(ev, target, time.time())
+        done = self.buf.feed(ev, target, self._now())
         if not done:
             log.info("已缓存 %s 的部分止盈止损（tp=%s sl=%s），等另一半",
                      target, ev.tp, ev.sl)
@@ -422,6 +432,18 @@ class Trader:
         direction = info.get("direction", "")
         cur_sl = info.get("sl")
         entry = info.get("entry")
+
+        # 回放模拟：到最后一个目标（TP3）时，交易所的止盈单会成交平仓、释放仓位槽。
+        # 回放没有交易所，这里手动模拟，否则仓位永远占着槽 → 后续信号全被保证金拒绝。
+        if self.sim_close and ev.level >= len(tp_all):
+            try:
+                self.ex.dry.remove(sym)
+            except Exception:
+                pass
+            self.ex.pending.remove(sym)
+            self.stats["close"] += 1
+            log.info("🎯 %s 到达 TP%d（最后目标），模拟止盈平仓，释放仓位槽", sym, ev.level)
+            return
 
         # 止损移到目标价「外侧」0.5%：空单在上方，多单在下方
         if direction == "short":
@@ -600,7 +622,7 @@ class Trader:
 
 # ----------------------------------------------------------------------
 async def run_live(cfg: Config, trader: Trader):
-    from tg_listener import TgListener, check_ready
+    from tg_listener import SessionInvalidError, TgListener, check_ready
 
     problem = check_ready(cfg.tg_api_id, cfg.tg_api_hash, cfg.tg_channel)
     if problem:
@@ -654,6 +676,16 @@ async def run_live(cfg: Config, trader: Trader):
     hk_task = asyncio.create_task(trader.housekeeping())
     try:
         await listener.run(trader.on_message)
+    except SessionInvalidError as e:
+        # 不打印长栈：用户只需要知道「session 废了 + 怎么修」
+        print()
+        print("=" * 64)
+        print("❌  Telegram 登录态失效，程序已停止（这段时间不会收到信号，也不会下单）")
+        print("=" * 64)
+        for line in str(e).splitlines():
+            print("  " + line)
+        print("=" * 64)
+        raise SystemExit(2)
     finally:
         hk_task.cancel()
 
@@ -748,8 +780,13 @@ async def run_fetch(cfg: Config, trader: Trader, limit: int):
 
 
 async def run_replay(cfg: Config, trader: Trader, path: str,
-                     limit: Optional[int], delay: float):
-    """回放历史消息，验证解析 + 下单逻辑（不下真单，dry_run 有效）"""
+                     limit: Optional[int], delay: float, msg_interval: float = 60.0):
+    """回放历史消息，验证解析 + 下单逻辑（不下真单，dry_run 有效）
+
+    msg_interval: 虚拟时钟每条消息推进的秒数（默认 60）。
+      回放文件没有时间戳，用固定间隔模拟「消息一条接一条到达」，
+      避免把几天消息压缩到几秒、导致 30 秒冷却误触发。
+    """
     # 每次回放从干净状态开始，避免上次的虚拟持仓影响风控
     trader.ex.dry.clear()
     for s in list(trader.ex.pending.all()):
@@ -765,10 +802,23 @@ async def run_replay(cfg: Config, trader: Trader, path: str,
     if limit:
         blocks = blocks[:limit]
 
-    print(f"回放 {len(blocks)} 条消息（dry_run={cfg.dry_run}）\n")
+    # 离线回放的虚拟权益是 BinanceFutures._off_equity（默认 500U），
+    # 不是 Executor.demo_equity（那个只在查询余额抛错时才用）
+    _eq = getattr(trader.ex.c, "_off_equity", None) or trader.ex.demo_equity
+    # 开启回放专用模拟：虚拟时钟 + TP3 自动平仓
+    trader.sim_close = True
+    trader._vclock_offset = 0.0
+    span_min = len(blocks) * msg_interval / 60
+    print(f"回放 {len(blocks)} 条消息（dry_run={cfg.dry_run}，"
+          f"虚拟权益 {_eq:.0f}U，最多 {cfg.max_open_positions} 仓，"
+          f"每仓 {cfg.margin_pct*100:.0f}% 保证金）")
+    print(f"虚拟时钟：每条消息间隔 {msg_interval:.0f}s，"
+          f"200 条约跨 {span_min:.0f} 分钟（避免冷却误触发）")
+    print("模拟平仓：仓位到 TP3 视为止盈成交、释放仓位槽\n")
     msg_id = 0
     for b in blocks:
         msg_id += 1
+        trader._vclock_offset += msg_interval     # 虚拟时钟前进
         ev = sp.parse(b)
         if ev.kind != sp.IGNORE:
             print(f"[{msg_id:03d}] {ev.kind:7s} {ev.symbol or '-':12s} "
@@ -797,6 +847,8 @@ def main():
                    help="直接从 TG 拉最近 N 条消息并解析（dry-run 验证用）")
     p.add_argument("--limit", type=int, default=None, help="回放条数")
     p.add_argument("--delay", type=float, default=0.1, help="回放间隔秒")
+    p.add_argument("--msg-interval", type=float, default=60.0,
+                   help="虚拟时钟：每条消息推进的秒数（默认 60，避免冷却误触发）")
     p.add_argument("--testnet", action="store_true",
                    help="用币安测试网（默认，虚拟资金）")
     p.add_argument("--mainnet", action="store_true",
@@ -851,7 +903,8 @@ def main():
         if args.fetch:
             asyncio.run(run_fetch(cfg, trader, args.fetch))
         elif args.replay:
-            asyncio.run(run_replay(cfg, trader, args.replay, args.limit, args.delay))
+            asyncio.run(run_replay(cfg, trader, args.replay, args.limit, args.delay,
+                                   args.msg_interval))
         else:
             asyncio.run(run_live(cfg, trader))
     except KeyboardInterrupt:

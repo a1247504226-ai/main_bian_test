@@ -92,6 +92,7 @@ def cmd_check(cfg: Config, client: BinanceFutures, notifier):
     print(f"  API Key:     {'已配置 ' + cfg.active_api_key[:8] + '...' if cfg.active_api_key else '未配置'}")
     print(f"  Telegram:    {'已配置' if notifier.enabled else '未配置'}")
     print(f"  杠杆:        {cfg.leverage}x (上限 {cfg.max_leverage}x)")
+    print(f"  保证金模式:  逐仓 ISOLATED（每次开仓前强制设置，单仓爆仓不牵连其他仓）")
     print(f"  单笔保证金:  {cfg.margin_pct*100:.0f}% 权益 → 名义 {cfg.margin_pct*cfg.leverage*100:.0f}%")
     print(f"  兜底保护:    SL {cfg.provisional_sl_pct}% / TP {cfg.provisional_tp_pct}%")
     print(f"  最大持仓数:  {cfg.max_open_positions} 个")
@@ -113,8 +114,13 @@ def cmd_check(cfg: Config, client: BinanceFutures, notifier):
         pos = client.get_positions()
         print(f"  当前持仓:    {len(pos)} 个")
         for p in pos:
-            print(f"    {p['symbol']} {p['side']} {p['amount']} @ {p['entry']:.6g} "
+            mode = "逐仓" if p.get("margin_type") == "isolated" else "全仓"
+            print(f"    {p['symbol']} {p['side']} {mode} {p['amount']} @ {p['entry']:.6g} "
                   f"盈亏 {p['unrealized']:+.2f}U")
+        cross = [p["symbol"] for p in pos if p.get("margin_type") != "isolated"]
+        if cross:
+            print(f"  ⚠️ 全仓持仓:  {', '.join(cross)}（亏损会占用整个账户保证金）")
+            print("     逐仓只对新开仓生效，这些仓平掉后重新开才会变逐仓")
     except BinanceError as e:
         print(f"  账户查询失败: {e}")
         if e.code in (-2015, -1022):
@@ -175,10 +181,15 @@ def cmd_positions(cfg: Config, client: BinanceFutures):
     if not pos:
         print("无持仓")
         return
-    print(f"{'合约':12s} {'方向':6s} {'数量':>14s} {'开仓价':>14s} {'标记价':>14s} {'盈亏':>12s}")
+    print(f"{'合约':12s} {'方向':6s} {'模式':6s} {'数量':>14s} {'开仓价':>14s} {'标记价':>14s} {'盈亏':>12s}")
     for p in pos:
-        print(f"{p['symbol']:12s} {p['side']:6s} {p['amount']:>14.6g} "
+        mode = "逐仓" if p.get("margin_type") == "isolated" else "全仓"
+        print(f"{p['symbol']:12s} {p['side']:6s} {mode:6s} {p['amount']:>14.6g} "
               f"{p['entry']:>14.6g} {p['mark']:>14.6g} {p['unrealized']:>+12.2f}")
+    cross = [p["symbol"] for p in pos if p.get("margin_type") != "isolated"]
+    if cross:
+        print(f"\n⚠️ {', '.join(cross)} 是全仓：亏损会占用整个账户保证金，可能影响其他仓位。")
+        print("   逐仓只在「新开仓」时设置，这些仓要平掉后重新开才会变成逐仓。")
 
 
 def cmd_batch(cfg: Config, executor: Executor, args):

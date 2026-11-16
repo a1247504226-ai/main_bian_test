@@ -22,6 +22,20 @@ import requests
 
 log = logging.getLogger(__name__)
 
+
+def _param_str(v: Any) -> str:
+    """请求参数转字符串。
+
+    float 必须转定点：str(1.2e-05) = "1.2e-05"，币安会当成非法数字拒绝
+    （小价格币如 SHIB/PEPE 的 triggerPrice 经常小于 1e-4，踩中就是挂不上保护单）。
+    """
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, float):
+        return format(Decimal(str(v)), "f")
+    return str(v)
+
+
 MAINNET = "https://fapi.binance.com"
 TESTNET = "https://testnet.binancefuture.com"
 
@@ -100,8 +114,9 @@ class BinanceFutures:
         # markPrice 短缓存 {symbol: (价格, 时间戳)}，避免同一币反复请求
         self._price_cache: Dict[str, tuple] = {}
         self._price_ttl = 3.0
-        # exchangeInfo 是否已全量加载（只拉一次）
+        # exchangeInfo 是否已全量加载（只拉一次）；新上币种可强制重载（60s 节流）
         self._info_loaded = False
+        self._info_reload_at = 0.0
         # 离线模式的虚拟账户
         self._off_equity = 500.0
         self._off_positions: Dict[str, Dict[str, Any]] = {}
@@ -263,14 +278,17 @@ class BinanceFutures:
             self._w_win.popleft()
         return sum(w for _, w in self._w_win)
 
-    def _w_wait(self, path: str, weight: int):
+    def _w_wait(self, path: str, weight: int, urgent: bool = False):
         """发请求前先卡「本进程」预算。到软上限就等窗口释放，宁可慢也不撞限频
 
         服务端每分钟清零，所以最多等 60 秒；超过 65 秒还降不下来
         （说明是别的进程/别的机器在同一 IP 上刷），就不再等，硬着头皮发，
         避免机器人被卡死。
+
+        urgent=True 用于止损/止盈这类保护单：最多只等 5 秒。
+        开仓后等 65 秒才挂止损 = 裸仓 65 秒，比撞一次限频危险得多。
         """
-        deadline = time.time() + 65
+        deadline = time.time() + (5 if urgent else 65)
         warned = False
         while True:
             now = time.time()
@@ -361,10 +379,13 @@ class BinanceFutures:
         params: Optional[Dict[str, Any]] = None,
         signed: bool = True,
         max_retries: int = 3,
+        urgent: bool = False,
     ) -> Any:
-        params = dict(params or {})
+        raw_params = dict(params or {})
+        # float 统一转定点字符串，避免 1.2e-05 这种科学计数法被币安拒绝
+        params = {k: _param_str(v) for k, v in raw_params.items() if v is not None}
         if self.offline:
-            return self._offline_response(method, path, params)
+            return self._offline_response(method, path, raw_params)
 
         # 第一次签名请求前才校准时间：启动时不做任何网络请求
         if signed and not self._time_synced:
@@ -395,9 +416,13 @@ class BinanceFutures:
 
         for attempt in range(1, max_retries + 1):
             try:
+                # 每次重试都重算时间戳：429 可能等 30-120 秒，
+                # 用循环外算好的旧时间戳会直接 -1021
+                if signed:
+                    params["timestamp"] = int(time.time() * 1000) + self._time_offset
                 # 发之前先看本地预算：到软上限就等窗口释放，
                 # 从源头避免 429/418（事后 sleep 没用，权重已经花掉了）
-                self._w_wait(path, weight)
+                self._w_wait(path, weight, urgent)
 
                 # 必须按真实 HTTP 方法发：撤单接口是 DELETE，
                 # 当成 POST 发会 404，导致旧保护单永远撤不掉
@@ -523,6 +548,12 @@ class BinanceFutures:
                 "qtyPrecision": 4, "pricePrecision": 6,
             }
         if symbol not in self._filters:
+            # 启动后新上线的币种不在全量缓存里。强制重载一次，60 秒节流，
+            # 避免频道里出现脏 symbol 时反复拉 1MB 的 exchangeInfo
+            if self._info_loaded and time.time() - self._info_reload_at > 60:
+                self._info_reload_at = time.time()
+                self._info_loaded = False
+                log.info("精度缓存里没有 %s，重新加载 exchangeInfo", symbol)
             self.load_exchange_info([symbol])
         if symbol not in self._filters:
             raise BinanceError(-1, f"交易对 {symbol} 不存在或未在合约市场上市")
@@ -605,6 +636,8 @@ class BinanceFutures:
                     "mark": float(p["markPrice"]),
                     "unrealized": float(p["unRealizedProfit"]),
                     "leverage": int(p["leverage"]),
+                    # isolated=逐仓（单仓爆仓只亏该仓保证金），cross=全仓
+                    "margin_type": str(p.get("marginType", "")).lower(),
                 })
             # 只有全量查询才写缓存（带 symbol 的只是子集）
             if not symbol:
@@ -645,7 +678,7 @@ class BinanceFutures:
 
     def set_margin_type(self, symbol: str, isolated: bool = True):
         """设置逐仓/全仓。已是该模式时币安返回 -4046，忽略即可"""
-        key = symbol.upper()
+        key = (symbol.upper(), bool(isolated))
         if key in self._mt_set:
             return {"msg": "cached"}
         try:
@@ -809,7 +842,8 @@ class BinanceFutures:
             return resp
 
         try:
-            r = self._request("POST", "/fapi/v1/algoOrder", params)
+            # urgent：保护单优先，不能因为权重预算排队等 65 秒（等于裸仓）
+            r = self._request("POST", "/fapi/v1/algoOrder", params, urgent=True)
             self._invalidate()
             return _norm(r)
         except BinanceError as e:
@@ -822,7 +856,7 @@ class BinanceFutures:
                     params.pop("positionSide", None)
                 log.warning("%s %s positionSide 被拒(-4061)，按%s模式重试",
                             symbol, kind, "双向" if self._dual_side else "单向")
-                r = self._request("POST", "/fapi/v1/algoOrder", params)
+                r = self._request("POST", "/fapi/v1/algoOrder", params, urgent=True)
                 self._invalidate()
                 return _norm(r)
             if e.code == -4116:
@@ -860,6 +894,16 @@ class BinanceFutures:
         return self._place_protection("TP", symbol, position_side, stop_price,
                                       client_order_id, working_type)
 
+    @staticmethod
+    def _algo_list(resp: Any) -> List[Dict[str, Any]]:
+        """openAlgoOrders 正常返回数组；兼容被包成 {orders/rows/data: [...]} 的情况"""
+        if isinstance(resp, dict):
+            for k in ("orders", "rows", "data"):
+                if isinstance(resp.get(k), list):
+                    return resp[k]
+            return []
+        return list(resp or [])
+
     def cancel_all(self, symbol: str) -> Any:
         """撤掉该币所有挂单：普通单批量撤，Algo 条件单（止盈止损）逐个撤。
         币安没有批量撤 algo 的端点，只能先查 openAlgoOrders 再按 algoId 删。
@@ -874,9 +918,11 @@ class BinanceFutures:
             if e.code != -2011:
                 log.warning("%s 撤普通单失败: %s", sym, e)
         try:
-            algos = self._request("GET", "/fapi/v1/openAlgoOrders", {"symbol": sym})
+            algos = self._algo_list(
+                self._request("GET", "/fapi/v1/openAlgoOrders", {"symbol": sym},
+                              urgent=True))
             n = 0
-            for a in algos or []:
+            for a in algos:
                 aid = a.get("algoId")
                 if not aid:
                     continue
@@ -897,8 +943,8 @@ class BinanceFutures:
         params = {"symbol": symbol.upper()} if symbol else {}
         orders = list(self._request("GET", "/fapi/v1/openOrders", params))
         try:
-            algos = self._request("GET", "/fapi/v1/openAlgoOrders", params)
-            for a in algos or []:
+            algos = self._algo_list(self._request("GET", "/fapi/v1/openAlgoOrders", params))
+            for a in algos:
                 orders.append({
                     "type": a.get("orderType"),
                     "stopPrice": a.get("triggerPrice"),

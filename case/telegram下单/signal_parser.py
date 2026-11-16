@@ -53,8 +53,9 @@ CLOSE_KEYS = (
 SKIP_KEYS = ("不要跟", "别跟", "勿跟", "不要追", "仅供参考", "已经过了", "已错过")
 
 SYMBOL_RE = re.compile(r"#([A-Z0-9]{2,15})")
-# 止盈：0.425-0.41-0.3925  /  止盈: 74500-73000
-TP_RE = re.compile(r"止盈\s*[：:]\s*([\d.,\-]+)")
+# 止盈：0.425-0.41-0.3925  /  止盈: 74500-73000  /  止盈：70000 71000 72000
+# 只允许行内空格（\t 和普通空格），不能用 \s —— \s 会跨行把下一行止损价吃进来
+TP_RE = re.compile(r"止盈\s*[：:]\s*([\d.,\- \t]+)")
 SL_RE = re.compile(r"止损\s*[：:]\s*([\d.,]+)")
 COMP_RE = re.compile(r"补仓\s*[：:]\s*([\d.,]+)")
 # 纯数字列表，如 "0.425-0.41-0.3925"
@@ -102,9 +103,9 @@ def _to_float(s: str) -> Optional[float]:
 
 
 def _parse_num_list(s: str) -> List[float]:
-    """'0.425-0.41-0.3925' → [0.425, 0.41, 0.3925]"""
+    """'0.425-0.41-0.3925' / '70000 71000 72000' → [0.425, 0.41, 0.3925]"""
     out = []
-    for part in re.split(r"-", s):
+    for part in re.split(r"[-\s]+", s.strip()):
         v = _to_float(part)
         if v is not None:
             out.append(v)
@@ -215,11 +216,14 @@ def parse(text: str) -> ParsedEvent:
         # 挂单 = 限价单，频道给的「分批进场：3.13-3.08」是挂单区间。
         # 市价开仓会开在当前价，可能远离区间，所以单独标记出来交给上层决定
         ev.is_limit = "挂单" in t
-        # 少数情况开仓消息里直接带了止盈止损（取最远目标 TP3）
+        # 少数情况开仓消息里直接带了止盈止损（取最远目标 TP3 挂单，
+        # 但必须保留全部目标价：后续 TP1/TP2 到达时要按 tp_all 取对应价位移损，
+        # 只存 TP3 会让 TP1 直接按 TP3 移损 → 止损过早/方向错）
         if tp_m:
             nums = _parse_num_list(tp_m.group(1))
             if nums:
                 ev.tp = nums[-1]
+                ev.tp_all = nums
         if sl_m:
             ev.sl = _to_float(sl_m.group(1))
         if comp_m:

@@ -1,0 +1,136 @@
+2026-11-16 05:30:34,515 INFO    binance_futures: 离线模式：不连接币安（回放/测试用，零 API 权重）
+2026-11-16 05:30:34,631 INFO    trader: 📥 开仓信号 GRASSUSDT short
+2026-11-16 05:30:34,634 INFO    executor: [DRY-RUN][兜底] GRASSUSDT SHORT 750.0 @~1 名义 750.00U 保证金 250.00U (3x)
+   SL 1.05 | TP 0.93 | coid=OP148f582efbf7f20e364e
+2026-11-16 05:30:34,634 INFO    notify: [无TG] [DRY-RUN][兜底] GRASSUSDT SHORT 750.0 @~1 名义 750.00U 保证金 250.00U (3x)
+   SL 1.05 | TP 0.93 | coid=OP148f582efbf7f20e364e
+2026-11-16 05:30:34,737 INFO    trader: 🔧 止盈止损齐了 GRASSUSDT → TP 0.335 / SL 0.365
+2026-11-16 05:30:34,737 INFO    executor: [DRY-RUN] amend GRASSUSDT SHORT SL 0.365 TP 0.335（entry 1）
+2026-11-16 05:30:34,738 INFO    notify: [无TG] [DRY-RUN] amend GRASSUSDT SHORT SL 0.365 TP 0.335（entry 1）
+2026-11-16 05:30:35,044 INFO    trader: 止盈止损指定 ETHUSDT 但没有待更新仓位，忽略
+2026-11-16 05:30:35,247 INFO    trader: 跳过 RAVEUSDT（信号含排除词 ['轻仓']）：#RAVE   现价空（波动大，轻仓操作）
+2026-11-16 05:30:35,350 INFO    trader: 收到止盈止损但无待更新仓位，忽略：tp=1.94 sl=2.2
+2026-11-16 05:30:35,861 INFO    trader: 收到止盈止损但无待更新仓位，忽略：tp=0.09935 sl=0.09
+2026-11-16 05:30:35,964 INFO    trader: 📥 开仓信号 DRIFTUSDT long
+2026-11-16 05:30:35,964 INFO    executor: [DRY-RUN][兜底] DRIFTUSDT LONG 750.0 @~1 名义 750.00U 保证金 250.00U (3x)
+   SL 0.95 | TP 1.07 | coid=OP4ec4d326c389f209fc73
+2026-11-16 05:30:35,964 INFO    notify: [无TG] [DRY-RUN][兜底] DRIFTUSDT LONG 750.0 @~1 名义 750.00U 保证金 250.00U (3x)
+   SL 0.95 | TP 1.07 | coid=OP4ec4d326c389f209fc73
+2026-11-16 05:30:36,069 INFO    trader: 🔧 止盈止损齐了 DRIFTUSDT → TP 0.0366 / SL 0.03312
+2026-11-16 05:30:36,069 INFO    executor: [DRY-RUN] amend DRIFTUSDT LONG SL 0.03312 TP 0.0366（entry 1）
+2026-11-16 05:30:36,069 INFO    notify: [无TG] [DRY-RUN] amend DRIFTUSDT LONG SL 0.03312 TP 0.0366（entry 1）
+2026-11-16 05:30:36,377 INFO    trader: 🎯 DRIFTUSDT 到达 TP1（最后目标），模拟止盈平仓，释放仓位槽
+2026-11-16 05:30:36,889 INFO    trader: 📥 开仓信号 DRIFTUSDT long
+2026-11-16 05:30:36,890 INFO    executor: [DRY-RUN][兜底] DRIFTUSDT LONG 750.0 @~1 名义 750.00U 保证金 250.00U (3x)
+   SL 0.95 | TP 1.07 | coid=OPee97398a3b2ae64717d2
+2026-11-16 05:30:36,890 INFO    notify: [无TG] [DRY-RUN][兜底] DRIFTUSDT LONG 750.0 @~1 名义 750.00U 保证金 250.00U (3x)
+   SL 0.95 | TP 1.07 | coid=OPee97398a3b2ae64717d2
+2026-11-16 05:30:36,996 INFO    trader: 📥 开仓信号 XAGUSDT short
+2026-11-16 05:30:36,996 ERROR   trader: 开仓失败 XAGUSDT short: 可用保证金不足（权益 500.00U，已占用 500.00U）
+2026-11-16 05:30:37,099 WARNING trader: 止盈止损无币种，最近开仓信号是 XAGUSDT，但待更新仓位是 DRIFTUSDT，无法确认归属，跳过（请手动 amend --symbol DRIFTUSDT）
+2026-11-16 05:30:37,099 INFO    notify: [无TG] ⚠️ DRIFTUSDT 收到无币种的止盈止损
+   但最近一条信号是 XAGUSDT，无法确认归属
+   已跳过。手动执行：python main.py amend --symbol DRIFTUSDT --tp <价> --sl <价>
+2026-11-16 05:30:37,203 INFO    trader: 📥 开仓信号 NOMUSDT long
+2026-11-16 05:30:37,203 ERROR   trader: 开仓失败 NOMUSDT long: 可用保证金不足（权益 500.00U，已占用 500.00U）
+2026-11-16 05:30:37,306 WARNING trader: 止盈止损无币种，最近开仓信号是 NOMUSDT，但待更新仓位是 DRIFTUSDT，无法确认归属，跳过（请手动 amend --symbol DRIFTUSDT）
+2026-11-16 05:30:37,306 INFO    notify: [无TG] ⚠️ DRIFTUSDT 收到无币种的止盈止损
+   但最近一条信号是 NOMUSDT，无法确认归属
+   已跳过。手动执行：python main.py amend --symbol DRIFTUSDT --tp <价> --sl <价>
+2026-11-16 05:30:37,407 INFO    trader: 📤 离场信号 NOMUSDT
+2026-11-16 05:30:37,407 INFO    trader: NOMUSDT 离场信号但无持仓（可能已被止盈止损单平掉）
+2026-11-16 05:30:37,715 INFO    trader: 跳过 SOLUSDT（挂单信号，市价开会偏离进场区间）：#SOLUSDT      挂单多📈  分批入场：78.3-77.2  止盈：81.6-83-85.4  止损：75
+2026-11-16 05:30:38,022 INFO    trader: 📥 开仓信号 PLXELUSDT short
+2026-11-16 05:30:38,022 ERROR   trader: 开仓失败 PLXELUSDT short: 可用保证金不足（权益 500.00U，已占用 500.00U）
+2026-11-16 05:30:38,123 WARNING trader: 止盈止损无币种，最近开仓信号是 PLXELUSDT，但待更新仓位是 DRIFTUSDT，无法确认归属，跳过（请手动 amend --symbol DRIFTUSDT）
+2026-11-16 05:30:38,123 INFO    notify: [无TG] ⚠️ DRIFTUSDT 收到无币种的止盈止损
+   但最近一条信号是 PLXELUSDT，无法确认归属
+   已跳过。手动执行：python main.py amend --symbol DRIFTUSDT --tp <价> --sl <价>
+2026-11-16 05:30:38,227 INFO    trader: 📥 开仓信号 ARCUSDT long
+2026-11-16 05:30:38,227 ERROR   trader: 开仓失败 ARCUSDT long: 可用保证金不足（权益 500.00U，已占用 500.00U）
+2026-11-16 05:30:38,330 WARNING trader: 止盈止损无币种，最近开仓信号是 ARCUSDT，但待更新仓位是 DRIFTUSDT，无法确认归属，跳过（请手动 amend --symbol DRIFTUSDT）
+2026-11-16 05:30:38,330 INFO    notify: [无TG] ⚠️ DRIFTUSDT 收到无币种的止盈止损
+   但最近一条信号是 ARCUSDT，无法确认归属
+   已跳过。手动执行：python main.py amend --symbol DRIFTUSDT --tp <价> --sl <价>
+2026-11-16 05:30:38,735 INFO    trader: 📥 开仓信号 LYNUSDT short
+2026-11-16 05:30:38,735 ERROR   trader: 开仓失败 LYNUSDT short: 可用保证金不足（权益 500.00U，已占用 500.00U）
+2026-11-16 05:30:38,839 WARNING trader: 止盈止损无币种，最近开仓信号是 LYNUSDT，但待更新仓位是 DRIFTUSDT，无法确认归属，跳过（请手动 amend --symbol DRIFTUSDT）
+2026-11-16 05:30:38,839 INFO    notify: [无TG] ⚠️ DRIFTUSDT 收到无币种的止盈止损
+   但最近一条信号是 LYNUSDT，无法确认归属
+   已跳过。手动执行：python main.py amend --symbol DRIFTUSDT --tp <价> --sl <价>
+2026-11-16 05:30:39,349 INFO    trader: 📥 开仓信号 DRIFTUSDT long
+2026-11-16 05:30:39,349 ERROR   trader: 开仓失败 DRIFTUSDT long: 可用保证金不足（权益 500.00U，已占用 500.00U）
+2026-11-16 05:30:39,453 INFO    trader: 🔧 止盈止损齐了 DRIFTUSDT → TP 0.04865 / SL 0.0414
+2026-11-16 05:30:39,453 INFO    executor: [DRY-RUN] amend DRIFTUSDT LONG SL 0.0414 TP 0.04865（entry 1）
+2026-11-16 05:30:39,453 INFO    notify: [无TG] [DRY-RUN] amend DRIFTUSDT LONG SL 0.0414 TP 0.04865（entry 1）
+2026-11-16 05:30:39,862 INFO    trader: 跳过 BTCUSDT（挂单信号，市价开会偏离进场区间）：#BTCUSDT      挂单空 📉  分批入场：75000-75500  止盈：73500-72000-70500 
+2026-11-16 05:30:40,067 INFO    trader: 跳过 FOLKSUSDT（信号含排除词 ['轻仓']）：#FOLKS   现价多（突破单，轻仓操作）
+2026-11-16 05:30:40,170 WARNING trader: 有 2 个待更新仓位且消息未带币种名，价位也无法唯一匹配，已跳过。请手动执行：python main.py amend --symbol <币种> --tp <价> --sl <价>
+2026-11-16 05:30:40,273 INFO    trader: 📥 开仓信号 ENJUSDT short
+2026-11-16 05:30:40,274 ERROR   trader: 开仓失败 ENJUSDT short: 可用保证金不足（权益 500.00U，已占用 500.00U）
+2026-11-16 05:30:40,479 WARNING trader: 有 2 个待更新仓位且消息未带币种名，价位也无法唯一匹配，已跳过。请手动执行：python main.py amend --symbol <币种> --tp <价> --sl <价>
+2026-11-16 05:30:41,291 INFO    trader: 📥 开仓信号 LYNUSDT long
+2026-11-16 05:30:41,291 ERROR   trader: 开仓失败 LYNUSDT long: 可用保证金不足（权益 500.00U，已占用 500.00U）
+2026-11-16 05:30:41,392 WARNING trader: 有 2 个待更新仓位且消息未带币种名，价位也无法唯一匹配，已跳过。请手动执行：python main.py amend --symbol <币种> --tp <价> --sl <价>
+2026-11-16 05:30:42,421 INFO    trader: 止盈止损指定 ETHUSDT 但没有待更新仓位，忽略
+2026-11-16 05:30:42,727 INFO    trader: 📥 开仓信号 BASEDUSDT long
+2026-11-16 05:30:42,727 ERROR   trader: 开仓失败 BASEDUSDT long: 可用保证金不足（权益 500.00U，已占用 500.00U）
+2026-11-16 05:30:42,932 WARNING trader: 有 2 个待更新仓位且消息未带币种名，价位也无法唯一匹配，已跳过。请手动执行：python main.py amend --symbol <币种> --tp <价> --sl <价>
+2026-11-16 05:30:43,234 INFO    trader: 📥 开仓信号 SOONUSDT short
+2026-11-16 05:30:43,234 ERROR   trader: 开仓失败 SOONUSDT short: 可用保证金不足（权益 500.00U，已占用 500.00U）
+2026-11-16 05:30:43,335 WARNING trader: 有 2 个待更新仓位且消息未带币种名，价位也无法唯一匹配，已跳过。请手动执行：python main.py amend --symbol <币种> --tp <价> --sl <价>
+2026-11-16 05:30:43,949 INFO    trader: 📥 开仓信号 LABUSDT short
+2026-11-16 05:30:43,949 ERROR   trader: 开仓失败 LABUSDT short: 可用保证金不足（权益 500.00U，已占用 500.00U）
+2026-11-16 05:30:44,050 WARNING trader: 有 2 个待更新仓位且消息未带币种名，价位也无法唯一匹配，已跳过。请手动执行：python main.py amend --symbol <币种> --tp <价> --sl <价>
+2026-11-16 05:30:44,459 INFO    trader: 📥 开仓信号 NOMUSDT long
+2026-11-16 05:30:44,459 ERROR   trader: 开仓失败 NOMUSDT long: 可用保证金不足（权益 500.00U，已占用 500.00U）
+2026-11-16 05:30:44,562 WARNING trader: 有 2 个待更新仓位且消息未带币种名，价位也无法唯一匹配，已跳过。请手动执行：python main.py amend --symbol <币种> --tp <价> --sl <价>
+2026-11-16 05:30:44,663 INFO    trader: 跳过 REQUSDT（信号含排除词 ['轻仓']）：#REQ   现价空（波动大，轻仓操作）
+2026-11-16 05:30:45,272 INFO    trader: 📥 开仓信号 MOVEUSDT long
+2026-11-16 05:30:45,272 ERROR   trader: 开仓失败 MOVEUSDT long: 可用保证金不足（权益 500.00U，已占用 500.00U）
+2026-11-16 05:30:45,376 WARNING trader: 有 2 个待更新仓位且消息未带币种名，价位也无法唯一匹配，已跳过。请手动执行：python main.py amend --symbol <币种> --tp <价> --sl <价>
+2026-11-16 05:30:45,781 INFO    trader: 📥 开仓信号 LYNUSDT long
+2026-11-16 05:30:45,782 ERROR   trader: 开仓失败 LYNUSDT long: 可用保证金不足（权益 500.00U，已占用 500.00U）
+2026-11-16 05:30:45,884 WARNING trader: 有 2 个待更新仓位且消息未带币种名，价位也无法唯一匹配，已跳过。请手动执行：python main.py amend --symbol <币种> --tp <价> --sl <价>
+2026-11-16 05:30:46,496 INFO    trader: 📥 开仓信号 CHZUSDT long
+2026-11-16 05:30:46,496 ERROR   trader: 开仓失败 CHZUSDT long: 可用保证金不足（权益 500.00U，已占用 500.00U）
+2026-11-16 05:30:46,598 WARNING trader: 有 2 个待更新仓位且消息未带币种名，价位也无法唯一匹配，已跳过。请手动执行：python main.py amend --symbol <币种> --tp <价> --sl <价>
+2026-11-16 05:30:46,901 INFO    trader: 止盈止损指定 BTCUSDT 但没有待更新仓位，忽略
+2026-11-16 05:30:47,208 INFO    trader: 📥 开仓信号 GUNUSDT long
+2026-11-16 05:30:47,208 ERROR   trader: 开仓失败 GUNUSDT long: 可用保证金不足（权益 500.00U，已占用 500.00U）
+2026-11-16 05:30:47,311 INFO    trader: 📥 开仓信号 LYNUSDT long
+2026-11-16 05:30:47,311 ERROR   trader: 开仓失败 LYNUSDT long: 可用保证金不足（权益 500.00U，已占用 500.00U）
+2026-11-16 05:30:47,414 WARNING trader: 有 2 个待更新仓位且消息未带币种名，价位也无法唯一匹配，已跳过。请手动执行：python main.py amend --symbol <币种> --tp <价> --sl <价>
+2026-11-16 05:30:47,516 WARNING trader: 有 2 个待更新仓位且消息未带币种名，价位也无法唯一匹配，已跳过。请手动执行：python main.py amend --symbol <币种> --tp <价> --sl <价>
+2026-11-16 05:30:47,718 INFO    trader: 📥 开仓信号 BLUAIUSDT short
+2026-11-16 05:30:47,719 ERROR   trader: 开仓失败 BLUAIUSDT short: 可用保证金不足（权益 500.00U，已占用 500.00U）
+2026-11-16 05:30:47,822 WARNING trader: 有 2 个待更新仓位且消息未带币种名，价位也无法唯一匹配，已跳过。请手动执行：python main.py amend --symbol <币种> --tp <价> --sl <价>
+2026-11-16 05:30:48,332 INFO    trader: 跳过 BASEDUSDT（信号含排除词 ['轻仓']）：#BASED    现价空 （波动大，轻仓操作即可）
+2026-11-16 05:30:48,435 WARNING trader: 有 2 个待更新仓位且消息未带币种名，价位也无法唯一匹配，已跳过。请手动执行：python main.py amend --symbol <币种> --tp <价> --sl <价>
+2026-11-16 05:30:49,661 INFO    trader: 📥 开仓信号 DRIFTUSDT long
+2026-11-16 05:30:49,661 ERROR   trader: 开仓失败 DRIFTUSDT long: 可用保证金不足（权益 500.00U，已占用 500.00U）
+2026-11-16 05:30:49,764 WARNING trader: 有 2 个待更新仓位且消息未带币种名，价位也无法唯一匹配，已跳过。请手动执行：python main.py amend --symbol <币种> --tp <价> --sl <价>
+2026-11-16 05:30:49,967 INFO    trader: 跳过 METUSDT（信号含排除词 ['轻仓']）：#MET    现价空（波动大，轻仓操作）
+2026-11-16 05:30:50,068 WARNING trader: 有 2 个待更新仓位且消息未带币种名，价位也无法唯一匹配，已跳过。请手动执行：python main.py amend --symbol <币种> --tp <价> --sl <价>
+2026-11-16 05:30:50,677 INFO    trader: 📥 开仓信号 ETHUSDT long
+2026-11-16 05:30:50,677 ERROR   trader: 开仓失败 ETHUSDT long: 可用保证金不足（权益 500.00U，已占用 500.00U）
+2026-11-16 05:30:50,781 WARNING trader: 有 2 个待更新仓位且消息未带币种名，价位也无法唯一匹配，已跳过。请手动执行：python main.py amend --symbol <币种> --tp <价> --sl <价>
+2026-11-16 05:30:51,295 INFO    trader: 📥 开仓信号 MAGMAUSDT short
+2026-11-16 05:30:51,295 ERROR   trader: 开仓失败 MAGMAUSDT short: 可用保证金不足（权益 500.00U，已占用 500.00U）
+2026-11-16 05:30:51,397 WARNING trader: 有 2 个待更新仓位且消息未带币种名，价位也无法唯一匹配，已跳过。请手动执行：python main.py amend --symbol <币种> --tp <价> --sl <价>
+2026-11-16 05:30:51,904 INFO    trader: 跳过 XNYUSDT（信号含排除词 ['轻仓']）：#XNY    现价空（日线压力博弈，轻仓操作即可）
+2026-11-16 05:30:52,005 WARNING trader: 有 2 个待更新仓位且消息未带币种名，价位也无法唯一匹配，已跳过。请手动执行：python main.py amend --symbol <币种> --tp <价> --sl <价>
+2026-11-16 05:30:53,131 INFO    trader: 📥 开仓信号 CHIPUSDT short
+2026-11-16 05:30:53,131 ERROR   trader: 开仓失败 CHIPUSDT short: 可用保证金不足（权益 500.00U，已占用 500.00U）
+2026-11-16 05:30:53,233 WARNING trader: 有 2 个待更新仓位且消息未带币种名，价位也无法唯一匹配，已跳过。请手动执行：python main.py amend --symbol <币种> --tp <价> --sl <价>
+2026-11-16 05:30:53,848 INFO    trader: 止盈止损指定 CLUSDT 但没有待更新仓位，忽略
+2026-11-16 05:30:54,051 INFO    trader: 📥 开仓信号 BSBUSDT short
+2026-11-16 05:30:54,052 ERROR   trader: 开仓失败 BSBUSDT short: 可用保证金不足（权益 500.00U，已占用 500.00U）
+2026-11-16 05:30:54,154 WARNING trader: 有 2 个待更新仓位且消息未带币种名，价位也无法唯一匹配，已跳过。请手动执行：python main.py amend --symbol <币种> --tp <价> --sl <价>
+2026-11-16 05:30:54,361 INFO    trader: 📥 开仓信号 NOMUSDT long
+2026-11-16 05:30:54,361 ERROR   trader: 开仓失败 NOMUSDT long: 可用保证金不足（权益 500.00U，已占用 500.00U）
+2026-11-16 05:30:54,464 WARNING trader: 有 2 个待更新仓位且消息未带币种名，价位也无法唯一匹配，已跳过。请手动执行：python main.py amend --symbol <币种> --tp <价> --sl <价>
+2026-11-16 05:30:54,666 INFO    trader: 止盈止损指定 BTCUSDT 但没有待更新仓位，忽略
+2026-11-16 11:49:59,146 INFO    tg_listener: 使用代理 127.0.0.1:7897 (http)
+2026-11-16 11:49:59,172 INFO    health: 心跳服务监听 :8080/health
+2026-11-16 11:49:59,173 INFO    tg_listener: 连接 Telegram...

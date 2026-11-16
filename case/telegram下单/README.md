@@ -37,6 +37,7 @@ chmod +x deploy/start_linux.sh
 | **幂等下单** | `clientOrderId` 由信号内容哈希生成。同一个信号重复执行不会重复开仓，网络超时重试也安全 |
 | **条件单止盈止损** | 交易所端 `STOP_MARKET` / `TAKE_PROFIT_MARKET`，机器挂了止损依然生效 |
 | **裸仓保护** | 条件单挂失败会立刻市价平仓，绝不留无保护的仓位 |
+| **逐仓隔离** | 每次开仓前强制设 `ISOLATED`（逐仓）：单仓爆仓最多亏该仓保证金，不牵连其他仓位。已有持仓/挂单时改不了，会拒绝开仓并提示先平仓 |
 | **滚仓基于真实权益** | 每笔都重新读账户余额算仓位，不依赖内存变量，进程重启不跑偏 |
 | **精度自适应** | 自动读 `exchangeInfo` 的 `stepSize` / `tickSize`，避免 `-1111` 精度错误 |
 | **风控熔断** | 单笔上限、持仓数上限、日亏上限、连亏熔断 |
@@ -294,6 +295,21 @@ python signal_parser.py        # 单测解析规则
 python trader.py --replay 历史消息.txt --limit 30
 ```
 
+**回放的时间与平仓（重要）**：历史文件没有时间戳，回放用**虚拟时钟**按
+`--msg-interval`（默认 60 秒/条）推进，避免把几天消息压缩成几秒导致 30 秒冷却误触发：
+
+```bash
+python trader.py --replay 历史消息.txt --limit 200 --msg-interval 60
+```
+
+回放还**不模拟价格涨跌**，所以：
+- 仓位不会因价格触及止盈止损而自动平仓（只有到 TP3 才模拟平仓释放仓位槽）
+- 开仓信号自带止盈止损的很少，多数是「先开仓、后补」，回放里这些兜底仓位不会自动平
+- 结果就是开满 2 仓后新信号被「保证金不足」拒绝——**这是回放局限，不是 bug**
+
+要看「真实能吃到多少单」，用滚仓模拟（按真实开/平顺序）：
+`python roll_simulation.py`（工作区），它会报「实际成交 / 跳过」。
+
 回放会把历史消息按顺序喂给解析器和下单逻辑，`dry_run` 下只打印。正常输出：
 
 ```
@@ -327,6 +343,38 @@ python trader.py --live
 # 2. 换主网 API key
 python trader.py --live
 ```
+
+### session 被作废（AuthKeyDuplicatedError）怎么恢复
+
+如果日志出现：
+
+```
+telethon.errors.rpcerrorlist.AuthKeyDuplicatedError: The authorization key
+(session file) was used under two different IP addresses simultaneously
+```
+
+**不是代码 bug，是 Telegram 把这份 session 永久作废了**。原因只有两种：
+
+1. 同一份 `.session` 被两台机器/两个进程同时使用；
+2. 代理节点自动切换，出口 IP 变了，Telegram 认为同一 key 在两个 IP 上使用。
+
+旧 session 不能再用，必须重新登录：
+
+```bash
+# 1. 先停掉所有在跑的 trader.py（两台机器都要停）
+#    Windows: tasklist | findstr python
+# 2. 运行重新登录脚本（旧文件会自动改名成 .session.bak，不会删）
+python tg_login.py
+#    按提示输入手机号 → Telegram 验证码 → 两步验证密码（如有）
+# 3. 重新启动
+python trader.py
+```
+
+要点：
+- 同一份 session **只能一个进程/一台机器**用。两台机器都要跑，就各登录一次，
+  `.env.bot` 里用不同的 `TG_SESSION`（如 `tg_session_a` / `tg_session_b`）。
+- 代理固定一个节点，不要用「自动切换/负载均衡」；能直连就直连。
+- 旧 `.session.bak` 不要再拷回来用，它已经失效。
 
 ### 信号匹配逻辑（重要）
 
@@ -542,6 +590,9 @@ cd /root/bot
 ```
 
 这一步会生成 `tg_session.session`，之后就不用再登录了。
+
+> 也可以直接跑 `./venv/bin/python tg_login.py`，它只做登录、不会启动监听，更适合在 VPS 上单独操作。
+> 如果报 `AuthKeyDuplicatedError`（session 被 Telegram 作废），同样用它重新登录，见上文「session 被作废怎么恢复」。
 
 ### 启动服务
 

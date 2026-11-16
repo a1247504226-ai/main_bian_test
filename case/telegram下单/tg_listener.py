@@ -27,6 +27,36 @@ except ImportError:
     TelegramClient = None
 
 
+class SessionInvalidError(RuntimeError):
+    """Telegram 登录态被服务端作废（session 不能再用了，必须重新登录）"""
+
+
+# Telethon 不同版本类名略有差异，按类名判断最稳
+_DEAD_SESSION_ERRORS = {
+    "AuthKeyDuplicatedError", "AuthKeyUnregisteredError", "AuthKeyInvalidError",
+    "SessionRevokedError", "SessionExpiredError",
+}
+
+
+def is_dead_session(exc: BaseException) -> bool:
+    return type(exc).__name__ in _DEAD_SESSION_ERRORS
+
+
+def session_invalid_hint(session_path: str) -> str:
+    name = session_path if session_path.endswith(".session") else session_path + ".session"
+    return (
+        "Telegram 登录态已被服务端作废，程序收不到消息、也不会下单。\n"
+        "原因：同一份 session 文件在两个不同 IP 上同时使用过\n"
+        "（常见：两台机器共用同一个 .session，或代理节点切换导致出口 IP 变化）。\n"
+        "修复步骤：\n"
+        "  1) 停掉所有正在运行本程序的机器/进程（同一 session 只能一个进程用）\n"
+        f"  2) 旧文件 {name} 已永久失效，先改名成 {name}.bak\n"
+        "  3) 在运行机上执行：python tg_login.py\n"
+        "     按提示输入手机号 → Telegram 验证码 → 两步验证密码（如有）\n"
+        "  4) 重新启动 trader.py；只在一台机器跑，代理节点固定不要自动切换"
+    )
+
+
 def resolve_channel(ch):
     """频道标识归一化
 
@@ -137,8 +167,17 @@ class TgListener:
         except SessionPasswordNeededError:
             log.error("账号开启了两步验证，请在终端手动输入密码")
             raise
+        except Exception as e:
+            if is_dead_session(e):
+                raise SessionInvalidError(session_invalid_hint(self.session_path)) from e
+            raise
 
-        me = await self.client.get_me()
+        try:
+            me = await self.client.get_me()
+        except Exception as e:
+            if is_dead_session(e):
+                raise SessionInvalidError(session_invalid_hint(self.session_path)) from e
+            raise
         log.info("已登录：%s (@%s)", me.first_name, me.username or "-")
 
         # session 文件等价于账号登录态，权限收紧到 600（Windows 上无效，忽略）
@@ -217,6 +256,12 @@ class TgListener:
         log.info("监听已启动，等待消息...（Ctrl+C 退出）")
         try:
             await self.client.run_until_disconnected()
+        except Exception as e:
+            # AuthKeyDuplicated：Telegram 认为同一 session 在两个 IP 上使用，
+            # 直接把 auth key 作废。旧 session 永久失效，只能重新登录。
+            if is_dead_session(e):
+                raise SessionInvalidError(session_invalid_hint(self.session_path)) from e
+            raise
         finally:
             self._save_seen()
             log.info("去重记录已保存，共 %d 条", len(self._seen))

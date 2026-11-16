@@ -1,0 +1,4 @@
+2026-11-15 00:13:57,289 INFO    tg_listener: 消息 #4833 正文变更（CLOSE），重新解析
+2026-11-15 00:13:57,290 INFO    trader: 📤 离场信号 IDOLUSDT
+2026-11-15 00:13:58,500 INFO    binance_futures: 时间同步完成，偏移 54 ms
+2026-11-15 00:13:59,776 INFO    trader: IDOLUSDT 离场信号但无持仓（可能已被止盈止损单平掉）

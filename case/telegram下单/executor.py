@@ -508,7 +508,20 @@ class Executor:
                 return OrderResult(False, sym, direction,
                                    error=f"开仓前无法清理历史挂单: {e}")
 
-            self.c.set_margin_type(sym, isolated=True)
+            # 逐仓：每个仓位独立保证金，单仓爆仓最多亏掉该仓保证金，不牵连其他仓位
+            try:
+                self.c.set_margin_type(sym, isolated=True)
+            except BinanceError as e:
+                # -4048 有持仓 / -4047 有挂单 时币安不允许改保证金模式
+                if e.code in (-4048, -4047):
+                    log.error("%s 无法切换逐仓（%s）", sym, e)
+                    self._alert(
+                        f"⚠️ {sym} 已有持仓/挂单，无法切换成逐仓，已放弃开仓\n"
+                        f"   原因：{e}\n"
+                        f"   处理：先平掉该币仓位或撤掉挂单，下次开仓会自动设逐仓")
+                    return OrderResult(False, sym, direction,
+                                       error=f"无法切换逐仓（有持仓/挂单）: {e}")
+                raise
             self.c.set_leverage(sym, sig.leverage)
 
             order = self.c.market_order(sym, side, qty, coid_open)
