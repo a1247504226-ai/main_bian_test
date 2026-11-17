@@ -131,6 +131,3 @@
 2026-11-16 05:30:54,361 ERROR   trader: 开仓失败 NOMUSDT long: 可用保证金不足（权益 500.00U，已占用 500.00U）
 2026-11-16 05:30:54,464 WARNING trader: 有 2 个待更新仓位且消息未带币种名，价位也无法唯一匹配，已跳过。请手动执行：python main.py amend --symbol <币种> --tp <价> --sl <价>
 2026-11-16 05:30:54,666 INFO    trader: 止盈止损指定 BTCUSDT 但没有待更新仓位，忽略
-2026-11-16 11:49:59,146 INFO    tg_listener: 使用代理 127.0.0.1:7897 (http)
-2026-11-16 11:49:59,172 INFO    health: 心跳服务监听 :8080/health
-2026-11-16 11:49:59,173 INFO    tg_listener: 连接 Telegram...

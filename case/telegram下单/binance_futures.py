@@ -938,8 +938,14 @@ class BinanceFutures:
         self._invalidate()
         return out
 
-    def get_open_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
-        """返回普通挂单 + Algo 条件单，字段统一成 type / stopPrice 方便调用方读取。"""
+    def get_open_orders(self, symbol: Optional[str] = None,
+                        strict: bool = False) -> List[Dict[str, Any]]:
+        """返回普通挂单 + Algo 条件单，字段统一成 type / stopPrice 方便调用方读取。
+
+        strict=True 时 algo 查询失败会抛异常：改单/开仓前的「撤单是否干净」必须
+        区分「确实没有挂单」和「查询失败」，否则会把查询失败误判成已撤干净，
+        挂出第二张止损单。
+        """
         params = {"symbol": symbol.upper()} if symbol else {}
         orders = list(self._request("GET", "/fapi/v1/openOrders", params))
         try:
@@ -955,6 +961,8 @@ class BinanceFutures:
                     "algo": True,
                 })
         except BinanceError as e:
+            if strict:
+                raise
             log.debug("查询 algo 挂单失败: %s", e)
         return orders
 

@@ -350,12 +350,12 @@ class Trader:
                         "止盈止损无币种，最近开仓信号是 %s，但待更新仓位是 %s，"
                         "无法确认归属，跳过（请手动 amend --symbol %s）",
                         self._last_open_sym, target, target)
-                    if self.notify:
-                        self.notify(
-                            f"⚠️ {target} 收到无币种的止盈止损\n"
-                            f"   但最近一条信号是 {self._last_open_sym}，无法确认归属\n"
-                            f"   已跳过。手动执行：python main.py amend "
-                            f"--symbol {target} --tp <价> --sl <价>")
+                    self.ex._critical(
+                        f"⚠️ {target} 收到无币种的止盈止损\n"
+                        f"   但最近一条信号是 {self._last_open_sym}，无法确认归属\n"
+                        f"   已跳过。手动执行：python main.py amend "
+                        f"--symbol {target} --tp <价> --sl <价>",
+                        key=f"tpsl_owner_{target}")
                     self.stats["ignore"] += 1
                     return
                 gap = self._now() - self._last_open_ts
@@ -368,6 +368,11 @@ class Trader:
                 log.warning("有 %d 个待更新仓位且消息未带币种名，价位也无法唯一匹配，"
                             "已跳过。请手动执行：python main.py amend --symbol <币种> "
                             "--tp <价> --sl <价>", len(pending))
+                self.ex._critical(
+                    f"⚠️ 收到无币种止盈止损，但有 {len(pending)} 个待更新仓位，"
+                    f"价位无法唯一匹配，已跳过\n"
+                    f"   请手动执行：python main.py amend --symbol <币种> --tp <价> --sl <价>",
+                    key="tpsl_ambiguous")
                 self.stats["ignore"] += 1
                 return
         if not target:
@@ -383,9 +388,21 @@ class Trader:
             return
 
         log.info("🔧 止盈止损齐了 %s → TP %s / SL %s", target, done["tp"], done["sl"])
-        r = await asyncio.to_thread(
-            self.ex.amend_protection, target,
-            done["tp"], done["sl"], done.get("tp_all") or [])
+        try:
+            r = await asyncio.to_thread(
+                self.ex.amend_protection, target,
+                done["tp"], done["sl"], done.get("tp_all") or [])
+        except Exception as e:
+            # amend 内部抛异常（网络/币安错误）时，这条止盈止损不能丢：
+            # 放回缓存让巡检重试，否则仓位会一直停在旧保护上
+            log.exception("%s 止盈止损改单异常: %s", target, e)
+            self.stats["fail"] += 1
+            self.buf.restore(target, done["tp"], done["sl"], done.get("tp_all"))
+            self.ex._critical(
+                f"⚠️ {target} 止盈止损改单异常：{e}\n"
+                f"   已放回重试队列，当前仍是旧保护",
+                key=f"amend_err_{target}")
+            return
         if r.ok:
             self.stats["amend"] += 1
         else:
@@ -399,9 +416,10 @@ class Trader:
             if permanent:
                 log.warning("%s 止盈止损改单失败（不可重试）：%s，已放弃",
                             target, r.error)
-                if self.notify:
-                    self.notify(f"⚠️ {target} 止盈止损改单被拒\n   {r.error}\n"
-                                f"   当前仍是兜底保护，请手动检查")
+                self.ex._critical(
+                    f"⚠️ {target} 止盈止损改单被拒\n   {r.error}\n"
+                    f"   当前仍是兜底保护，请手动检查",
+                    key=f"amend_reject_{target}")
             else:
                 # 临时失败：放回缓存由巡检重试，否则频道不重发就永远卡在兜底止损上
                 self.buf.restore(target, done["tp"], done["sl"],
@@ -424,6 +442,10 @@ class Trader:
         if not tp_all or ev.level > len(tp_all):
             log.warning("%s 收到 TP%d 通知但目标价不全 %s，忽略",
                         sym, ev.level, tp_all)
+            self.ex._critical(
+                f"⚠️ {sym} 收到 TP{ev.level} 通知，但目标价清单不全 {tp_all or '空'}\n"
+                f"   本次移动止损已跳过，请手动确认止损位置",
+                key=f"trail_notarget_{sym}")
             self.stats["skip"] += 1
             return
 
@@ -470,18 +492,57 @@ class Trader:
                 log.warning("%s TP%d 价位异常：目标 %.6g，入场 %.6g，"
                             "算出的止损 %.6g 超出 ±50%% 边界，跳过移动止损",
                             sym, ev.level, target, entry, new_sl)
-                if self.notify:
-                    self.notify(f"⚠️ {sym} TP{ev.level} 价位异常\n"
-                                f"   目标价 {target:.6g}，入场 {entry:.6g}\n"
-                                f"   算出的止损 {new_sl:.6g} 超出 ±50%，已跳过\n"
-                                f"   当前仍是旧止损 {cur_sl}")
+                self.ex._critical(
+                    f"⚠️ {sym} TP{ev.level} 价位异常\n"
+                    f"   目标价 {target:.6g}，入场 {entry:.6g}\n"
+                    f"   算出的止损 {new_sl:.6g} 超出 ±50%，已跳过\n"
+                    f"   当前仍是旧止损 {cur_sl}",
+                    key=f"trail_bad_{sym}")
                 self.stats["ignore"] += 1
+                return
+
+        # 现价预检：TP 通知到达时价格可能尚未跌到目标、或已反弹穿越移损位。
+        # 此时新止损会落在现价的错误一侧，币安必报 -2021 Order would immediately
+        # trigger，而 amend 已经撤掉旧单 → 只能回滚 → 白烧权重且留裸仓窗口。
+        # 真实现价不在目标一侧时，移损没有意义，直接跳过、保留现有保护。
+        # dry-run/回放没有真实价格波动，跳过此检查（否则会误伤回放统计）。
+        if not self.ex.dry_run:
+            try:
+                mark_now = self.ex.c.get_mark_price(sym)
+                wrong_side = ((direction == "short" and new_sl <= mark_now) or
+                              (direction != "short" and new_sl >= mark_now))
+                if mark_now > 0 and wrong_side:
+                    log.info("%s TP%d 新止损 %.8g 在现价 %.8g 的错误一侧，"
+                             "价格未到目标/已反弹，跳过移损（保留当前止损 %.8g）",
+                             sym, ev.level, new_sl, mark_now, cur_sl)
+                    self.ex._critical(
+                        f"⚠️ {sym} TP{ev.level} 移动止损已跳过\n"
+                        f"   新止损 {new_sl:.8g} 落在现价 {mark_now:.8g} 的错误一侧，"
+                        f"说明价格未到目标或已反弹\n"
+                        f"   当前止损 {cur_sl} 保持不变，仓位仍有保护",
+                        key=f"trail_side_{sym}")
+                    self.stats["skip"] += 1
+                    return
+            except Exception as e:
+                log.warning("%s TP%d 取现价失败，跳过本次移损: %s", sym, ev.level, e)
+                self.stats["skip"] += 1
                 return
 
         log.info("🎯 %s 到达 TP%d(%.8g)，止损上移到 %.8g，继续持有博 TP3(%.8g)",
                  sym, ev.level, target, new_sl, tp3)
-        r = await asyncio.to_thread(
-            self.ex.amend_protection, sym, tp3, new_sl, tp_all, True)
+        try:
+            r = await asyncio.to_thread(
+                self.ex.amend_protection, sym, tp3, new_sl, tp_all, True)
+        except Exception as e:
+            # 移动止损抛异常也要重试，否则止损永远停在旧位置
+            log.exception("%s TP%d 移动止损异常: %s", sym, ev.level, e)
+            self.stats["fail"] += 1
+            self.buf.restore(sym, tp3, new_sl, tp_all, relaxed=True)
+            self.ex._critical(
+                f"⚠️ {sym} TP{ev.level} 移动止损异常：{e}\n"
+                f"   已放回重试队列，当前止损仍在旧位置",
+                key=f"trail_err_{sym}")
+            return
         if r.ok:
             self.stats["trail"] += 1
         else:
@@ -503,6 +564,10 @@ class Trader:
         else:
             self.stats["fail"] += 1
             log.error("离场失败 %s: %s", ev.symbol, r.error)
+            # 平仓失败 = 仓位可能还在，必须邮件告警
+            self.ex._critical(
+                f"❌ 离场失败 {ev.symbol}: {r.error}\n   仓位可能仍在，请手动检查",
+                key=f"close_{ev.symbol}")
 
     # ---------------- 定时巡检 ----------------
     async def housekeeping(self):
@@ -521,17 +586,18 @@ class Trader:
                 for sym, part in self.buf.flush_expired(now):
                     if sym not in self._warned:
                         self._warned.add(sym)
-                        if self.notify:
-                            self.notify(
-                                f"⚠️ {sym} 止盈止损只收到一半（tp={part['tp']} sl={part['sl']}），"
-                                f"超过 {self.cfg.tpsl_ttl_sec} 秒未补齐，请手动检查")
+                        self.ex._critical(
+                            f"⚠️ {sym} 止盈止损只收到一半（tp={part['tp']} sl={part['sl']}），"
+                            f"超过 {self.cfg.tpsl_ttl_sec} 秒未补齐，请手动检查",
+                            key=f"tpsl_half_{sym}")
                 # 长时间未更新的仓位（每个 symbol 只告警一次，避免每 15 秒刷屏）
                 for sym in self.ex.pending.stale(10):
                     if sym not in self._warned:
                         self._warned.add(sym)
-                        if self.notify:
-                            self.notify(f"⚠️ {sym} 开仓后超过 10 分钟仍未收到真实止盈止损，"
-                                        f"当前只有兜底保护，请检查频道消息")
+                        self.ex._critical(
+                            f"⚠️ {sym} 开仓后超过 10 分钟仍未收到真实止盈止损，"
+                            f"当前只有兜底保护，请检查频道消息",
+                            key=f"tpsl_stale_{sym}")
                 # 重试之前失败的 amend（最多 3 次，超过就告警放弃）
                 # 每轮最多处理 3 个符号：amend 一次 ≈ 14 权重，
                 # 几十个符号同时重试会把 2400/分钟 打爆（418 的来源）
@@ -545,9 +611,10 @@ class Trader:
                         continue
                     if data.get("retry", 0) > 3:
                         self.buf.drop(sym)
-                        if self.notify:
-                            self.notify(f"❌ {sym} 止盈止损改单连续失败 3 次，"
-                                        f"当前仍是兜底保护，请手动执行 amend")
+                        self.ex._critical(
+                            f"❌ {sym} 止盈止损改单连续失败 3 次，"
+                            f"当前仍是兜底保护，请手动执行 amend",
+                            key=f"amend_retry_{sym}")
                         continue
                     log.info("重试 amend %s (第 %d 次)", sym, data.get("retry", 0))
                     # 必须带 tp_all 和 relaxed：

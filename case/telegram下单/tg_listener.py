@@ -80,8 +80,14 @@ def build_proxy(proxy_url: str):
     u = urlparse(proxy_url.strip())
     if not u.hostname:
         return None
+    scheme = (u.scheme or "http").lower()
+    # socks5h/socks4a 统一成 python-socks 认的名字
+    if scheme.startswith("socks5"):
+        scheme = "socks5"
+    elif scheme.startswith("socks4"):
+        scheme = "socks4"
     return {
-        "proxy_type": (u.scheme or "http").lower(),
+        "proxy_type": scheme,
         "addr": u.hostname,
         "port": u.port or 7897,
     }

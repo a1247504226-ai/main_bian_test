@@ -239,6 +239,8 @@ class Executor:
         self.mailer = mailer
         self.pending = PendingStore(os.path.join(state_dir, "pending_protection.json"))
         self.dry = DryPositionStore(os.path.join(state_dir, "dry_positions.json"))
+        # 告警邮件限流：同类失败 60 秒最多一封，避免币安抽风时刷爆邮箱
+        self._mail_at: Dict[str, float] = {}
 
     # ------------------------------------------------------------------
     def _alert(self, text: str):
@@ -248,6 +250,44 @@ class Executor:
                 self.notify(text)
             except Exception as e:
                 log.warning("告警发送失败: %s", e)
+
+    def _critical(self, text: str, key: str = ""):
+        """关键失败（保护单/改单/平仓/撤单）：日志 + TG + 邮件。
+
+        和 _alert 的区别：_alert 只用于「没开成仓、不影响已有仓位」的提示；
+        凡是「已经有仓位、但保护或平仓出问题」的，一律走这里发邮件，
+        否则机器人在无人值守时裸仓/平不掉都没人知道。
+
+        邮件是异步入队，发送失败只记日志，不影响交易主流程；
+        同类告警 60 秒限流，避免一次故障刷几十封。
+        """
+        log.error("%s", text.replace("\n", " | "))
+        if self.notify:
+            try:
+                self.notify(text)
+            except Exception as e:
+                log.warning("告警发送失败: %s", e)
+        if self.dry_run:
+            return          # 模拟盘/回放不发告警邮件，避免测试时刷屏
+        if not self.mailer or not getattr(self.mailer, "enabled", False):
+            return
+        now = time.time()
+        k = key or text.splitlines()[0][:40]
+        if now - self._mail_at.get(k, 0.0) < 60:
+            log.debug("同类告警邮件 60 秒内已发过，跳过: %s", k)
+            return
+        self._mail_at[k] = now
+        subject = "【交易机器人告警】" + text.splitlines()[0][:50]
+        body = (
+            f"时间：{datetime.now():%Y-%m-%d %H:%M:%S}\n"
+            f"环境：{'DRY-RUN' if self.dry_run else 'LIVE'}\n\n"
+            f"{text}\n\n"
+            f"—— 交易机器人自动告警，请尽快检查仓位和挂单"
+        )
+        try:
+            self.mailer.send(subject, body)
+        except Exception as e:
+            log.error("告警邮件入队失败: %s", e)
 
     def _notify_open(self, sym, direction, qty, avg, notional, margin,
                      sl, tp, lev, provisional):
@@ -367,11 +407,21 @@ class Executor:
             for p_ in positions:
                 lv = max(1, int(p_.get("leverage", 1)))
                 used_margin += abs(p_["amount"] * p_["mark"]) / lv
-            avail = equity - used_margin
+
+            # 可用保证金：优先用币安返回的真实 availableBalance，而不是
+            # equity - 估算占用。原因：
+            #  1) 全仓仓位、挂单冻结、未实现盈亏都会影响真实可用额度，估算必然有偏差；
+            #  2) 实测估算 1325.41U vs 真实 1324.83U，按估算下调后仍超 0.58U，
+            #     币安直接 -2019 Margin is insufficient 拒单，主网同样会踩。
+            # 留 1% 安全垫，避免四舍五入/手续费/未实现盈亏波动导致刚好超限。
+            # dry-run 时虚拟仓位不在币安真实余额里，仍用「权益-估算占用」才能验证多仓限制
+            real_avail = bal.get("available") if not self.dry_run else None
+            avail = float(real_avail) if real_avail is not None else (equity - used_margin)
+            avail = max(0.0, avail * 0.99)
             if avail <= 0:
                 return OrderResult(False, sym, direction,
                                    error=f"可用保证金不足（权益 {equity:.2f}U，"
-                                         f"已占用 {used_margin:.2f}U）")
+                                         f"可用 {avail:.2f}U，已占用估算 {used_margin:.2f}U）")
             if margin > avail:
                 # 可用额度不到目标一半时直接拒绝：
                 # 硬开出来的仓位会远小于预期，还可能低于最小下单量
@@ -381,8 +431,10 @@ class Executor:
                                        error=f"可用保证金不足（权益 {equity:.2f}U，"
                                              f"已占用 {used_margin:.2f}U，可用 {avail:.2f}U，"
                                              f"目标 {margin:.2f}U）")
-                log.info("%s 保证金按可用额度下调 %.2fU → %.2fU（已占用 %.2fU）",
-                         sym, margin, avail, used_margin)
+                log.info("%s 保证金按可用额度下调 %.2fU → %.2fU（权益 %.2fU，"
+                         "币安可用 %.2fU，已占用估算 %.2fU，含1%%安全垫）",
+                         sym, margin, avail, equity,
+                         float(bal.get("available") or 0), used_margin)
                 margin = avail
                 notional = margin * max(1, sig.leverage)
 
@@ -500,6 +552,11 @@ class Executor:
             # 清不掉就不开仓（宁可不下单，也不下可能被误平的单）
             try:
                 self.c.cancel_all(sym)
+                # cancel_all 内部会把单次撤单失败吞成 warning，必须复核真的清空了：
+                # 残留的 closePosition 条件单会在新仓开出的瞬间把它平掉
+                left = self.c.get_open_orders(sym, strict=True)
+                if left:
+                    raise BinanceError(-1, f"仍有 {len(left)} 个挂单未撤掉")
             except Exception as e:
                 log.error("%s 开仓前清理历史挂单失败，拒绝开仓: %s", sym, e)
                 self._alert(f"⚠️ {sym} 开仓前无法清理历史挂单，已放弃开仓\n"
@@ -575,10 +632,10 @@ class Executor:
                     tp_ok = prov_tp > mark
 
                 if not sl_ok:
-                    self._alert(
+                    self._critical(
                         f"⚠️ {sym} 止损价 {prov_sl:.6g} 已在当前价 {mark:.6g} 的错误一侧，"
-                        f"跳过挂单（价格已穿越止损位，请立即人工确认）"
-                    )
+                        f"跳过挂单（价格已穿越止损位，请立即人工确认）",
+                        key=f"sl_side_{sym}")
                 else:
                     r = self.c.stop_loss(sym, pos_side, prov_sl, coid_sl)
                     sl_id = str(r.get("orderId", ""))
@@ -597,19 +654,22 @@ class Executor:
                         tp_id = str(r.get("orderId", ""))
                     except BinanceError as e:
                         log.error("%s 止盈挂单失败（止损已生效，仓位仍受保护）: %s", sym, e)
-                        self._alert(f"⚠️ {sym} 止盈挂单失败：{e}\n"
-                                    f"   止损已生效，仓位有保护；收到真实止盈止损后会重挂")
+                        self._critical(f"⚠️ {sym} 止盈挂单失败：{e}\n"
+                                       f"   止损已生效，仓位有保护；收到真实止盈止损后会重挂",
+                                       key=f"open_tp_{sym}")
 
             except BinanceError as e:
                 log.error("保护单挂单失败 %s，紧急平仓", e)
-                self._alert(f"[紧急] {sym} 保护单失败 {e}，正在平仓")
+                self._critical(f"[紧急] {sym} 保护单失败 {e}，正在平仓",
+                               key=f"protect_{sym}")
                 try:
                     self.c.cancel_all(sym)
                     self.c.market_order(sym, "SELL" if side == "BUY" else "BUY",
                                         filled, _coid("EM", sig), reduce_only=True)
                     self._alert(f"[已平仓] {sym} 因保护单失败已紧急平仓")
                 except Exception as e2:
-                    self._alert(f"[严重] {sym} 紧急平仓也失败: {e2}，请立刻手动处理！")
+                    self._critical(f"[严重] {sym} 紧急平仓也失败: {e2}，请立刻手动处理！",
+                                   key=f"emerg_{sym}")
                 return OrderResult(False, sym, direction, filled, avg,
                                    actual_notional, actual_margin,
                                    error=f"保护单失败: {e}")
@@ -678,6 +738,26 @@ class Executor:
             return OrderResult(False, sym, direction, error=str(e))
 
     # ------------------------------------------------------------------
+    def _emergency_close(self, sym: str, pos_side: str, qty: float,
+                         prefix: str = "EM") -> bool:
+        """保护单挂不上时的紧急市价平仓。返回是否成功。"""
+        try:
+            self.c.cancel_all(sym)
+        except Exception as e:
+            # 撤单失败不能阻止平仓
+            log.warning("%s 紧急平仓前撤单失败（继续平仓）: %s", sym, e)
+        try:
+            close_side = "SELL" if pos_side.upper() == "LONG" else "BUY"
+            coid = f"{prefix}{int(time.time() * 1000) % 10 ** 10}"
+            self.c.market_order(sym, close_side, qty, coid, reduce_only=True)
+            self.pending.remove(sym)
+            self._alert(f"[已平仓] {sym} 因保护单失败已紧急平仓")
+            return True
+        except Exception as e:
+            self._critical(f"[严重] {sym} 紧急平仓也失败: {e}，请立刻手动处理！",
+                           key=f"emerg_{sym}")
+            return False
+
     def amend_protection(
         self,
         symbol: str,
@@ -780,35 +860,81 @@ class Executor:
                 return OrderResult(True, sym, direction, abs(p["amount"]), p["mark"],
                                    dry_run=True)
 
-            self.c.cancel_all(sym)
+            # 记下旧保护价：新单挂失败时用它回滚，避免「旧单已撤、新单没挂上」的裸仓
+            old = self.pending.get(sym) or {}
+            old_sl = old.get("sl") or old.get("provisional_sl")
+
+            try:
+                self.c.cancel_all(sym)
+            except Exception as e:
+                # cancel_all 内部已吞掉单次撤单失败，这里只兜网络类异常
+                log.warning("%s 撤旧保护单异常（继续确认）: %s", sym, e)
+
             # 轮询确认撤单真的生效。没确认就挂新单 = 同一币两个止损单，
             # 旧单一触发平仓，新单变孤儿；下次开仓还可能被它误触发
             cancelled = False
+            confirm_error = None
             try:
                 # 6 次 × 0.4s = 2.4 秒，比原来 10 次 × 0.2s 少 4 个请求（省权重）
                 for _ in range(6):
-                    if not self.c.get_open_orders(sym):
+                    # strict：algo 查询失败必须抛，不能把「查不到」当成「已撤干净」
+                    if not self.c.get_open_orders(sym, strict=True):
                         cancelled = True
                         break
                     time.sleep(0.4)
             except Exception as e:
+                confirm_error = e
                 log.warning("%s 撤单确认查询失败: %s", sym, e)
-                cancelled = False
 
-            if not cancelled:
-                log.error("%s 撤旧保护单未确认（可能仍有挂单），拒绝挂新单", sym)
-                self._alert(f"⚠️ {sym} 撤旧保护单未确认，已放弃本次改单\n"
-                            f"   当前仍是旧保护单，请手动检查挂单")
+            if not cancelled and not confirm_error:
+                # 查询成功、且确实还有挂单 → 旧保护仍在，放弃改单是安全的
+                log.error("%s 撤旧保护单未确认（仍有挂单），拒绝挂新单", sym)
+                self._critical(f"⚠️ {sym} 撤旧保护单未确认，已放弃本次改单\n"
+                               f"   当前仍是旧保护单，请手动检查挂单",
+                               key=f"cancel_{sym}")
                 return OrderResult(False, sym, direction,
                                    error="撤旧保护单未确认，拒绝挂新单避免重复")
 
-            # 单号必须唯一到毫秒：原来只取秒，同一秒内改两次会撞 -4116，
-            # 第二次会被当成「已存在」而误判成功，导致本地记录与交易所不一致
-            stamp = f"{int(time.time() * 1000) % 10 ** 10}"
-            r = self.c.stop_loss(sym, pos_side, sl_price, f"SL{stamp}")
-            sl_id = str(r.get("orderId", ""))
-            if not sl_id:
-                raise BinanceError(-1, f"{sym} 止损单未返回 orderId，视为失败")
+            if confirm_error:
+                # 查询失败 ≠ 旧单还在：旧单可能已经被撤掉，仓位此刻可能裸奔。
+                # 不能在这里直接 return（之前就是误判成「旧单还在」导致裸仓），
+                # 继续往下挂新止损；万一旧单还在，最多多一张，不会双倍平仓。
+                log.error("%s 撤单结果无法确认（%s），立即挂新止损兜底", sym, confirm_error)
+
+            # 单号唯一到毫秒 + 随机后缀：同一毫秒内两次改单也不会撞 -4116
+            stamp = f"{int(time.time() * 1000) % 10 ** 10}{os.urandom(1).hex()}"
+            sl_id = ""
+            try:
+                r = self.c.stop_loss(sym, pos_side, sl_price, f"SL{stamp}")
+                sl_id = str(r.get("orderId", ""))
+                if not sl_id:
+                    raise BinanceError(-1, "止损单未返回 orderId，视为失败")
+            except Exception as e:
+                # 旧单已撤、新单没挂上 = 裸仓。先用旧止损价回滚，再不行就紧急平仓
+                log.error("%s 新止损挂单失败（旧单已撤），尝试回滚旧止损 %s: %s",
+                          sym, old_sl, e)
+                if old_sl:
+                    try:
+                        r2 = self.c.stop_loss(sym, pos_side, old_sl, f"SLR{stamp}")
+                        sl_id = str(r2.get("orderId", ""))
+                        if sl_id:
+                            self._critical(
+                                f"⚠️ {sym} 新止损挂单失败，已回滚到旧止损 {old_sl:.6g}\n"
+                                f"   原因：{e}\n"
+                                f"   本次改单未生效，请检查价位后重试",
+                                key=f"amend_sl_{sym}")
+                    except Exception as e2:
+                        log.error("%s 回滚旧止损也失败: %s", sym, e2)
+                if not sl_id:
+                    log.error("%s 止损彻底挂不上，紧急平仓", sym)
+                    self._critical(f"[紧急] {sym} 改单后无法挂上止损，正在平仓",
+                                   key=f"amend_emerg_{sym}")
+                    self._emergency_close(sym, pos_side, abs(p["amount"]), "AME")
+                    return OrderResult(False, sym, direction, abs(p["amount"]), p["mark"],
+                                       error=f"止损挂单失败且回滚失败: {e}")
+                return OrderResult(False, sym, direction, abs(p["amount"]), p["mark"],
+                                   sl_order_id=sl_id,
+                                   error=f"新止损挂单失败，已回滚旧止损: {e}")
 
             tp_id = ""
             tp_err = ""
@@ -834,7 +960,10 @@ class Executor:
                 "qty": abs(p["amount"]),
                 "tp": tp_price if tp_id else None,
                 "sl": sl_price,
-                "tp_all": (tp_all or ([tp_price] if tp_price else [])) if tp_id else [],
+                # tp_all 是「目标价清单」，和 TP 单是否挂上无关：
+                # 即使这次止盈没挂上，价格到 TP1 也要把止损提上来，
+                # 清空会导致后续 TP1/TP2 全被当成「目标价不全」忽略
+                "tp_all": tp_all or ([tp_price] if tp_price else []),
             })
 
             sl_delta = (sl_price - entry) / entry * 100
@@ -855,8 +984,9 @@ class Executor:
                 f"   止盈 {tp_price or '无'} ({tp_delta:+.2f}%) id={tp_id}"
             )
             if tp_err:
-                self._alert(f"⚠️ {sym} 止盈未挂上（止损已生效）\n   {tp_err}\n"
-                            f"   仓位仍有止损保护，巡检会重试补挂止盈")
+                self._critical(f"⚠️ {sym} 止盈未挂上（止损已生效）\n   {tp_err}\n"
+                               f"   仓位仍有止损保护，巡检会重试补挂止盈",
+                               key=f"amend_tp_{sym}")
                 return OrderResult(False, sym, direction, abs(p["amount"]), p["mark"],
                                    sl_order_id=sl_id,
                                    error=f"止盈挂单失败: {tp_err}")
@@ -864,7 +994,7 @@ class Executor:
                                sl_order_id=sl_id, tp_order_id=tp_id)
 
         except Exception as e:
-            self._alert(f"❌ 改单失败 {sym}: {e}")
+            self._critical(f"❌ 改单失败 {sym}: {e}", key=f"amend_{sym}")
             return OrderResult(False, sym, "", error=str(e))
 
     # ------------------------------------------------------------------
@@ -920,7 +1050,8 @@ class Executor:
             if _num(close_order.get("executedQty")) <= 0:
                 log.error("%s 平仓单未成交 executedQty=%r，仓位仍在",
                           sym, close_order.get("executedQty"))
-                self._alert(f"❌ {sym} 平仓单未成交，仓位仍在，请手动处理")
+                self._critical(f"❌ {sym} 平仓单未成交，仓位仍在，请手动处理",
+                               key=f"close_{sym}")
                 return OrderResult(False, sym, p["side"].lower(),
                                    error="平仓单未成交（executedQty=0）")
 
@@ -940,10 +1071,22 @@ class Executor:
                     break
                 time.sleep(0.3)
 
-            if left is not None and left > 1e-9:
+            if left is None:
+                # 注意：返回空持仓（left=0）是平仓成功，不会走到这里。
+                # 只有持仓查询接口本身报错（网络/币安异常）才是 None —— 此时
+                # 平仓单已经成交，但没法确认仓位是否真的清零，保留 pending 并告警。
+                self._critical(f"⚠️ {sym} 平仓单已成交，但持仓查询接口报错，"
+                               f"无法确认是否清零（已保留 pending）\n"
+                               f"   请手动确认：python main.py positions",
+                               key=f"close_verify_{sym}")
+                return OrderResult(False, sym, p["side"].lower(),
+                                   error="平仓后持仓查询失败（不是无持仓）")
+
+            if left > 1e-9:
                 log.error("%s 平仓后仍剩 %.6g（部分成交），保留 pending 记录", sym, left)
-                self._alert(f"⚠️ {sym} 平仓后仍剩 {left:.6g}，未完全平掉\n"
-                            f"   请手动处理：python main.py close --symbol {sym}")
+                self._critical(f"⚠️ {sym} 平仓后仍剩 {left:.6g}，未完全平掉\n"
+                               f"   请手动处理：python main.py close --symbol {sym}",
+                               key=f"close_left_{sym}")
                 return OrderResult(False, sym, p["side"].lower(),
                                    error=f"平仓未完全成交，剩余 {left:.6g}")
 
@@ -977,7 +1120,9 @@ class Executor:
             return OrderResult(True, sym, p["side"].lower(), abs(p["amount"]), p["mark"])
 
         except Exception as e:
-            self._alert(f"❌ 平仓失败 {sym}: {e}")
+            # 平仓抛异常时仓位可能还在，必须邮件告警，不能只记日志
+            self._critical(f"❌ 平仓失败 {sym}: {e}\n   仓位可能仍在，请手动检查",
+                           key=f"close_{sym}")
             return OrderResult(False, sym, "", error=str(e))
 
     # ------------------------------------------------------------------
