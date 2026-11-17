@@ -8,7 +8,7 @@
    2) 用唯一一套规则跑完整回测：
         · 信号  双均线 EMA 10/30，收盘确认、次日开盘成交
         · 过滤  SMA50 只约束多头（收盘价在均线下方时不开多，空头照做）
-        · 载体  双腿均走合约 2× 逐仓（付资金费）；long_leg="spot" 则多头走现货（旧方案）
+        · 载体  双腿均走合约 2×（默认全仓，见 binance.margin_type；付资金费）；long_leg="spot" 则多头走现货（旧方案）
         · 仓位  波动率目标 3%/日，敞口上限 1.0×
    3) 输出回测数据到 ./回测结果/ 目录（CSV，Excel 可直接打开）
       并在控制台打印可读汇总
@@ -64,6 +64,8 @@ SLIP = 0.0005               # 单边滑点 0.05%
 FUNDING_D = 0.0003          # 资金费 0.03%/日（8 小时一次 × 3）
 WARMUP = 60                 # 预热期（前 60 根不出信号）
 LEVERAGE = 2.0              # 合约杠杆。不影响名义仓位，只影响保证金占用与爆仓线。
+MARGIN_TYPE = "CROSSED"     # 保证金模式：CROSSED（全仓）/ ISOLATED（逐仓）
+MARGIN_CN = "全仓"          # 报告/邮件里显示的中文名，跟着 MARGIN_TYPE 走
                             # ⚠ 必须 ≥ EXPOSURE_CAP，否则敞口开不出去（引擎会缩到 权益×L）
 REGIME_MA = 50              # 只约束多头的趋势过滤：收盘价 > SMA(50) 才允许做多；0 = 关闭
 PRIMARY_SET = (10, 30)      # 双均线参数（快线, 慢线）
@@ -143,6 +145,7 @@ def _apply_monitor_config():
     """
     global VT, EXPOSURE_CAP, WARMUP, REGIME_MA, LEVERAGE, CAPITAL
     global PRIMARY_SET, ATR_N, CFG_SOURCE, SHORT_STOP, LONG_STOP, LONG_ON_FUT
+    global MARGIN_TYPE, MARGIN_CN
     if not os.path.exists(CFG_PATH):
         return
     try:
@@ -175,6 +178,11 @@ def _apply_monitor_config():
     CAPITAL = _cap if _cap > 0 else CAPITAL
     _lev = _f(b, "leverage", LEVERAGE)
     LEVERAGE = _lev if _lev > 0 else LEVERAGE
+    # 保证金模式：只影响报告措辞和下单时的 marginType，不影响回测数字
+    # （单仓满权益时，全仓与逐仓的爆仓价几乎一样）。
+    _mt = str(b.get("margin_type") or MARGIN_TYPE).strip().upper()
+    MARGIN_TYPE = "ISOLATED" if _mt.startswith("ISO") else "CROSSED"
+    MARGIN_CN = "逐仓" if MARGIN_TYPE == "ISOLATED" else "全仓"
     # 止损：0 或缺失 = 关闭；只有正数才生效（负数会变成「反着做」，必须挡掉）
     def _stop(src, key, cur):
         v = src.get(key)
@@ -965,8 +973,8 @@ def main():
     refresh = "--refresh" in sys.argv
     hr()
     log(" BTC 日线趋势策略 · 当前方案回测")
-    log(" 载体：%s" % ("双腿均走合约 %d× 逐仓" % int(LEVERAGE) if LONG_ON_FUT
-                       else "多头走现货 · 空头走合约 %d× 逐仓" % int(LEVERAGE)))
+    log(" 载体：%s" % ("双腿均走合约 %d× %s" % (int(LEVERAGE), MARGIN_CN) if LONG_ON_FUT
+                       else "多头走现货 · 空头走合约 %d× %s" % (int(LEVERAGE), MARGIN_CN)))
     log(" 过滤：SMA%d 只约束多头（收盘价在均线下方时不开多，空头照做）" % REGIME_MA)
     log(" 本金 %.0f USDT | 波动率目标 %.0f%%/日 | 敞口上限 %.1f× | 滑点 %.2f%%"
         % (CAPITAL, VT * 100, EXPOSURE_CAP, SLIP * 100))
@@ -1005,9 +1013,9 @@ def main():
                ["K线数量", n], ["样本年数", "%.2f" % years],
                ["本金USDT", "%.2f" % CAPITAL],
                ["信号", "双均线 EMA %d/%d（收盘确认，次日开盘成交）" % PRIMARY_SET],
-               ["多头腿", ("合约 %.0f× 逐仓（付资金费）" % LEVERAGE) if LONG_ON_FUT
+               ["多头腿", ("合约 %.0f× %s（付资金费）" % (LEVERAGE, MARGIN_CN)) if LONG_ON_FUT
                 else "现货（不付资金费）"],
-               ["空头腿", "合约 %.0f× 逐仓" % LEVERAGE],
+               ["空头腿", "合约 %.0f× %s" % (LEVERAGE, MARGIN_CN)],
                ["趋势过滤", "SMA%d 只约束多头" % REGIME_MA],
                ["波动率目标", "%.2f" % VT], ["敞口上限", "%.2f" % EXPOSURE_CAP],
                ["现货手续费", "%.4f" % SPOT_FEE], ["合约手续费", "%.4f" % FUT_FEE],
@@ -1503,9 +1511,9 @@ def main():
     log(" 一句话总结：")
     log("   1) 信号：双均线 EMA %d/%d，收盘确认、次日开盘成交，无未来函数" % PRIMARY_SET)
     log("   2) 过滤：SMA%d 只约束多头 —— 价格在均线下方时不开多，空头照做" % REGIME_MA)
-    log("   3) 载体：%s" % ("双腿均走合约 %d× 逐仓（付资金费）" % int(LEVERAGE)
+    log("   3) 载体：%s" % ("双腿均走合约 %d× %s（付资金费）" % (int(LEVERAGE), MARGIN_CN)
                             if LONG_ON_FUT else
-                            "多头走现货（省资金费）、空头走合约 %d× 逐仓" % int(LEVERAGE)))
+                            "多头走现货（省资金费）、空头走合约 %d× %s" % (int(LEVERAGE), MARGIN_CN)))
     log("   4) 结果：%.2f×（年化 %+.1f%%），最大回撤 %.1f%%，Calmar %.3f"
         % (st["final"], st["cagr"] * 100, st["mdd"] * 100, st["calmar"]))
     log("   5) 胜率仅 %.1f%%，靠盈亏比 %.2f 赚钱，必须能扛住连续 %d 笔亏损"

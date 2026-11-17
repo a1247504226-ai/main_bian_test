@@ -470,6 +470,7 @@ class Executor:
                 equity=equity,
                 leverage=sig.leverage,
                 open_positions=positions,
+                available=real_avail,
             )
 
             # ---------- 3. 真实值方向 + 距离校验 ----------

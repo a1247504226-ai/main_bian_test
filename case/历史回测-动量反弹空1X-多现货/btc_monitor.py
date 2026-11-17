@@ -574,7 +574,8 @@ def derive_position(bars, sig, cfg, tag, pending=False, next_bar=None, since=Non
         "comp_qty": 0.0, "comp_notional": 0.0, "comp_mkt_value": 0.0,
         "comp_upnl": 0.0, "comp_mult": (comp_equity / base) if base else 0.0,
         "leg": ("—" if cur_sig == 0 else
-                ("合约 %d× 逐仓%s" % (int(lev), "（多头）" if cur_sig > 0 else "（空头）")
+                ("合约 %d× %s%s" % (int(lev), E.MARGIN_CN,
+                                    "（多头）" if cur_sig > 0 else "（空头）")
                  if (cur_sig < 0 or E.LONG_ON_FUT) else "现货")),
         "recent": recent[-3:],
         "just_closed": just_closed,
@@ -846,10 +847,15 @@ def build_order_plan(pos, cfg, binance, price):
         notes.append("读取账户失败：%s → 跳过下单" % e)
         return actions, notes
 
-    notes.append("账户构成：现货 USDT %.2f + 现货 %s %.6f（%.2f USDT）"
-                 "+ 合约账户 %.2f + 浮盈 %+.2f = 权益 %.2f USDT"
-                 % (snap["usdt_total"], base, snap["spot_qty"], snap["spot_val"],
-                    snap["fut_wallet"], snap["fut_upnl"], snap["equity"]))
+    if E.LONG_ON_FUT:
+        # 双腿走合约：现货账户不参与，写出来只会让人以为「还有一笔钱没算」
+        notes.append("账户构成：合约账户 %.2f + 浮盈 %+.2f = 权益 %.2f USDT"
+                     % (snap["fut_wallet"], snap["fut_upnl"], snap["equity"]))
+    else:
+        notes.append("账户构成：现货 USDT %.2f + 现货 %s %.6f（%.2f USDT）"
+                     "+ 合约账户 %.2f + 浮盈 %+.2f = 权益 %.2f USDT"
+                     % (snap["usdt_total"], base, snap["spot_qty"], snap["spot_val"],
+                        snap["fut_wallet"], snap["fut_upnl"], snap["equity"]))
     notes.extend(pnotes)
     actions = [a["text"] for a in acts] or ["已与目标对齐，本轮无需操作"]
 
@@ -1145,16 +1151,17 @@ def build_mail_html(res):
         extra += ('<tr><td style="padding:4px 0;color:%s">爆仓价 / 安全余量</td>'
                   '<td style="padding:4px 0">%.2f USDT / <b>%.2f pp</b>'
                   '<div style="font-size:11px;font-weight:400;color:#8a9aab;margin-top:3px;line-height:1.5">'
-                  '价格%s %.1f%% 即强制平仓（%d× 逐仓）</div></td></tr>'
+                  '价格%s %.1f%% 即强制平仓（%d× %s）</div></td></tr>'
                   % (C_MUTED, r["liq_px"], r["margin"] * 100,
-                     "下跌" if r.get("kind") == "long" else "上涨", _mv, int(r["lev"])))
+                     "下跌" if r.get("kind") == "long" else "上涨", _mv,
+                     int(r["lev"]), E.MARGIN_CN))
     if pos["dir"] != 0 and pos.get("margin"):
         _acc_ref = pos.get("acc") or pos["base"] or 0.0
         extra += ('<tr><td style="padding:4px 0;color:%s">占用保证金</td>'
-                  '<td style="padding:4px 0">%.2f USDT（%.0f%% 权益 · %d× 逐仓）</td></tr>'
+                  '<td style="padding:4px 0">%.2f USDT（%.0f%% 权益 · %d× %s）</td></tr>'
                   % (C_MUTED, pos["margin"],
                      (pos["margin"] / _acc_ref * 100) if _acc_ref else 0.0,
-                     int(pos.get("leverage", 1))))
+                     int(pos.get("leverage", 1)), E.MARGIN_CN))
 
     # ---------- 最近平仓 ----------
     def recent_table(p, title):
@@ -1338,7 +1345,7 @@ table{width:100%%;border-collapse:collapse;table-layout:fixed}
   仓位规则：波动率目标 %(vt_pct).1f%%/日，敞口上限 %(expocap).2f×；%(regime_txt)s。<br>
   <b>止损规则</b>：%(stop_txt)s。<br>
   历史参考：%(first_month)s 至今（%(span_years).2f 年）胜率 %(win_rate).0f%%，盈亏比 %(pl_ratio).1f，最大回撤 %(mdd_txt)s，最长水下 %(uw_txt)s。<br>
-  双腿均按合约 %(lev)d× 逐仓（价格逆行 %(liqline).1f%% 即爆仓；空头历史最深逆行 %(adv_txt)s）。<br>
+  双腿均按合约 %(lev)d× %(margin_cn)s（价格逆行 %(liqline).1f%% 即爆仓；空头历史最深逆行 %(adv_txt)s）。<br>
   <b>本邮件是回测规则的机械信号，不构成投资建议。</b>加密资产波动极大，请自行判断并控制风险。
 </div>
 
@@ -1377,14 +1384,16 @@ table{width:100%%;border-collapse:collapse;table-layout:fixed}
         "expocap": cfg["strategy"]["exposure_cap"],
         "vt_pct": float(cfg["strategy"]["vt"]) * 100.0,
         "lev": int(float(cfg["binance"]["leverage"])),
+        "margin_cn": E.MARGIN_CN,
         "liqline": 100.0 / float(cfg["binance"]["leverage"]),
         "regime_txt": regime_txt,
         "stop_txt": stop_txt,
-        "rule": ("多头合约 %d× · 空头合约 %d× · %s" if E.LONG_ON_FUT
-                 else "多头走现货 · 空头走合约 %d× · %s")
-                % ((int(float(cfg["binance"]["leverage"])),) * 2 + (regime_txt,)
-                   if E.LONG_ON_FUT else
-                   (int(float(cfg["binance"]["leverage"])), regime_txt)),
+        "rule": (("多头合约 %d× %s · 空头合约 %d× %s · %s"
+                  % (int(float(cfg["binance"]["leverage"])), E.MARGIN_CN,
+                     int(float(cfg["binance"]["leverage"])), E.MARGIN_CN, regime_txt))
+                 if E.LONG_ON_FUT else
+                 ("多头走现货 · 空头走合约 %d× %s · %s"
+                  % (int(float(cfg["binance"]["leverage"])), E.MARGIN_CN, regime_txt))),
         "closed_n": pos["closed_n"],
         "win_rate": pos["win_rate"] * 100.0,
         "pl_ratio": pos["pl_ratio"],
@@ -1724,8 +1733,8 @@ def main():
 
     log("=" * 100)
     log(" BTC 日线趋势策略 · 每日检测")
-    log(" 唯一方案：双均线 EMA 10/30 + SMA50 只约束多头 + 空头 %d× 逐仓"
-        % int(float(cfg["binance"]["leverage"])))
+    log(" 唯一方案：双均线 EMA 10/30 + SMA50 只约束多头 + 空头 %d× %s（无现货）"
+        % (int(float(cfg["binance"]["leverage"])), E.MARGIN_CN))
     log("=" * 100)
     log("")
 
@@ -1811,7 +1820,8 @@ def main():
                           since=state.get("participate_from"))
     _lev = float(cfg["binance"]["leverage"])
     log("      配置：%s（爆仓线 %+.1f%%）· 波动率目标 %.1f%% · 敞口上限 %.2f× · %s"
-        % ("双腿合约 %d× 逐仓" % int(_lev) if E.LONG_ON_FUT else "多头现货 · 空头合约 %d× 逐仓" % int(_lev),
+        % ("双腿合约 %d× %s" % (int(_lev), E.MARGIN_CN) if E.LONG_ON_FUT
+           else "多头现货 · 空头合约 %d× %s" % (int(_lev), E.MARGIN_CN),
            100.0 / _lev, float(cfg["strategy"]["vt"]) * 100,
            float(cfg["strategy"]["exposure_cap"]),
            ("SMA%d 只约束多头" % int(rma)) if rma else "无均线过滤"))

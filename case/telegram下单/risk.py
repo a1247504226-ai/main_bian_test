@@ -138,6 +138,7 @@ class RiskManager:
         equity: float,
         leverage: int,
         open_positions: List[Dict],
+        available: Optional[float] = None,
     ):
         """开仓前校验。全部通过才返回，否则抛 RiskRejected"""
         self._ensure_today()
@@ -188,10 +189,16 @@ class RiskManager:
                 f"{symbol} 累计敞口超过 {lim.max_symbol_exposure_pct*100:.0f}%")
 
         # 总保证金占用 —— 这条最关键，防止开满仓后无法承受浮亏
-        used_margin = 0.0
-        for p in open_positions:
-            lev = max(1, int(p.get("leverage", 1)))
-            used_margin += abs(p["amount"] * p["mark"]) / lev
+        # 优先用币安真实 available 反推已占用，口径与 executor 下调保证金时一致。
+        # 否则（如全仓 BTC 单）估算占用与真实 available 差几十 U，
+        # 会出现「executor 已按真实 available 下调、风控却仍判超 100%」的误拒。
+        if available is not None:
+            used_margin = max(0.0, equity - float(available))
+        else:
+            used_margin = 0.0
+            for p in open_positions:
+                lev = max(1, int(p.get("leverage", 1)))
+                used_margin += abs(p["amount"] * p["mark"]) / lev
         total_margin_pct = (used_margin + margin) / equity
         if total_margin_pct > lim.max_total_margin_pct + 1e-9:
             raise RiskRejected(

@@ -131,15 +131,3 @@
 2026-11-16 05:30:54,361 ERROR   trader: 开仓失败 NOMUSDT long: 可用保证金不足（权益 500.00U，已占用 500.00U）
 2026-11-16 05:30:54,464 WARNING trader: 有 2 个待更新仓位且消息未带币种名，价位也无法唯一匹配，已跳过。请手动执行：python main.py amend --symbol <币种> --tp <价> --sl <价>
 2026-11-16 05:30:54,666 INFO    trader: 止盈止损指定 BTCUSDT 但没有待更新仓位，忽略
-2026-11-16 11:49:59,146 INFO    tg_listener: 使用代理 127.0.0.1:7897 (http)
-2026-11-16 11:49:59,172 INFO    health: 心跳服务监听 :8080/health
-2026-11-16 11:49:59,173 INFO    tg_listener: 连接 Telegram...
-2026-11-16 11:59:20,982 INFO    tg_listener: 使用代理 127.0.0.1:7897 (http)
-2026-11-16 11:59:20,987 INFO    health: 心跳服务监听 :8080/health
-2026-11-16 11:59:20,990 INFO    tg_listener: 连接 Telegram...
-2026-11-16 11:59:23,762 INFO    tg_listener: session 有效，无需验证码
-2026-11-16 11:59:23,933 INFO    tg_listener: 已登录：Jack Han (@wangzheguilai1995)
-2026-11-16 11:59:24,422 INFO    tg_listener: 开始监听：傲冠合约交易社区
-2026-11-16 11:59:24,422 INFO    tg_listener: 监听已启动，等待消息...（Ctrl+C 退出）
-2026-11-16 11:59:36,000 INFO    trader: 空闲巡检：无待管理仓位/改单，本轮零币安请求（只在有信号时才连币安）
-2026-11-16 14:07:12,773 INFO    tg_listener: 消息 #4856 正文变更（IGNORE），重新解析

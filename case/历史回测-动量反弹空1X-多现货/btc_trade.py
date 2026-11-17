@@ -91,6 +91,10 @@ TRADE_LOG = os.path.join(HERE, "trade_log.csv")
 TRADE_RUN_LOG = os.path.join(HERE, "trade_run.log")   # 完整运行过程（给人看）
 TRADE_STATE = os.path.join(HERE, "trade_state.json")
 RULES_CACHE = os.path.join(HERE, "exchange_rules.json")
+ALERT_STATE = os.path.join(HERE, "trade_alert_state.json")   # 告警邮件去重记录
+
+# 测试网现货接口 401 之后，本次运行内不再重复请求（省配额，避免触发 IP 封禁）
+_SPOT_FAILED = {"v": False}
 
 LOCK_DIR = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
                         "BTC_Strategy")
@@ -254,6 +258,82 @@ def append_trade_log(rows):
         M.log("      ⚠ 写 trade_log.csv 失败：%s" % e)
 
 
+ALERT_COOLDOWN_SEC = 6 * 3600      # 同一类失败 6 小时内只发一封，避免脚本重跑刷屏
+
+
+def send_trade_alert(cfg, kind, title, lines, bar_date="", level="error"):
+    """
+    下单 / 止损单 / 平仓 失败时单独推一封告警邮件。
+
+    设计原则：
+      · **绝不因为发信失败而中断主流程** —— 告警是附加能力，不能变成新的故障点。
+      · 同一类失败（kind）+ 同一根日线，6 小时内只发一封，避免反复重跑刷屏。
+      · email.enabled=false / 配置不全 → 静默跳过，只在控制台留一行。
+
+    kind：order_fail（下单/平仓失败）、stop_fail（止损单没就位）、
+          stop_triggered（止损价被击穿、已市价平仓）
+    返回是否真的发出去了。
+    """
+    try:
+        em = (cfg or {}).get("email") or {}
+        if not em.get("enabled"):
+            M.log("      （email.enabled=false，告警只写日志不发邮件）")
+            return False
+
+        now = time.time()
+        sig = "%s|%s" % (kind, bar_date or "")
+        st = {}
+        try:
+            with open(ALERT_STATE, encoding="utf-8") as f:
+                st = json.load(f) or {}
+        except Exception:
+            st = {}
+        sent = st.get("sent") or {}
+        last = to_float(sent.get(sig), 0.0)
+        if last and now - last < ALERT_COOLDOWN_SEC:
+            M.log("      （同类告警 6 小时内已发过，本次不重复发邮件）")
+            return False
+
+        color = "#d93025" if level == "error" else "#e8710a"
+        rows = "".join(
+            '<tr><td style="padding:7px 10px;border-bottom:1px solid #eee;'
+            'font-size:13px;line-height:1.7">%s</td></tr>' % x for x in lines)
+        html = (
+            '<div style="font-family:-apple-system,Segoe UI,Microsoft YaHei,sans-serif;'
+            'max-width:680px;margin:0 auto;padding:16px">'
+            '<div style="border-left:4px solid %s;padding:10px 14px;background:#fafafa">'
+            '<div style="font-size:16px;font-weight:700;color:%s">%s</div>'
+            '<div style="font-size:12px;color:#888;margin-top:5px">%s · 日线 %s</div></div>'
+            '<table style="width:100%%;border-collapse:collapse;margin-top:12px">%s</table>'
+            '<div style="font-size:12px;color:#888;margin-top:16px;line-height:1.8">'
+            '这条邮件由下单程序自动发出，说明本次执行**没有完全成功**。<br>'
+            '仓位可能处于「未完全对齐 / 无止损保护」的状态，请到币安核对后再决定是否手动处理。<br>'
+            '同类告警 6 小时内只发一次。</div></div>'
+            % (color, color, title, M.fdt(), bar_date or "—", rows))
+        ok, msg = M.send_mail(cfg, "[BTC策略·告警] %s" % title, html)
+        M.log("      %s 告警邮件：%s" % ("✔" if ok else "✘", msg))
+        if ok:
+            sent[sig] = now
+            # 只保留最近 30 条，避免这个文件无限增长
+            if len(sent) > 30:
+                for k in sorted(sent, key=lambda x: sent[x])[:len(sent) - 30]:
+                    sent.pop(k, None)
+            st["sent"] = sent
+            st["last_alert"] = M.fdt()
+            try:
+                tmp = ALERT_STATE + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(st, f, ensure_ascii=False, indent=2)
+                os.replace(tmp, ALERT_STATE)
+            except Exception:
+                pass
+        return ok
+    except Exception as e:
+        # 告警本身出错绝不能影响主流程
+        M.log("      ⚠ 告警邮件发送失败：%s" % e)
+        return False
+
+
 def dump_run_log():
     """
     把本次运行的控制台内容追加到 trade_run.log。
@@ -287,6 +367,17 @@ def dump_run_log():
 # ==============================================================================
 # 1. 币安客户端（只读 + 下单 + 精度规则）
 # ==============================================================================
+def _is_missing_endpoint(msg):
+    """判断「这个接口在当前环境不存在」，用于 Algo Order 的新老兼容降级。
+
+    币安对不存在的路径可能返回 HTTP 404、code -404、-1102（参数不认识），
+    也可能是 -5000（Path invalid）。这些都不该让整个下单流程崩掉。
+    """
+    m = str(msg)
+    return ("HTTP 404" in m or "-404" in m or "-1102" in m
+            or "Path" in m and "invalid" in m)
+
+
 class Binance:
     """极简币安 REST 客户端，只用标准库（HMAC-SHA256 签名）。"""
 
@@ -426,7 +517,26 @@ class Binance:
                 return json.loads(r.read().decode())
         except urllib.error.HTTPError as e:
             body = e.read().decode(errors="replace")
-            raise RuntimeError("HTTP %d %s -> %s" % (e.code, path, body))
+            hint = ""
+            # 418 / -1003 = IP 被限流封禁。这时**每次重试都会把解封时间往后推**，
+            # 所以必须立刻停手，并把「几点解封」直接告诉用户，而不是丢一串英文。
+            if e.code == 418 or "-1003" in body:
+                until = ""
+                _k = body.find("banned until ")
+                if _k >= 0:
+                    _num = ""
+                    for _ch in body[_k + len("banned until "):]:
+                        if _ch.isdigit():
+                            _num += _ch
+                        else:
+                            break
+                    if _num:
+                        until = time.strftime("%Y-%m-%d %H:%M:%S",
+                                              time.localtime(int(_num) / 1000.0))
+                hint = ("\n  ⚠ 本机 IP 被币安限流封禁%s。"
+                        "【不要反复重试】—— 每重试一次都会把解封时间往后推。"
+                        % (("，预计 %s 解封" % until) if until else ""))
+            raise RuntimeError("HTTP %d %s -> %s%s" % (e.code, path, body, hint))
         except Exception as e:
             # URLError / socket.timeout / ssl 错误统一成中文，别让用户看裸英文栈
             raise RuntimeError(self._hint(
@@ -502,9 +612,12 @@ class Binance:
                     "upnl": to_float(p.get("unRealizedProfit")),
                     "lev": int(to_float(p.get("leverage"), 1)),
                     "margin": to_float(p.get("isolatedMargin")),
-                    "liq": to_float(p.get("liquidationPrice"))}
+                    "liq": to_float(p.get("liquidationPrice")),
+                    # 标记价格：判断「止损价是否已被击穿」必须用它，
+                    # 因为条件单默认按 MARK_PRICE 触发，用最新成交价会被插针骗。
+                    "mark": to_float(p.get("markPrice"))}
         return {"amt": 0.0, "entry": 0.0, "upnl": 0.0, "lev": None,
-                "margin": 0.0, "liq": 0.0}
+                "margin": 0.0, "liq": 0.0, "mark": 0.0}
 
     def order_status(self, market, order_id):
         base = self.spot if market == "spot" else self.fut
@@ -616,28 +729,82 @@ class Binance:
         return self._request("POST", self.fut, "/fapi/v1/order", p, signed=True)
 
     # ---------------- 止损条件单 ----------------
+    # ⚠ 2025-12-09 起币安把条件单（STOP_MARKET / TAKE_PROFIT_MARKET / TRAILING…）
+    #   强制迁到 Algo Order 接口。继续往 /fapi/v1/order 发会直接返回：
+    #     -4120 Order type not supported for this endpoint.
+    #           Please use the Algo Order API endpoints instead.
+    #   后果是「开仓成功、止损单挂不上」—— 仓位裸奔，这是最危险的一种失败。
+    #   新老字段对照：stopPrice→triggerPrice、newClientOrderId→clientAlgoId、
+    #   返回的 orderId→algoId，查询走 openAlgoOrders、撤单走 DELETE algoOrder。
+    @staticmethod
+    def _norm_algo(o):
+        """把算法单的字段归一化成和普通单一样的形状，上层逻辑不用改。"""
+        return {
+            "orderId": o.get("algoId") or o.get("orderId"),
+            "algoId": o.get("algoId"),
+            "side": o.get("side"),
+            "type": o.get("orderType") or o.get("type"),
+            "stopPrice": o.get("triggerPrice") or o.get("stopPrice"),
+            "closePosition": o.get("closePosition"),
+            "workingType": o.get("workingType"),
+            "algoStatus": o.get("algoStatus"),
+            "_algo": True,
+        }
+
     def fut_open_orders(self):
-        """当前挂着的合约委托（含条件单）。"""
+        """当前挂着的合约委托（普通单 + 算法条件单，合并成一个列表）。"""
+        out = []
         data = self._request("GET", self.fut, "/fapi/v1/openOrders",
                              {"symbol": self.symbol}, signed=True)
-        return data if isinstance(data, list) else []
+        if isinstance(data, list):
+            out.extend(data)
+        try:
+            algo = self._request("GET", self.fut, "/fapi/v1/openAlgoOrders",
+                                 {"symbol": self.symbol}, signed=True)
+            if isinstance(algo, list):
+                out.extend([self._norm_algo(o) for o in algo])
+        except Exception as e:
+            # 算法单查询失败不能让「止损单已在」的判断变成「一张都没有」→
+            # 那样会重复挂单。所以这里把异常往上抛，由调用方报错。
+            if _is_missing_endpoint(str(e)):
+                pass          # 老环境没有这个接口，忽略
+            else:
+                raise
+        return out
 
     def fut_stop_market(self, side, stop_px_str, working_type="MARK_PRICE"):
         """
-        挂「触发即全平」的止损市价单。
+        挂「触发即全平」的止损市价单（Algo Order 接口）。
 
         用 closePosition=true：触发时把当前持仓一次平光，不用算数量，
-        也不会因为 stepSize 取整留下零头。币安规定 closePosition 与
-        quantity / reduceOnly 互斥，所以这里都不传。
+        也不会因为 stepSize 取整留下零头。
         """
-        p = {"symbol": self.symbol, "side": side, "type": "STOP_MARKET",
-             "stopPrice": stop_px_str, "closePosition": "true",
-             "workingType": working_type, "timeInForce": "GTC"}
-        return self._request("POST", self.fut, "/fapi/v1/order", p, signed=True)
+        p = {"algoType": "CONDITIONAL", "symbol": self.symbol, "side": side,
+             "type": "STOP_MARKET", "triggerPrice": stop_px_str,
+             "closePosition": "true", "workingType": working_type}
+        try:
+            return self._request("POST", self.fut, "/fapi/v1/algoOrder", p,
+                                 signed=True)
+        except Exception as e:
+            _m = str(e)
+            # 极老的环境还没上线 algoOrder（-404 / 参数不认识），退回旧接口。
+            # 反之旧接口在新环境会 -4120，此时不要回退（回退也没用）。
+            if _is_missing_endpoint(_m):
+                q = {"symbol": self.symbol, "side": side, "type": "STOP_MARKET",
+                     "stopPrice": stop_px_str, "closePosition": "true",
+                     "workingType": working_type, "timeInForce": "GTC"}
+                return self._request("POST", self.fut, "/fapi/v1/order", q,
+                                     signed=True)
+            raise
 
     def fut_cancel(self, order_id):
         return self._request("DELETE", self.fut, "/fapi/v1/order",
                              {"symbol": self.symbol, "orderId": order_id},
+                             signed=True)
+
+    def fut_cancel_algo(self, algo_id):
+        return self._request("DELETE", self.fut, "/fapi/v1/algoOrder",
+                             {"symbol": self.symbol, "algoId": algo_id},
                              signed=True)
 
 
@@ -646,18 +813,28 @@ class Binance:
 # ==============================================================================
 def snapshot(bnc, price):
     """读账户，算出权益、可用资金、现有仓位。"""
-    try:
-        bal = bnc.spot_balances()
-    except Exception as e:
-        # 币安测试网的现货（testnet.binance.vision）和合约（testnet.binancefuture.com）
-        # 是**两套完全独立的系统**：只申请合约 key 时现货接口会 401，域名本身也常常连不上。
-        # 双腿都走合约时现货账户本来就该是空的，所以测试网降级成「现货为空」；
-        # 实盘则必须抛出 —— 否则会漏算现货里的 USDT，让目标仓位偏小。
-        if not getattr(bnc, "testnet", False):
-            raise
+    # 双腿都走合约（long_leg="fut"）时，现货账户根本不参与策略：
+    #   · 不会买现货，也就不需要现货 USDT 去划转
+    #   · 测试网还会直接 401（现货和合约是两套系统）
+    # 所以干脆不查 —— 省一次请求，也少一条无意义的告警。
+    if E.LONG_ON_FUT:
         bal = {}
-        M.log("      ⚠ 测试网读现货账户失败（%s）→ 按现货为空处理" % e)
-        M.log("        （测试网的现货与合约是两套独立系统，只有合约 key 时查不到现货，属正常）")
+    elif getattr(bnc, "testnet", False) and _SPOT_FAILED["v"]:
+        bal = {}
+    else:
+        try:
+            bal = bnc.spot_balances()
+        except Exception as e:
+            # 币安测试网的现货（testnet.binance.vision）和合约（testnet.binancefuture.com）
+            # 是**两套完全独立的系统**：只申请合约 key 时现货接口会 401，域名本身也常常连不上。
+            # 双腿都走合约时现货账户本来就该是空的，所以测试网降级成「现货为空」；
+            # 实盘则必须抛出 —— 否则会漏算现货里的 USDT，让目标仓位偏小。
+            if not getattr(bnc, "testnet", False):
+                raise
+            bal = {}
+            _SPOT_FAILED["v"] = True
+            M.log("      ⚠ 测试网读现货账户失败（%s）→ 按现货为空处理（本次运行不再重试）" % e)
+            M.log("        （测试网的现货与合约是两套独立系统，只有合约 key 时查不到现货，属正常）")
     btc = bal.get(bnc.base, {"free": 0.0, "locked": 0.0, "total": 0.0})
     usdt = bal.get("USDT", {"free": 0.0, "locked": 0.0, "total": 0.0})
     fut = bnc.futures_position()
@@ -678,6 +855,7 @@ def snapshot(bnc, price):
         "usdt_free": usdt["free"], "usdt_total": usdt["total"],
         "fut_amt": fut["amt"], "fut_entry": fut["entry"], "fut_upnl": fut["upnl"],
         "fut_lev": fut["lev"], "fut_margin": fut["margin"], "fut_liq": fut["liq"],
+        "fut_mark": fut.get("mark", 0.0),
         "fut_wallet": fut_wallet,
         "equity": equity,
         "available": available,
@@ -970,7 +1148,12 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now, resize=None):
                                      % proj_spot_usdt)
 
             avail = proj_fut_avail
-            max_notional = avail * lev * (1.0 - fee_buffer)
+            # 保证金占用比例（默认 99.5%）：全仓模式下按 100% 开满时，手续费、
+            # 维持保证金、可用余额的毫秒级波动都会让交易所判「保证金不足」(-2019)。
+            # 留 0.5% 比 fee_buffer 的 0.2% 更稳；可配置，但封顶 0.999（不允许填 1.0）。
+            _mratio = to_float(b.get("margin_use_ratio"), 0.995)
+            _mratio = min(max(_mratio, 0.5), 0.999)
+            max_notional = avail * lev * _mratio
             # 必须取 min：写成 want = max_notional/price 会在「可用略小于目标」时
             # 把仓位开到 0.998×，吃掉保证金缓冲，满仓时直接被拒单。
             want = min(target_fut_qty, max_notional / price)
@@ -984,14 +1167,14 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now, resize=None):
                 want = float(fmt_qty(want, r_fut["step"]))
                 acts.append({"kind": "fut_setup", "market": "futures", "side": "-",
                              "qty": 0.0, "qty_str": "0", "notional": 0.0,
-                             "text": "设置 %s 为 %s 逐仓 %d×"
-                                     % (bnc.symbol, b["margin_type"], lev)})
+                             "text": "设置 %s 为 %s %s %d×"
+                                     % (bnc.symbol, b["margin_type"], E.MARGIN_CN, lev)})
                 acts.append({"kind": "fut_open", "market": "futures", "side": _side_open,
                              "qty": want, "qty_str": fmt_qty(want, r_fut["step"]),
                              "notional": want * price,
-                             "text": "开合约%s头 %s %s（市价%s，逐仓 %d×，占用保证金 ≈ %.2f USDT）"
+                             "text": "开合约%s头 %s %s（市价%s，%s %d×，占用保证金 ≈ %.2f USDT）"
                                      % (_dtxt, _num(want), bnc.symbol,
-                                        "买入" if _long else "卖出", lev,
+                                        "买入" if _long else "卖出", E.MARGIN_CN, lev,
                                         want * price / lev)})
                 if sf < 1.0:
                     notes.append("已按 %.1f%% 缩量留保证金缓冲（满仓时保证金会占满）。"
@@ -1094,7 +1277,8 @@ def run_action(bnc, act, cfg):
         if kind == "fut_setup":
             bnc.set_margin_type(b["margin_type"])
             bnc.set_leverage(b["leverage"])
-            return True, "-", "已设置 %s 逐仓 %d×" % (b["margin_type"], int(b["leverage"]))
+            return True, "-", "已设置 %s %s %d×" % (b["margin_type"], E.MARGIN_CN,
+                                                     int(b["leverage"]))
 
         if kind == "fut_leverage":
             # 只改杠杆。有持仓时不能改 marginType（币安 -4168），所以单独一条动作。
@@ -1102,23 +1286,83 @@ def run_action(bnc, act, cfg):
             return True, "-", "已把杠杆调到 %d×" % int(b["leverage"])
 
         if kind in ("fut_close", "fut_reduce", "fut_add", "fut_open"):
-            r = bnc.futures_market_order(
-                act["side"], act["qty_str"],
-                reduce_only=(kind in ("fut_close", "fut_reduce")))
+            _ro = kind in ("fut_close", "fut_reduce")
+            _note = ""
+            try:
+                r = bnc.futures_market_order(act["side"], act["qty_str"], reduce_only=_ro)
+            except Exception as e:
+                _msg = str(e)
+                # 只认「保证金不足」这一类。别把 -4131（持仓方向/价格带不匹配）
+                # 也算进来 —— 那种错误缩量重试一样会失败，只是多打一次请求。
+                _short_margin = ("-2019" in _msg
+                                 or "Margin is insufficient" in _msg)
+                if _ro and ("-2022" in _msg or "ReduceOnly" in _msg):
+                    # 快照之后仓位已经没了（被止损单打掉 / 手动平了 / 上一轮已平），
+                    # reduceOnly 单会被 -2022 拒掉。这不是失败 —— 目标状态已经达成。
+                    # 但也不能无条件当成功：万一是方向搞反了（快照过期），
+                    # 仓位其实还在。所以重读一次仓位再下结论。
+                    try:
+                        _left = to_float(bnc.futures_position().get("amt"))
+                    except Exception:
+                        _left = None
+                    if _left is not None and abs(_left) < 1e-9:
+                        return True, "-", "仓位已不存在（可能已被止损单平掉），视为已平仓"
+                    return False, "-", (
+                        "reduceOnly 平仓被 -2022 拒绝，但当前持仓仍为 %s"
+                        "（方向可能与预期不符）→ 请到币安核对"
+                        % ("%+.6f" % _left if _left is not None else "未知"))
+                if kind in ("fut_open", "fut_add") and _short_margin:
+                    # 动态降档：交易所仍判「保证金不足」时，按 95% 缩量重试一次。
+                    # 全仓模式下「按可用×杠杆开满」很容易踩到这条（手续费、
+                    # 维持保证金、可用余额的毫秒级波动都会让它差一点点）。
+                    _rule = bnc.rules("fut")
+                    _q1 = to_float(act.get("qty"))
+                    _px = (to_float(act.get("notional")) / _q1) if _q1 > 0 else 0.0
+                    _q2 = float(fmt_qty(_q1 * 0.95, _rule["step"]))
+                    _min_n = max(to_float(b.get("min_notional_usdt"), 20.0),
+                                 to_float(_rule.get("min_notional"), 0.0))
+                    if _q2 > 0 and _px > 0 and _q2 * _px >= _min_n:
+                        M.log("        ⚠ 保证金不足 → 自动缩量 5%% 重试：%s（原 %s）"
+                              % (fmt_qty(_q2, _rule["step"]), act["qty_str"]))
+                        r = bnc.futures_market_order(act["side"],
+                                                     fmt_qty(_q2, _rule["step"]),
+                                                     reduce_only=_ro)
+                        act["qty"] = _q2
+                        act["qty_str"] = fmt_qty(_q2, _rule["step"])
+                        act["notional"] = _q2 * _px
+                        _note = " · 保证金不足已自动缩量 5%"
+                    else:
+                        raise
+                else:
+                    raise
             oid = r.get("orderId", "-")
-            st = bnc.order_status("futures", oid) or {}
+            # 下单响应（newOrderRespType=RESULT）已经明确 FILLED 且有成交量时，
+            # 不必再查一次 orderStatus —— 每次查询都是额外的权重，
+            # 测试网共享 IP 配额极低，能省一次是一次。
+            _r_status = str(r.get("status") or "").upper()
+            _r_filled = to_float(r.get("executedQty"))
+            _r_avg = to_float(r.get("avgPrice"))
+            # ⚠ 除了 FILLED + 有成交量，还要求「均价 > 0」才跳过查询。
+            #   实测测试网 RESULT 响应里 avgPrice 是 0，日志会写成「成交 0.1096 @ 0.00」，
+            #   看着像没成交。均价为 0 时补查一次。
+            st = {} if (_r_status == "FILLED" and _r_filled > 0 and _r_avg > 0) \
+                else (bnc.order_status("futures", oid) or {})
             status = st.get("status") or r.get("status") or "SENT"
             # ⚠ 不能写 `st.get(x) or r.get(x)`：查询接口返回的 executedQty 是**字符串 "0"**，
             #   而 "0" 是 truthy，`or` 根本不会回退到下单响应里的真实成交量 →
             #   日志永远显示「成交 0」，而且「没成交」还被当成成功，下一轮重复下单。
             #   取两者最大值才是对的。
-            filled = max(to_float(st.get("executedQty")), to_float(r.get("executedQty")))
+            filled = max(to_float(st.get("executedQty")), _r_filled)
             avg = max(to_float(st.get("avgPrice")), to_float(r.get("avgPrice")))
             if filled <= 0 and status not in ("NEW", "PARTIALLY_FILLED"):
                 # 状态说成交了，但成交量是 0 —— 对不上，宁可停下让人查，也别继续加仓
                 return False, oid, ("%s · 成交 0（订单状态与成交量不一致，已停止，"
                                     "请到币安核对 #%s）" % (status, oid))
-            return True, oid, "%s · 成交 %s @ %.2f" % (status, _num(filled), avg)
+            if avg > 0:
+                return True, oid, "%s · 成交 %s @ %.2f%s" % (status, _num(filled), avg, _note)
+            # 均价拿不到时不要写 0.00（会让人以为没成交），如实说明
+            return True, oid, "%s · 成交 %s（交易所未返回均价）%s" % (
+                status, _num(filled), _note)
 
         if kind in ("transfer_in", "transfer_out"):
             direction = "in" if kind == "transfer_in" else "out"
@@ -1170,8 +1414,13 @@ def sync_stop_order(cfg, bnc, snap, price):
 
     幂等，重复跑安全：
       · 没有空头持仓 → 撤掉所有「触发即全平」的条件单
-      · 有空头持仓   → 必须恰好一张，触发价 = 成本价 ×(1+short_stop)
-        已有的那张价格差 < 0.3% 就不动，否则撤旧挂新
+      · 有空头持仓   → 必须恰好一张 BUY 单，触发价 = 成本价 ×(1+short_stop)
+        已有的那张价格差 < 0.3% 就不动，否则**先挂新、后撤旧**
+      · 成本价暂时读不到（刚开仓）→ 一张都不动，只报警（绝不撤单裸奔）
+      · 止损价已被击穿 → 直接市价平仓（等价于条件单触发）
+
+    返回 (acts, notes, errors)。**errors 非空 = 止损保护没到位**，
+    调用方必须据此判定本轮失败，不能当成「已对齐」。
 
     为什么要按「成本价」而不是现价：策略是固定止损（亏 5% 就走），
     不是移动止损。浮盈变大时止损价不会跟着抬，这一点邮件里也写明了。
@@ -1182,9 +1431,9 @@ def sync_stop_order(cfg, bnc, snap, price):
     """
     b = cfg["binance"]
     ss = to_float(cfg["strategy"].get("short_stop"))
-    acts, notes = [], []
+    acts, notes, errors = [], [], []
     if ss <= 0:
-        return acts, notes
+        return acts, notes, errors
 
     orders = bnc.fut_open_orders()
     stops = [o for o in orders
@@ -1194,17 +1443,47 @@ def sync_stop_order(cfg, bnc, snap, price):
     amt = snap["fut_amt"]
     entry = snap["fut_entry"]
 
+    def _cancel(o):
+        """撤单。「订单不存在」= 已经撤掉/已触发，不算失败。
+
+        算法条件单必须走 DELETE /fapi/v1/algoOrder，用 algoId；
+        拿它去普通撤单接口会报 -2011。
+        """
+        oid = o.get("orderId")
+        try:
+            if o.get("_algo"):
+                bnc.fut_cancel_algo(o.get("algoId") or oid)
+            else:
+                bnc.fut_cancel(oid)
+        except Exception as e:
+            _m = str(e)
+            if "-2011" in _m or "-2013" in _m or "Unknown order" in _m:
+                return False          # 本来就不在了
+            raise
+
     # 不是空头持仓（多头 / 空仓）→ 必须把「触发即全平」的条件单全部撤掉。
     # ⚠ 不能留着：closePosition=true 在触发时是「全平当前持仓」，与挂单时的方向无关。
     #   旧空头留下的 BUY 止损单如果留在多头仓位上，触发会把多头平掉。
     #   代价是「你手动给多头挂的保护单也会被撤」—— 本策略多头不设止损（回测验证过
     #   加了更差），所以这里以「不留能误平仓的孤儿单」优先。
-    if amt >= 0 or entry <= 0:
+    if amt >= 0:
         for o in stops:
-            bnc.fut_cancel(o["orderId"])
+            _cancel(o)
             acts.append("撤销止损单 #%s（当前不是空头持仓；本策略只给空头挂止损）"
                         % o["orderId"])
-        return acts, notes
+        return acts, notes, errors
+
+    # 有空头、但交易所还没返回成本价（刚开仓的那一瞬间常见）。
+    # ⚠ 以前这里和「空仓」合并处理，会顺手把已有止损单撤掉 —— 等于把仓位
+    #   从「有保护」改成「裸奔」。现在：算不出价就一张都不动，只报警。
+    if entry <= 0:
+        if stops:
+            notes.append("⚠ 读到空头 %+.6f 但成本价为 0（交易所尚未刷新）→ 保留现有 %d 张止损单，本轮不调整"
+                         % (amt, len(stops)))
+        else:
+            errors.append("空头 %+.6f 但成本价为 0，算不出止损价 → 当前【无止损保护】，请到币安手动挂"
+                          % amt)
+        return acts, notes, errors
 
     want = entry * (1.0 + ss)
     rule = bnc.rules("fut")
@@ -1214,27 +1493,71 @@ def sync_stop_order(cfg, bnc, snap, price):
     want = math.ceil(want / tick) * tick
     want_s = ("%.8f" % want).rstrip("0").rstrip(".")
 
-    keep = None
+    # 挑出「方向正确（BUY 平空）+ 触发价匹配」的那一张留下，其余算旧单。
+    # 以前不校验 side：一张 SELL 的 closePosition 单挂在空头上是孤儿单，
+    # 触发方向反了，会变成「平仓不成还加仓」。
+    keep, stale = None, []
     for o in stops:
         sp = to_float(o.get("stopPrice"))
-        if sp > 0 and abs(sp / want - 1.0) < 0.003:
+        if keep is None and str(o.get("side", "")).upper() == "BUY" \
+                and sp > 0 and abs(sp / want - 1.0) < 0.003:
             keep = o
-            break
-    for o in stops:
-        if keep and o["orderId"] == keep["orderId"]:
-            continue
-        bnc.fut_cancel(o["orderId"])
-        acts.append("撤销旧止损单 #%s（触发价 %s，已不匹配）"
-                    % (o["orderId"], o.get("stopPrice")))
+        else:
+            stale.append(o)
+
     if keep:
         notes.append("止损单已在：触发价 %s（#%s）" % (keep.get("stopPrice"), keep["orderId"]))
-        return acts, notes
+        for o in stale:
+            _cancel(o)
+            acts.append("撤销多余止损单 #%s（方向/触发价不匹配，触发价 %s）"
+                        % (o["orderId"], o.get("stopPrice")))
+        return acts, notes, errors
 
     wt = b.get("stop_working_type") or "MARK_PRICE"
-    r = bnc.fut_stop_market("BUY", want_s, working_type=wt)
+    # 触发基准：条件单按 MARK_PRICE 触发时，判断「是否已击穿」也必须用标记价，
+    # 否则会被一根插针骗着提前平仓（或反过来该平不平）。
+    basis = to_float(snap.get("fut_mark")) if wt == "MARK_PRICE" else to_float(price)
+
+    # 止损价已经被击穿 → 这张单挂上去必然被 -2021（Order would immediately trigger）拒掉，
+    # 而且它本来也救不了仓位。正确动作 = 立刻市价平仓，等价于止损单触发。
+    if basis > 0 and basis >= want:
+        q = abs(amt)
+        qs = fmt_qty(q, rule["step"])
+        if to_float(qs) <= 0:
+            errors.append("止损价 %.2f 已被击穿（%s %.2f），但持仓 %.6f 按 stepSize %s 取整为 0，"
+                          "无法自动平仓 → 请立即手动平仓"
+                          % (want, wt, basis, q, rule["step"]))
+            return acts, notes, errors
+        r = bnc.futures_market_order("BUY", qs, reduce_only=True)
+        acts.append("⚠ 止损价 %.2f 已被击穿（%s %.2f）→ 已市价买入平空 %s（#%s）"
+                    % (want, wt, basis, qs, r.get("orderId")))
+        notes.append("这等价于止损单触发。若下一根日线信号仍为空，会按新的成本价重新挂止损。")
+        return acts, notes, errors
+
+    # ⚠ 顺序必须是「先挂新、后撤旧」。
+    #   反过来（旧代码）一旦新单被拒（-2021 / -4131 / 精度），旧单已经撤掉了，
+    #   仓位当场变成无保护状态，而且这一轮还会被判定为成功。
+    try:
+        r = bnc.fut_stop_market("BUY", want_s, working_type=wt)
+    except Exception as e:
+        # 挂失败：旧单一张都不撤，保留残余保护，同时明确报错。
+        if stale:
+            errors.append("挂止损单失败（%s），已保留原有 %d 张止损单不动 → 请手动核对" % (e, len(stale)))
+        else:
+            errors.append("挂止损单失败（%s），当前【无止损保护】→ 请到币安手动挂 %.2f" % (e, want))
+        return acts, notes, errors
+
     acts.append("挂止损单：买入平空 · 触发价 %s · 市价 · %s（#%s）"
-                % (want_s, wt, r.get("orderId")))
-    return acts, notes
+                % (want_s, wt, r.get("algoId") or r.get("orderId")))
+    for o in stale:
+        try:
+            _cancel(o)
+            acts.append("撤销旧止损单 #%s（触发价 %s，已不匹配）"
+                        % (o["orderId"], o.get("stopPrice")))
+        except Exception as e:
+            # 撤不掉不影响新单已生效；下一轮还会再尝试，留个记录即可。
+            notes.append("⚠ 旧止损单 #%s 撤销失败（%s），下一轮重试" % (o["orderId"], e))
+    return acts, notes, errors
 
 
 def _execute(cfg, bnc, target_dir, expo, price, bar_date, sig_label,
@@ -1252,29 +1575,66 @@ def _execute(cfg, bnc, target_dir, expo, price, bar_date, sig_label,
         M.log("      提示：%s 这根日线之前已经执行过一次（%s），本次做对账补齐。"
               % (bar_date, tst.get("last_live_at") or "—"))
 
+    # 止损价被击穿时 _sync_stop 会直接市价平仓；标记一下，让调用方重取快照，
+    # 否则落盘的 last_fut_amt 还是平仓前的旧值（--status 会显示「还持有空头」）。
+    stop_closed = {"v": False}
+
     def _sync_stop(snap):
         """
         仓位动作做完后再对齐止损单 —— 顺序不能反：先有仓位才有止损。
         只有 auto_stop_order=true 才做，默认关闭（手动挂单的人不需要程序碰条件单）。
         """
         if not live or not to_float(cfg["binance"].get("auto_stop_order")):
-            return
+            return True
         try:
-            s_acts, s_notes = sync_stop_order(cfg, bnc, snap, price)
+            # 刚成交那一刻，positionRisk 有时还没带上 entryPrice（读到 0）。
+            # 此时直接判定「无保护」会误报，所以等 2 秒重取一次快照再试。
+            s_acts, s_notes, s_err = [], [], []
+            for attempt in (1, 2):
+                s_acts, s_notes, s_err = sync_stop_order(cfg, bnc, snap, price)
+                if s_err and any("成本价为 0" in e for e in s_err) and attempt == 1:
+                    time.sleep(2)
+                    snap = snapshot(bnc, price)
+                    continue
+                break
         except Exception as e:
             M.log("      ✘ 止损单对齐失败：%s（请手动到币安挂/撤条件单）" % e)
             rounds.append({"round": "stop", "actions": [],
                            "notes": ["止损单对齐失败：%s" % e]})
-            return
-        if s_acts or s_notes:
+            # 容错：发信失败不影响主流程，失败信息一定进邮件 + trade_run.log
+            send_trade_alert(cfg, "stop_fail", "止损单对齐失败",
+                             ["异常：%s" % e,
+                              "持仓：合约 %+.6f @ %.2f" % (snap["fut_amt"], snap["fut_entry"]),
+                              "→ 请立即到币安手动挂止损单（成本价 × %.2f）"
+                              % (1 + to_float(cfg["strategy"].get("short_stop")))],
+                             bar_date)
+            return False
+        if any("已被击穿" in x for x in s_acts):
+            stop_closed["v"] = True
+            # 这不是失败，但属于「风控已经动过手」，必须让人知道
+            send_trade_alert(cfg, "stop_triggered", "止损价被击穿，已市价平仓",
+                             s_acts + ["持仓：合约 %+.6f @ %.2f"
+                                       % (snap["fut_amt"], snap["fut_entry"])],
+                             bar_date, level="warn")
+        if s_acts or s_notes or s_err:
             M.log("      ── 止损单 ──")
             for x in s_acts:
                 M.log("      · " + x)
             for x in s_notes:
                 M.log("      " + x)
+            for x in s_err:
+                M.log("      ✘ " + x)
             rounds.append({"round": "stop",
                            "actions": [{"text": x} for x in s_acts],
-                           "notes": s_notes})
+                           "notes": list(s_notes) + ["✘ " + x for x in s_err]})
+        # ⚠ errors 非空 = 止损保护没到位。以前这里被静默吞掉，整轮照样报成功、
+        #   照样写 last_live_bar，用户以为一切正常，实际仓位是裸奔的。
+        if s_err:
+            send_trade_alert(cfg, "stop_fail", "止损单未就位（仓位可能无保护）",
+                             s_err + ["持仓：合约 %+.6f @ %.2f"
+                                      % (snap["fut_amt"], snap["fut_entry"])],
+                             bar_date)
+        return not s_err
 
     for rd in range(1, max_rounds + 1):
         snap = snapshot(bnc, price)
@@ -1288,6 +1648,12 @@ def _execute(cfg, bnc, target_dir, expo, price, bar_date, sig_label,
             tst["last_bar"] = bar_date
             tst["last_error"] = "账户权益为 0"
             save_trade_state(tst)
+            if live:
+                send_trade_alert(cfg, "equity_zero", "账户权益为 0，无法下单",
+                                 ["现货 %.6f / USDT %.2f / 合约钱包 %.2f"
+                                  % (snap["spot_qty"], snap["usdt_total"], snap["fut_wallet"]),
+                                  "→ 可能被强平或资金已全部划走，请到币安核对"],
+                                 bar_date)
             return False, rounds + [{"round": rd, "actions": [],
                                      "notes": ["账户权益为 0，无法计算目标仓位"]}], snap
         acts, notes = build_actions(cfg, bnc, snap, target_dir, expo, sig_label,
@@ -1312,7 +1678,9 @@ def _execute(cfg, bnc, target_dir, expo, price, bar_date, sig_label,
             M.log("      ✔ 已对齐，本轮无需下单")
             rounds.append({"round": rd, "actions": [], "notes": notes})
             if rd == 1:
-                _sync_stop(snap)
+                ok_stop = _sync_stop(snap)
+                if stop_closed["v"]:
+                    snap = snapshot(bnc, price)
                 # 即使没有任何动作也要刷新状态：否则「每天持仓不动」时
                 # last_run / last_bar 永远停在很久以前，--status 会误报成「很久没跑」。
                 tst["last_run"] = M.fdt()
@@ -1324,6 +1692,16 @@ def _execute(cfg, bnc, target_dir, expo, price, bar_date, sig_label,
                 tst["last_spot_qty"] = snap["spot_qty"]
                 tst["last_fut_amt"] = snap["fut_amt"]
                 tst["last_rounds"] = len(rounds)
+                if not ok_stop:
+                    # 仓位对齐了，但止损没挂上 → 不能报成功，否则用户以为有保护。
+                    tst["last_error"] = "仓位已对齐，但止损单未就位（见日志/邮件）"
+                    log_rows.append([M.fdt(), bar_date, sig_label, "stop_alert",
+                                     "futures", "-", "-", "%.2f" % price, "0.00",
+                                     "-", "FAIL",
+                                     "止损单未就位（详见邮件 / trade_run.log）"])
+                    append_trade_log(log_rows)
+                    save_trade_state(tst)
+                    return False, rounds, snap
                 save_trade_state(tst)
                 return True, rounds, snap
             break
@@ -1354,6 +1732,19 @@ def _execute(cfg, bnc, target_dir, expo, price, bar_date, sig_label,
                 tst["last_bar"] = bar_date
                 tst["last_error"] = "%s 失败：%s" % (a["kind"], detail)
                 save_trade_state(tst)
+                # 容错 + 通知：下单/平仓失败一律推邮件（同一天同类只发一封）
+                _is_close = a["kind"] in ("fut_close", "fut_reduce", "blocked",
+                                          "spot_sell_all", "spot_reduce")
+                send_trade_alert(
+                    cfg,
+                    "close_fail" if _is_close else "order_fail",
+                    "平仓失败（仓位可能未对齐）" if _is_close else "下单失败",
+                    ["动作：%s" % a["text"],
+                     "原因：%s" % detail,
+                     "当前持仓：现货 %.6f / 合约 %+.6f @ %.2f"
+                     % (snap["spot_qty"], snap["fut_amt"], snap["fut_entry"]),
+                     "已停止后续动作，避免只做了一半。请到币安核对后重跑。"],
+                    bar_date)
                 return False, rounds + [{"round": rd, "actions": acts, "notes": notes,
                                          "failed": detail}], snap
 
@@ -1379,14 +1770,34 @@ def _execute(cfg, bnc, target_dir, expo, price, bar_date, sig_label,
     if not converged:
         M.log("      ⚠ 已跑满 %d 轮仍有未完成动作（最后一轮 %d 个），请重跑或手工检查。"
               % (max_rounds, len(acts)))
+        if live:
+            send_trade_alert(cfg, "not_converged", "仓位未对齐（跑满轮数仍有动作）",
+                             ["剩余动作 %d 个：" % len(acts)]
+                             + ["· " + a["text"] for a in acts[:6]]
+                             + ["当前持仓：现货 %.6f / 合约 %+.6f @ %.2f"
+                                % (snap["spot_qty"], snap["fut_amt"], snap["fut_entry"]),
+                                "→ 请重跑，或到币安手动对齐"],
+                             bar_date)
 
     snap = snapshot(bnc, price)
+    ok_stop = _sync_stop(snap)
+    if not ok_stop:
+        # 止损单没就位也要在 csv 里留一行 FAIL，否则事后只看成交明细
+        # 会以为「这笔完全没问题」，而实际仓位当时是没保护的。
+        log_rows.append([M.fdt(), bar_date, sig_label, "stop_alert", "futures", "-",
+                         "-", "%.2f" % price, "0.00", "-", "FAIL",
+                         "止损单未就位（详见邮件 / trade_run.log）"])
     append_trade_log(log_rows)
-    _sync_stop(snap)
+    if stop_closed["v"]:
+        snap = snapshot(bnc, price)
 
-    if live and converged:
+    if live and converged and ok_stop:
         tst["last_live_bar"] = bar_date
         tst["last_live_at"] = M.fdt()
+    elif live and converged and not ok_stop:
+        # 仓位 OK 但止损没就位：不写 last_live_bar（否则同一天重跑只会提示「已执行过」），
+        # 留 last_error 让 --status 和邮件一眼看到「还没真正搞定」。
+        tst["last_error"] = "仓位已对齐，但止损单未就位（见日志/邮件）"
     elif live and not converged:
         # ⚠ 没收敛时**绝不能**记 last_live_bar：否则下次同一天重跑只会提示
         #   「这根之前已经执行过」，用户以为已搞定就不补了 → 仓位长期不对齐。
@@ -1402,7 +1813,8 @@ def _execute(cfg, bnc, target_dir, expo, price, bar_date, sig_label,
     tst["last_fut_amt"] = snap["fut_amt"]
     tst["last_rounds"] = len(rounds)
     save_trade_state(tst)
-    return converged, rounds, snap
+    # 仓位收敛 ≠ 一切就绪：止损单没挂上也算失败（否则调用方按 ok=True 继续往下走）。
+    return (converged and ok_stop), rounds, snap
 
 
 def preview(cfg, bnc, target_dir, expo, price, sig_label, resize=None):
@@ -1423,13 +1835,23 @@ def show_status(cfg, bnc, bar_date, sig_label, target_dir, expo, price):
     M.log("")
     M.log("【账户快照】")
     M.log("  连接：%s" % bnc.endpoint_label())
-    M.log("  现货 %-6s %.8f（市值 %.2f USDT，可用 %.8f）"
-          % (bnc.base, snap["spot_qty"], snap["spot_val"], snap["spot_free"]))
-    M.log("  USDT          可用 %.2f / 合计 %.2f" % (snap["usdt_free"], snap["usdt_total"]))
+    # 双腿走合约时不显示现货（账户里本来就没有），免得每次都说「现货 0」
+    if not E.LONG_ON_FUT or snap["spot_qty"] > 0 or snap["usdt_total"] > 0:
+        M.log("  现货 %-6s %.8f（市值 %.2f USDT，可用 %.8f）"
+              % (bnc.base, snap["spot_qty"], snap["spot_val"], snap["spot_free"]))
+        M.log("  USDT          可用 %.2f / 合计 %.2f"
+              % (snap["usdt_free"], snap["usdt_total"]))
     if snap["fut_amt"]:
-        M.log("  合约 %-6s %+.3f @ %.2f · 浮盈 %+.2f · %d× 逐仓 · 保证金 %.2f · 强平价 %.2f"
+        # 全仓时 positionRisk.isolatedMargin 恒为 0，直接显示会变成「保证金 0.00」，
+        # 和同屏的「占用保证金 ≈ 3508 U」自相矛盾。展示口径改成 名义÷杠杆；
+        # build_actions 里的 released 计算仍用原字段（那里要区分是否已含浮盈）。
+        _show_margin = snap["fut_margin"]
+        if E.MARGIN_TYPE == "CROSSED" or _show_margin <= 0:
+            _show_margin = (abs(snap["fut_amt"]) * snap["fut_entry"]
+                            / (snap["fut_lev"] or 1))
+        M.log("  合约 %-6s %+.3f @ %.2f · 浮盈 %+.2f · %d× %s · 保证金 %.2f · 强平价 %.2f"
               % (bnc.symbol, snap["fut_amt"], snap["fut_entry"], snap["fut_upnl"],
-                 snap["fut_lev"] or 0, snap["fut_margin"], snap["fut_liq"]))
+                 snap["fut_lev"] or 0, E.MARGIN_CN, _show_margin, snap["fut_liq"]))
     else:
         M.log("  合约 %-6s 无持仓" % bnc.symbol)
     # 空头止损价：查看账户时也直接看得到，不用翻邮件
@@ -1437,6 +1859,24 @@ def show_status(cfg, bnc, bar_date, sig_label, target_dir, expo, price):
     if _ss > 0 and snap["fut_amt"] < 0 and snap["fut_entry"] > 0:
         M.log("  空头止损价 %.2f（成本价 × %.2f，逆行 %.0f%% 市价买回）"
               % (snap["fut_entry"] * (1 + _ss), 1 + _ss, _ss * 100))
+    # 交易所上**真实挂着**的条件单。理论止损价和实际挂单可能不一致
+    # （手动挂错 / 改单失败 / 旧单没撤干净），只读查看时必须能看出来。
+    try:
+        _live_stops = [o for o in bnc.fut_open_orders()
+                       if o.get("type") in ("STOP_MARKET", "STOP")
+                       and str(o.get("closePosition")).lower() == "true"]
+    except Exception as e:
+        _live_stops = None
+        M.log("  已挂止损单：读取失败（%s）" % e)
+    if _live_stops is not None:
+        if _live_stops:
+            for o in _live_stops:
+                M.log("  已挂止损单 #%s：%s · 触发价 %s · %s"
+                      % (o.get("orderId"), o.get("side"), o.get("stopPrice"),
+                         o.get("workingType") or "—"))
+        else:
+            _warn = "  ⚠ 空头当前无止损保护！" if (snap["fut_amt"] < 0 and _ss > 0) else ""
+            M.log("  已挂止损单：无%s" % _warn)
     M.log("  账户权益 %.2f USDT · 合约可用保证金 %.2f" % (snap["equity"], snap["available"]))
     M.log("")
     M.log("【策略目标】")
@@ -1505,8 +1945,8 @@ def main():
     M.log("  %s 命令行 --live %s" % ("✔" if live_flag else "✘",
                                      "已加" if live_flag else "未加"))
     M.log("  连接目标：%s" % bnc.endpoint_label())
-    M.log("  杠杆：%d× 逐仓 · %s（下单量系数随敞口变化）"
-          % (int(b["leverage"]),
+    M.log("  杠杆：%d× %s · %s（下单量系数随敞口变化）"
+          % (int(b["leverage"]), E.MARGIN_CN,
              "双腿均走合约" if E.LONG_ON_FUT else "多头现货 / 空头合约"))
     M.log("  波动率目标 %.1f%% · 敞口上限 %.2f×"
           % (float(st["vt"]) * 100, float(st["exposure_cap"])))
@@ -1669,8 +2109,16 @@ if __name__ == "__main__":
         sys.exit(main())
     except SystemExit:
         raise
-    except Exception:
+    except Exception as e:
         err = traceback.format_exc()
+        _msg = str(e)
+        # 限流封禁不是「代码出错」，不该甩一整页 traceback 让人以为程序坏了。
+        if "HTTP 418" in _msg or "-1003" in _msg:
+            M.log("")
+            M.log("✘ 被币安限流封禁，本次没有执行任何下单动作。")
+            M.log(_msg)
+            M.log("  等解封后重跑即可；这期间别反复重试（会延长封禁）。")
+            sys.exit(6)
         M.log("运行出错：")
         M.log(err)
         try:

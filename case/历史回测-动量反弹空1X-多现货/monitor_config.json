@@ -12,10 +12,10 @@
     "port": 465,
     "use_ssl": true,
     "max_retries": 6,
-    "strategy_label": "BTC动量策略 · SMA50过滤 双腿合约 2× 逐仓"
+    "strategy_label": "BTC动量策略 · SMA50过滤 双腿合约 2× 全仓"
   },
   "binance": {
-    "_说明": "默认关闭。要真实下单需同时满足：enabled=true、填好 api_key/api_secret、运行一键下单.bat（等于加 --live）。auto_live=true 时，定时任务（每天 08:02 自动跑）也会真实下单 —— 这就是「无人值守全自动」。⚠ 打开前务必先用一键下单.bat 的演练模式确认计划正确，并且 enabled=true、API Key 已填；三者缺一，auto_live 也不会生效。use_testnet=false 表示连实盘，改成 true 或加 --testnet 参数可连测试网。leverage 只影响保证金占用与爆仓线，不影响收益：1× 要价格逆行 100% 才爆仓，2× 只要 50%。杠杆同时是「敞口能开多大」的物理上限——名义 = 权益×敞口，保证金 = 名义/杠杆，所以 leverage 必须 ≥ exposure_cap，否则敞口开不出去（引擎会自动缩到 eq×L）。rebalance_tolerance 是「目标与实际差多少才动手」，0.02 = 名义差 2% 以内不动，避免天天小额调整磨损手续费。resize_on_drift=false（默认）= 只在进场那天按「权益×敞口」定名义，持仓期间不再调仓（与回测完全一致）；改成 true 会每天把名义对齐到当日敞口，实测会大幅拖累收益，不要开。fee_buffer 是下单时预留的手续费比例。 proxy 留空=直连；如果这台机器必须挂代理才能连币安，填 http://127.0.0.1:7890 这种本地代理地址，否则查余额/下单会报网络错误。 auto_stop_order=true 时，真实下单完成后会自动挂/撤空头止损条件单（默认 false = 不碰你的条件单，按邮件里的止损价自己挂）。⚠ 加仓后成本价会变加权平均，手动挂单容易按邮件里的旧成本价算错；想让止损自动跟随真实成本价，就把这项改成 true。stop_working_type 是触发基准：MARK_PRICE（标记价格，抗插针，默认）或 CONTRACT_PRICE（最新成交价，与回测口径一致）。",
+    "_说明": "默认关闭。要真实下单需同时满足：enabled=true、填好 api_key/api_secret、运行一键下单.bat（等于加 --live）。auto_live=true 时，定时任务（每天 08:02 自动跑）也会真实下单 —— 这就是「无人值守全自动」。⚠ 打开前务必先用一键下单.bat 的演练模式确认计划正确，并且 enabled=true、API Key 已填；三者缺一，auto_live 也不会生效。use_testnet=false 表示连实盘，改成 true 或加 --testnet 参数可连测试网。leverage 只影响保证金占用与爆仓线，不影响收益：1× 要价格逆行 100% 才爆仓，2× 只要 50%。杠杆同时是「敞口能开多大」的物理上限——名义 = 权益×敞口，保证金 = 名义/杠杆，所以 leverage 必须 ≥ exposure_cap，否则敞口开不出去（引擎会自动缩到 eq×L）。rebalance_tolerance 是「目标与实际差多少才动手」，0.02 = 名义差 2% 以内不动，避免天天小额调整磨损手续费。resize_on_drift=false（默认）= 只在进场那天按「权益×敞口」定名义，持仓期间不再调仓（与回测完全一致）；改成 true 会每天把名义对齐到当日敞口，实测会大幅拖累收益，不要开。fee_buffer 是下单时预留的手续费比例。 proxy 留空=直连；如果这台机器必须挂代理才能连币安，填 http://127.0.0.1:7890 这种本地代理地址，否则查余额/下单会报网络错误。 auto_stop_order=true 时，真实下单完成后会自动挂/撤空头止损条件单（当前 true = 自动维护；改成 false 才是不碰你的条件单，按邮件里的止损价自己挂）。⚠ 加仓后成本价会变加权平均，手动挂单容易按邮件里的旧成本价算错；想让止损自动跟随真实成本价，就把这项改成 true。stop_working_type 是触发基准：MARK_PRICE（标记价格，抗插针，默认）或 CONTRACT_PRICE（最新成交价，与回测口径一致）。",
     "enabled": false,
     "auto_live": false,
     "use_testnet": false,
@@ -28,12 +28,13 @@
     "proxy": "",
     "symbol": "BTCUSDT",
     "leverage": 2,
-    "margin_type": "ISOLATED",
+    "margin_type": "CROSSED",
     "min_notional_usdt": 20.0,
     "rebalance_tolerance": 0.02,
     "resize_on_drift": false,
     "fee_buffer": 0.002,
-    "auto_stop_order": false,
+    "margin_use_ratio": 0.995,
+    "auto_stop_order": true,
     "stop_working_type": "MARK_PRICE"
   },
   "strategy": {

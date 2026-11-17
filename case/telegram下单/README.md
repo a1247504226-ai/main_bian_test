@@ -536,29 +536,35 @@ python main.py serve
 
 ## 测试网端到端自测（真实消息完整链路）
 
-主网下单前，想在测试网完整验证「开仓 → 改止盈止损 → TP1 移损 → 平仓」这条链路
-（真实测试网、虚拟资金），跑这个脚本。**它走的是和实盘一模一样的代码路径**：
-真实 TG 消息文本 → `signal_parser.parse` → `Trader.on_message` → `Executor`，
-不是直接构造 Signal 的简化测试。
+主网下单前，想在测试网完整验证下单链路（真实测试网、虚拟资金），跑这个脚本。
+**它走的是和实盘一模一样的代码路径**：真实 TG 消息文本 → `signal_parser.parse`
+→ `Trader.on_message` → `Executor`，不是直接构造 Signal 的简化测试。
 
 ```bash
 # 必须用 Python 3.9（工作区自带的 3.13 缺 requests/yaml）
 # 直连币安若被 418 封，就带上 BINANCE_PROXY
-BINANCE_PROXY=http://127.0.0.1:7897 py -3.9 testnet_e2e.py --symbol GRASSUSDT --side short --wait 8
+BINANCE_PROXY=http://127.0.0.1:7897 py -3.9 testnet_e2e.py --mode split --symbol GRASSUSDT --side short --wait 8
 ```
 
-它做的事（四步，每步都打印解析结果和 pending 状态）：
+两种模式（`--mode`），覆盖真实频道的两条主要路径：
+
+**`--mode split`（默认推荐，频道最常见形态）**：开仓不带价位挂兜底，止盈/止损分两条发。
 
 | 步骤 | 消息 | 验证点 |
 |------|------|--------|
-| ① | `#GRASSUSDT 现价空` + 多档止盈 + 止损 | `tp_all` 多档解析、真实价位挂单 |
-| ② | `#GRASSUSDT` + 新止盈止损 | TPSL 改单，撤旧挂新 |
-| ③ | `#GRASSUSDT TP1 止盈减仓拿下` | 移损：正确时上移止损，误报时安全跳过 |
-| ④ | `#GRASSUSDT 离场` | 市价平仓 + 清残留挂单 |
+| ① | `#GRASSUSDT 现价空` | 兜底保护挂单 |
+| ② | `止盈：...`（不带币种） | TPSLBuffer 缓存等齐 |
+| ③ | `止损：...`（不带币种） | 补齐→无币种归属确认→改单 |
+| ④ | `#GRASSUSDT TP2 已抵达` | 移损：误报安全跳过、保留保护 |
+| ⑤ | `#GRASSUSDT 离场` | 市价平仓 + 清残留挂单 |
+
+**`--mode full`**：信号自带多档止盈止损。开仓(自带三档止盈)→TPSL改单→TP1移损→离场平仓，
+测 `tp_all` 多档解析和真实价位挂单。
 
 参数：
 
 ```bash
+--mode split|full    # 链路形态，见上
 --symbol GRASSUSDT   # 币种（测试网有的话随便选；GRASS/BTC/ETH 都有）
 --side short         # long / short
 --wait 8             # 每步间隔秒数（默认 8，改单撤单确认需要几秒）
@@ -568,12 +574,12 @@ BINANCE_PROXY=http://127.0.0.1:7897 py -3.9 testnet_e2e.py --symbol GRASSUSDT --
 **注意**：
 - 脚本默认走测试网、真实下单（虚拟资金），会真的开仓/改单/平仓，不是 dry-run；
   告警邮件和 TG 推送在脚本里被替换成打印，不会真发。
-- 每跑一次约 1 分钟（三个 `--wait 8`）。
+- 每跑一次约 1 分钟（三~四个 `--wait 8`）。
 - 依赖 `.env.bot` 里的测试网 key；若直连币安不通，按第「币安 418」节配 `BINANCE_PROXY`。
 - 脚本在**工作区目录**（`C:/Users/hongji/WorkBuddy AI/.../testnet_e2e.py`），不在 bot 目录。
 - **账户若有其它仓位/挂单锁着保证金**，新仓名义会自动按币安真实 `availableBalance` 下调
   （留 1% 安全垫），否则会被币安 `-2019 Margin is insufficient` 拒单。日志里会打印
-  「币安可用 XXXU」。测试网账户有一笔历史全仓 BTC 空单，所以 GRASS 名义会被压到 ~3750U，属正常。
+  「币安可用 XXXU」。测试网账户有一笔历史全仓 BTC 空单，所以 GRASS 名义会被压到 ~3980U，属正常。
 - 连亏 3 笔会触发风控熔断：熔断只挡新开仓，不挡平仓（离场信号照常执行），属预期行为。
 - **主网首单前检查**：`python main.py positions` 确认无遗留全仓仓（模式列应为「逐仓」），
   无残留挂单；机器人开仓一律强制逐仓，但历史手动仓可能是全仓，会占用整个账户保证金。
