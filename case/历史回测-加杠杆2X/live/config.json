@@ -1,0 +1,40 @@
+{
+  "symbol": "BTCUSDT",
+  "signal_timeframe": "1h",
+  "filter_timeframe": "4h",
+  "ema_fast": 50,
+  "ema_slow": 200,
+  "leverage": 2.0,
+  "initial_equity": 1000,
+  "stop_atr": 8.0,
+  "cooldown_bars": 24,
+  "fee": 0.0005,
+  "slip": 0.0003,
+  "daily_email_hour": 8,
+  "email": {
+    "enabled": true,
+    "sender": "a1247504226@163.com",
+    "password": "XKCINXNMOMMDCAFI",
+    "to": [
+      "1247504226@qq.com"
+    ],
+    "server": "smtp.163.com",
+    "port": 465,
+    "use_ssl": true,
+    "max_retries": 3
+  },
+  "exchange": {
+    "enabled": true,
+    "testnet": true,
+    "api_key": "riufKUh5kdZNF0eOiHo2eLRPVXOFlPAxbVIdePgK3e0EIbeOmFqGIaryTTT0u9fb",
+    "api_secret": "FG6lfFCmNnG0ieStXhQ9QTfaM3ix1Pb5tLksdwvnwq8aUVSinGuzyH6ID2gZJQpO",
+    "testnet_api_key": "riufKUh5kdZNF0eOiHo2eLRPVXOFlPAxbVIdePgK3e0EIbeOmFqGIaryTTT0u9fb",
+    "testnet_api_secret": "FG6lfFCmNnG0ieStXhQ9QTfaM3ix1Pb5tLksdwvnwq8aUVSinGuzyH6ID2gZJQpO",
+    "leverage": 2.0,
+    "notional_usdt": 150,
+    "margin_type": "CROSSED",
+    "min_interval_sec": 1.0,
+    "_key_note": "api_key/api_secret=实盘下单用(切主网时换主网Key并设testnet=false,allow_mainnet=true)；testnet_api_key/testnet_api_secret=test_order.py测试网自测专用,永远不要改成主网Key",
+    "comment": "testnet=True 时只连测试网；enabled=False 则完全不触发真实下单"
+  }
+}

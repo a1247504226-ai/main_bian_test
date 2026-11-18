@@ -1,0 +1,113 @@
+# ============ 环境开关 ============
+# testnet: true  → 币安测试网 https://testnet.binancefuture.com（虚拟资金，默认）
+# testnet: false → 币安主网   https://fapi.binance.com（真实资金）
+#
+# 也可以用命令行临时切换，不用改这里：
+#   python trader.py            # 走这里的设置（默认测试网）
+#   python trader.py --testnet  # 强制测试网
+#   python trader.py --mainnet  # 切主网（需要 .env.bot 里的 BINANCE_MAINNET_API_KEY）
+testnet: true
+
+# dry_run=true 只打印不真下单。确认无误后再改 false 或命令行加 --live
+dry_run: true
+
+# ============ 下单 ============
+# 杠杆。3x = 保证金 50% 可撬动 150% 名义
+leverage: 3
+
+# 单笔保证金占账户权益比例（这才是你真正"拿多少钱去做这个仓"）
+# 0.50 = 每仓用一半权益做保证金 → 3x 下名义 150%
+# 注意：这样最多开 2 个仓（50% × 2 = 100% 保证金），没有缓冲
+# 想开更多仓就调小：0.30 → 3 仓，0.25 → 4 仓，0.15 → 6 仓
+margin_pct: 0.50
+
+# 开仓时立即挂的兜底止盈止损（等真实值到了再 amend 替换）
+# 止盈 7%、止损 5%：止损收紧一点，减少单笔亏损
+provisional_sl_pct: 5.0
+provisional_tp_pct: 7.0
+
+# ============ 风控 ============
+# 杠杆上限（必须 >= 上面的 leverage，否则全部拒单）
+max_leverage: 3
+
+# 单笔名义敞口上限（名义/权益）。3x + margin 50% → 名义 150%
+max_position_pct: 1.50
+
+# 单笔保证金上限
+max_margin_pct: 0.50
+
+# 全部持仓保证金合计上限
+# 1.00 = 允许 50%×2 开满两仓；逐仓模式下每仓独立强平，互不影响
+max_total_margin_pct: 1.00
+
+# 最多同时持有几个仓
+max_open_positions: 2
+
+# 单币种累计名义敞口上限（必须 >= 单笔名义 1.50，否则全部拒单）
+max_symbol_exposure_pct: 1.50
+
+# 当日亏损达 20% 停止开新仓
+# 3x 下每笔止损亏 7.5% 权益，20% 约等于 2.6 笔，留出连亏缓冲
+# 不能设小于 7.5%，否则第一笔止损就熔断，当天再也开不了仓
+daily_loss_limit_pct: 0.20
+
+# 连亏 3 笔熔断，需人工解除
+max_consecutive_losses: 3
+
+# 币安合约最小名义 5 USDT
+min_order_notional: 5.0
+
+# 交易对白名单，null 表示不限制
+allowed_symbols: null
+# allowed_symbols:
+#   - BTCUSDT
+#   - ETHUSDT
+#   - HBARUSDT
+
+# 信号文本含这些词就跳过不开仓
+# 补仓需要人工判断时机，自动化跟不了，仍跳过
+skip_keywords:
+  - 补仓
+
+# 轻仓信号：不跳过，改用小仓位尝试（用户 2026-11-18 要求）
+# 命中下面任一关键词 → 用 light_leverage 杠杆 + light_margin_pct 保证金开仓
+# 止盈止损、入场位、TP/LP 到达判断等其余逻辑全部不变
+light_keywords:
+  - 轻仓
+light_margin_pct: 0.10    # 保证金 = 账户权益的 10%（"所有的10%"）
+light_leverage: 3         # 轻仓也用 3x（和常规一样，只是仓位小；用户 2026-11-18 更正）
+
+# 挂单（限价）信号是否跳过
+# 频道发「挂单多 分批进场：3.13-3.08」时，是让你在区间内挂限价单。
+# 市价开仓会开在当前价，可能远离区间，所以默认跳过（7.3% 的信号属于这类）
+skip_limit_orders: true
+
+# 同币反向信号是否自动反手（先平旧仓再开新仓）
+# false = 只发告警并跳过。频道偶尔会「空单还在又喊做多」，
+#         自动反手在误判时会双向亏损，所以默认保守
+allow_reverse: false
+
+# ============ TG 频道监听 ============
+# 申请步骤：手机登录 https://my.telegram.org → API development tools
+#          → 创建应用 → 拿 api_id（数字）和 api_hash（32位字符串）
+# 密钥也可以放 .env.bot 里（TG_API_ID / TG_API_HASH / TG_PHONE / TG_CHANNEL）
+tg_api_id: 0
+tg_api_hash: ""
+tg_phone: ""                    # 带国家码，如 +8613800138000
+tg_channel: ""                  # @频道用户名 / https://t.me/xxx / -100xxxxxxx
+tg_session: tg_session          # 登录后生成的 session 文件（别提交到 git）
+tpsl_ttl_sec: 90                # 止盈止损只收到一半时，等多少秒
+
+# ============ 运维 ============
+state_dir: state
+log_dir: logs
+health_port: 8080
+# serve 模式下主动 ping 币安做存活检测的间隔秒数。0 = 不主动 ping（完全「有信号才连币安」）
+health_ping_interval: 0
+
+# 后台巡检：只有「有待管理仓位」时才查币安，空闲时零请求
+# 有仓位时多久查一次真实持仓（秒），用来清理已被条件单平掉的仓位
+pos_check_interval: 300         # 5 分钟
+# 启动时打印一次现有持仓（会发 1 次请求）。默认 false = 启动完全不碰币安
+# 想重启后确认还有哪些仓没平，改成 true
+print_positions_on_start: false
