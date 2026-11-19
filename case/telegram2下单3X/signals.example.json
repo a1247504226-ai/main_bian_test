@@ -1,0 +1,17 @@
+[
+  {
+    "symbol": "BTCUSDT",
+    "direction": "short",
+    "entry": 83500,
+    "signal_id": "tg-20261109-001"
+  },
+  {
+    "symbol": "ETHUSDT",
+    "direction": "short",
+    "entry": 2390,
+    "tp1": 2330,
+    "sl": 2450,
+    "margin_pct": 0.30,
+    "signal_id": "tg-20261109-002"
+  }
+]

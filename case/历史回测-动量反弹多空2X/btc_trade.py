@@ -930,7 +930,7 @@ def build_actions(cfg, bnc, snap, target_dir, expo, sig_text_now, resize=None):
     # 平仓后交易所可能留 -1e-17 这种尾巴，它会让「有持仓」成立，
     # 然后 qty_problem 按 stepSize 取整成 0 → 每轮跳过 → 仓位彻底卡死。
     have_fut = snap["fut_amt"]
-    if abs(have_fut) < float(r_fut["step"]) * 0.5:
+    if abs(have_fut) <= float(r_fut["step"]) * 0.5:
         have_fut = 0.0
 
     # ---- 持仓期间不调仓（回测口径）----
@@ -1528,9 +1528,60 @@ def sync_stop_order(cfg, bnc, snap, price):
                           "无法自动平仓 → 请立即手动平仓"
                           % (want, wt, basis, q, rule["step"]))
             return acts, notes, errors
-        r = bnc.futures_market_order("BUY", qs, reduce_only=True)
+        # 击穿 = 等价止损触发，必须像真平仓一样确认「确实成交」，
+        # 不能只看返回就记成功（曾有分支下单返回但 0 成交，仓位还在却报平掉）。
+        try:
+            r = bnc.futures_market_order("BUY", qs, reduce_only=True)
+            oid = r.get("orderId", "-")
+            _r_filled = to_float(r.get("executedQty"))
+            _r_avg = to_float(r.get("avgPrice"))
+            _st = {}
+            # 响应没有明确的成交量/均价时补查一次，确认真的成交
+            if not (_r_filled > 0 and _r_avg > 0):
+                try:
+                    _st = bnc.order_status("futures", oid) or {}
+                except Exception:
+                    _st = {}
+            filled = max(to_float(_st.get("executedQty")), _r_filled)
+            if filled <= 0:
+                # -2022 表示仓位已不在（可能刚被条件单自己打掉），重读确认
+                try:
+                    _left = to_float(bnc.futures_position().get("amt"))
+                except Exception:
+                    _left = None
+                if _left is not None and abs(_left) < 1e-9:
+                    filled = 0.0  # 仓位确实没了，视为已平
+                else:
+                    errors.append("止损击穿后市价平仓单 #%s 返回但成交量为 0，"
+                                  "当前持仓 %s → 仓位可能仍在，请立即手动平仓！"
+                                  % (oid, "%+.6f" % _left if _left is not None else "未知"))
+                    return acts, notes, errors
+        except Exception as e:
+            _m = str(e)
+            if "-2022" in _m or "ReduceOnly" in _m:
+                try:
+                    _left = to_float(bnc.futures_position().get("amt"))
+                except Exception:
+                    _left = None
+                if _left is not None and abs(_left) < 1e-9:
+                    oid = "-"
+                else:
+                    errors.append("止损击穿平仓被 -2022 拒绝且仓位仍在（%s）→ 请手动平仓"
+                                  % ("%+.6f" % _left if _left is not None else "未知"))
+                    return acts, notes, errors
+            else:
+                errors.append("止损击穿后市价平仓失败：%s → 请立即手动平仓！" % e)
+                return acts, notes, errors
         acts.append("⚠ 止损价 %.2f 已被击穿（%s %.2f）→ 已市价买入平空 %s（#%s）"
-                    % (want, wt, basis, qs, r.get("orderId")))
+                    % (want, wt, basis, qs, oid))
+        # 仓位平掉后，所有 closePosition 条件单都要撤干净（含 stale 旧单和
+        # 那张方向/价格匹配的 keep 单）——否则残留单会在下次触发时空平或误伤。
+        for o in stops:
+            try:
+                _cancel(o)
+                acts.append("撤销残留止损单 #%s（击穿平仓后清理）" % o["orderId"])
+            except Exception as e:
+                notes.append("⚠ 残留止损单 #%s 撤销失败（%s），请手动核对" % (o["orderId"], e))
         notes.append("这等价于止损单触发。若下一根日线信号仍为空，会按新的成本价重新挂止损。")
         return acts, notes, errors
 

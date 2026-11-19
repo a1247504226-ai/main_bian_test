@@ -1704,12 +1704,16 @@ def main():
     # ⚠ 但「只读」参数（--no-mail / --dump-html）必须挡住 auto_live ——
     #   否则用户只想看一眼（比如 --no-mail 检查数据），却真的开了仓。
     if not live and bool((cfg.get("binance") or {}).get("auto_live")):
-        # ⚠ --json / --dump-html / --no-mail / --no-trade 全是「只读/导出」语义，
-        #    绝不能因为 auto_live=true 就真的去下单。尤其是 --json 只是附带导出，
-        #    用户只想导出一份结果 → 否则开着 auto_live 跑 --json 就会误开仓。
-        if no_mail or html_out or json_out or no_trade:
-            log("  ℹ 本次带 --no-mail / --dump-html / --json / --no-trade（只读），"
-                "已忽略 binance.auto_live，不会下单")
+        # ⚠ --json / --dump-html / --no-mail / --no-trade 是「只读/导出」语义，
+        #   --refresh（仅重拉行情）/ --force-mail（仅重发信）/ --reset-state（仅清本地状态）
+        #   都不是「我要下单」的指令。这些参数单独出现时，用户意图都是查/维护，
+        #   绝不能因为 auto_live=true 就真的开仓（曾漏掉 refresh/reset/force-mail → 误下单）。
+        #   只有「不带任何这类参数」才让 auto_live 生效（定时任务就是裸跑）。
+        readonly_intent = (no_mail or html_out or json_out or no_trade
+                           or refresh or force_mail or reset)
+        if readonly_intent:
+            log("  ℹ 本次带只读/维护参数（--no-mail/--dump-html/--json/--no-trade/"
+                "--refresh/--force-mail/--reset-state），已忽略 binance.auto_live，不会下单")
         else:
             live = True
             log("  ⚠ binance.auto_live = true → 本次按 --live 执行（会真实下单）")
